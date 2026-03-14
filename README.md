@@ -12,8 +12,13 @@ A cross-platform voice conversation agent with an architecture-first design.
 ## Project Structure
 
 ```
-core/                   # Agent framework: controller, context, policy
-llm/                    # LLM client: OpenAI compatible HTTP + SSE
+core/                   # Agent framework: controller, context, policy, session
+  interfaces/           #   Abstract interfaces (LlmClient, IoBridge, etc.)
+services/               # Concrete implementations of core interfaces
+  llm/                  #   OpenAI compatible LLM client (HTTP + SSE)
+  memory/               #   In-memory MemoryStore
+  audit/                #   spdlog-based AuditSink
+  io/                   #   Tool registry + dispatcher (IoBridge impl)
 io/                     # IO module (namespace: shizuru::io)
   audio/                #   Audio subsystem (C++)
     audio_device/
@@ -25,8 +30,10 @@ io/                     # IO module (namespace: shizuru::io)
       port_audio/       #     PortAudio backend (desktop)
       oboe/             #     Oboe backend (Android, planned)
       core_audio/       #     CoreAudio backend (iOS, planned)
-runtime/                # Control plane, data plane, session lifecycle
-tests/                  # C++ tests
+runtime/                # AgentRuntime: assembles all components, session lifecycle
+tests/
+  agent/                #   Unit + property tests for core modules
+  services/             #   Unit tests for services (json_parser, tool_dispatcher)
 ui/                     # Flutter app (planned)
 ```
 
@@ -68,7 +75,43 @@ Voice capabilities are IO devices/services for the agent, not hard-coded pipelin
 
 ## TODO
 
+### Build & Infrastructure
+- [ ] Install OpenSSL and enable HTTPS support in `services/llm/CMakeLists.txt` (required for `https://api.openai.com`; currently only HTTP endpoints like Ollama work)
+- [ ] Fix PortAudio CMake compatibility warning (`cmake_minimum_required < 3.10` deprecated in CMake 4.x) — upstream PortAudio issue, track for update
+- [ ] Add Ninja generator support documentation for faster builds on Windows
+- [ ] Add CI pipeline (GitHub Actions) for automated build + test
+
+### Agent Framework
+- [ ] `runtime/config_loader.h/.cpp` — Load `RuntimeConfig` from JSON/YAML file instead of hardcoding
+- [ ] Persistent `MemoryStore` implementation (SQLite or file-based) to survive process restarts
+- [ ] Implement `ResolveApproval` in `PolicyLayer` for interactive human-in-the-loop approval flow
+- [ ] Add built-in tools: filesystem, HTTP fetch, code runner (register via `ToolRegistry`)
+- [ ] Token counting integration (tiktoken or equivalent) for accurate context budget management
+- [ ] Retry and exponential backoff for LLM API transient failures in `OpenAiClient`
+- [ ] Rate limiting / token budget enforcement at the `OpenAiClient` level
+
+### Voice System Core
 - [ ] Audio: refactor recorder from pull mode (polling ring buffer) to push mode (callback-driven), relying on OS/hardware clock to minimize latency
+- [ ] VAD (Voice Activity Detection) module
+- [ ] ASR (Automatic Speech Recognition) integration — Whisper API or local engine
+- [ ] TTS (Text-to-Speech) integration — OpenAI TTS API or local engine
+- [ ] Control Plane: command routing between Agent Framework Core and Voice System Core
+- [ ] Data Plane: low-latency audio streaming path (DMA-like, bypasses LLM loop)
+
+### Platform Backends
+- [ ] Oboe audio backend for Android (`io/audio/audio_device/oboe/`)
+- [ ] CoreAudio backend for iOS (`io/audio/audio_device/core_audio/`)
+- [ ] WASAPI backend option for Windows (`io/audio/audio_device/wasapi/`)
+
+### UI Layer
+- [ ] Flutter UI: conversation view + debug panel
+- [ ] dart:ffi bridge between Flutter and C++ core
+- [ ] Cross-platform Flutter app scaffolding (desktop + mobile)
+
+### Testing
+- [ ] Integration test: full `AgentRuntime` round-trip with mock LLM server
+- [ ] `OpenAiClient` unit tests with local HTTP mock server
+- [ ] Voice pipeline end-to-end test (capture → VAD → ASR → agent → TTS → playout)
 
 ## Building (C++ core)
 

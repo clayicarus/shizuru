@@ -1,9 +1,11 @@
 # Production
 build/
 .cache/
+.deps/
 
 # Editor directories and files
 .vscode/
+.windsurfrules
 .DS_Store
 
 # OS
