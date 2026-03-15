@@ -28,3 +28,17 @@ target_link_libraries(tool_dispatcher_test
   PRIVATE GTest::gtest_main
 )
 add_test(NAME tool_dispatcher_test COMMAND tool_dispatcher_test)
+
+# OpenAI client tests (uses httplib::Server as mock)
+add_executable(openai_client_test
+  openai_client_test.cpp
+)
+target_link_libraries(openai_client_test
+  PRIVATE shizuru_llm
+  PRIVATE httplib::httplib
+  PRIVATE GTest::gtest_main
+)
+target_include_directories(openai_client_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..
+)
+add_test(NAME openai_client_test COMMAND openai_client_test)
