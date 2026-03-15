@@ -107,6 +107,11 @@ void Controller::OnDiagnostic(DiagnosticCallback cb) {
   diagnostic_callbacks_.push_back(std::move(cb));
 }
 
+// Register callback for assistant text responses.
+void Controller::OnResponse(ResponseCallback cb) {
+  response_callbacks_.push_back(std::move(cb));
+}
+
 // Validate + execute transition.
 bool Controller::TryTransition(Event event) {
   State current = state_.load();
@@ -301,6 +306,11 @@ void Controller::HandleActing(ActionCandidate ac) {
 
 // Deliver response, check stop conditions.
 void Controller::HandleResponding(ActionCandidate ac) {
+  // Notify response callbacks before final state transition.
+  for (const auto& cb : response_callbacks_) {
+    cb(ac);
+  }
+
   // Record response as MemoryEntry.
   MemoryEntry response_entry;
   response_entry.type = MemoryEntryType::kAssistantMessage;

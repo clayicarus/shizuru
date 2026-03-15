@@ -62,6 +62,10 @@ class Controller {
   using DiagnosticCallback = std::function<void(const std::string& message)>;
   void OnDiagnostic(DiagnosticCallback cb);
 
+  // Register callback for assistant text responses.
+  using ResponseCallback = std::function<void(const ActionCandidate& response)>;
+  void OnResponse(ResponseCallback cb);
+
  private:
   void RunLoop();                            // Main reasoning loop
   bool TryTransition(Event event);           // Validate + execute transition
@@ -105,6 +109,7 @@ class Controller {
   // Callbacks
   std::vector<TransitionCallback> transition_callbacks_;
   std::vector<DiagnosticCallback> diagnostic_callbacks_;
+  std::vector<ResponseCallback> response_callbacks_;
 };
 
 }  // namespace shizuru::core
