@@ -45,6 +45,7 @@ enum class ObservationType {
   kToolResult,
   kSystemEvent,
   kInterruption,
+  kContinuation,  // Signals next thinking step; no message appended to context.
 };
 
 // An input event from the external environment.

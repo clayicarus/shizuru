@@ -73,8 +73,12 @@ std::string AgentRuntime::StartSession() {
   auto memory = std::make_unique<services::InMemoryStore>();
   auto audit = std::make_unique<services::LogAuditSink>();
 
+  // The Controller hardcodes "default" as the session key for all
+  // context/policy lookups, so AgentSession must be initialized with that
+  // same key.  The caller-facing session_id is separate and only used for
+  // external tracking (e.g., logging).
   session_ = std::make_unique<core::AgentSession>(
-      session_id, config_.controller, config_.context, config_.policy,
+      "default", config_.controller, config_.context, config_.policy,
       std::move(llm), std::move(io), std::move(memory), std::move(audit));
 
   // Observe assistant text responses and optionally synthesize audio.
@@ -87,7 +91,7 @@ std::string AgentRuntime::StartSession() {
   return session_id;
 }
 
-void AgentRuntime::SendMessage(const std::string& content) {
+void AgentRuntime::Send(const std::string& content) {
   SendInput(content, "text/plain");
 }
 

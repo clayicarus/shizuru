@@ -429,6 +429,51 @@ TEST(OpenAiClientTest, SubmitStreaming_NoDoneMarkerFallback) {
   EXPECT_EQ(result.candidate.response_text, "partial");
 }
 
+ TEST(OpenAiClientTest, SubmitStreaming_NoDoneMarkerToolCallFallback) {
+  httplib::Server svr;
+  svr.Post("/v1/chat/completions",
+           [](const httplib::Request&, httplib::Response& res) {
+             std::string sse;
+
+             nlohmann::json tc1;
+             tc1["choices"] = nlohmann::json::array();
+             nlohmann::json delta1;
+             delta1["delta"]["tool_calls"] = nlohmann::json::array();
+             delta1["delta"]["tool_calls"].push_back({
+                 {"index", 0},
+                 {"id", "call_fallback"},
+                 {"type", "function"},
+                 {"function", {{"name", "get_weather"}, {"arguments", ""}}},
+             });
+             tc1["choices"].push_back(delta1);
+             sse += "data: " + tc1.dump() + "\n\n";
+
+             nlohmann::json tc2;
+             tc2["choices"] = nlohmann::json::array();
+             nlohmann::json delta2;
+             delta2["delta"]["tool_calls"] = nlohmann::json::array();
+             delta2["delta"]["tool_calls"].push_back({
+                 {"index", 0},
+                 {"function", {{"arguments", R"({"city":"LA"})"}}},
+             });
+             tc2["choices"].push_back(delta2);
+             sse += "data: " + tc2.dump() + "\n\n";
+
+             res.set_content(sse, "text/event-stream");
+           });
+
+  MockServer mock(svr);
+  auto config = MakeConfig(mock.BaseUrl());
+  OpenAiClient client(config);
+
+  auto result = client.SubmitStreaming(MakeSimpleContext(), nullptr);
+
+  EXPECT_EQ(result.candidate.type, core::ActionType::kToolCall);
+  EXPECT_EQ(result.candidate.action_name, "get_weather");
+  EXPECT_EQ(result.candidate.arguments, R"({"city":"LA"})");
+  EXPECT_EQ(result.candidate.response_text, "call_fallback");
+ }
+
 // ---------------------------------------------------------------------------
 // Cancel
 // ---------------------------------------------------------------------------

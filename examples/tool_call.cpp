@@ -110,15 +110,17 @@ class MockLlmServer {
 int main(int argc, char* argv[]) {
   std::printf("=== Shizuru Tool Call Example ===\n\n");
 
-  // Parse optional CLI args: <base_url> <api_key> [model]
+  // Parse optional CLI args: <base_url> <api_key> [model] [api_path]
   std::string base_url;
   std::string api_key;
   std::string model;
+  std::string api_path;
 
   if (argc >= 3) {
     base_url = argv[1];
     api_key = argv[2];
     model = (argc >= 4) ? argv[3] : "gpt-4o";
+    api_path = (argc >= 5) ? argv[4] : "";
   }
 
   // If no URL provided, start mock server as fallback.
@@ -156,6 +158,9 @@ int main(int argc, char* argv[]) {
   config.llm.base_url = base_url;
   config.llm.api_key = api_key;
   config.llm.model = model;
+  if (!api_path.empty()) {
+    config.llm.api_path = api_path;
+  }
   config.llm.connect_timeout = std::chrono::seconds(5);
   config.llm.read_timeout = std::chrono::seconds(30);
 
@@ -189,7 +194,7 @@ int main(int argc, char* argv[]) {
   std::printf("[runtime] Session started: %s\n", session_id.c_str());
   std::printf("[user]   \"What's the weather in Tokyo?\"\n");
 
-  runtime.SendMessage("What's the weather in Tokyo?");
+  runtime.Send("What's the weather in Tokyo?");
 
   // Wait for the agent to produce a final response.
   {

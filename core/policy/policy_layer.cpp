@@ -115,7 +115,13 @@ PolicyResult PolicyLayer::EvaluateRules(const std::string& session_id,
     }
   }
 
-  // Deny-by-default when no rule matches.
+  // Fallback: allow if the session has a capability whose name matches the
+  // action (e.g., default_capabilities = {"get_weather"} covers the tool).
+  if (HasCapability(session_id, action.action_name)) {
+    return PolicyResult{PolicyOutcome::kAllow, "Allowed by capability", 0};
+  }
+
+  // Deny-by-default when no rule matches and no matching capability.
   return PolicyResult{PolicyOutcome::kDeny, "No matching rule (deny-by-default)",
                       0};
 }

@@ -84,6 +84,7 @@ static const std::vector<std::tuple<State, Event, State>> kAllTransitions = {
     {State::kThinking, Event::kLlmResult, State::kRouting},
     {State::kThinking, Event::kLlmFailure, State::kError},
     {State::kThinking, Event::kInterrupt, State::kListening},
+    {State::kThinking, Event::kStopConditionMet, State::kIdle},
     {State::kThinking, Event::kShutdown, State::kTerminated},
     {State::kRouting, Event::kRouteToAction, State::kActing},
     {State::kRouting, Event::kRouteToResponse, State::kResponding},

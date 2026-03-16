@@ -56,7 +56,7 @@ class AgentRuntime {
   std::string StartSession();
 
   // Send a user message to the active session.
-  void SendMessage(const std::string& content);
+  void Send(const std::string& content);
 
   // Send user input with MIME type. For audio MIME types, runtime will try to
   // call STT tool first, then forward transcript to the agent.

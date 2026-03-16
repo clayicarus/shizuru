@@ -379,8 +379,12 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
   Controller ctrl(cfg, std::move(llm), std::move(io), *context_, policy2);
 
   std::vector<std::string> diagnostics;
+  std::vector<std::tuple<State, State, Event>> transitions;
   ctrl.OnDiagnostic(
       [&](const std::string& msg) { diagnostics.push_back(msg); });
+  ctrl.OnTransition([&](State from, State to, Event event) {
+    transitions.push_back({from, to, event});
+  });
 
   ctrl.Start();
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -390,14 +394,26 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
   ctrl.Shutdown();
 
   bool found_action_limit = false;
+  bool found_stop_condition = false;
+  bool found_invalid_transition = false;
   for (const auto& d : diagnostics) {
     if (d.find("action count") != std::string::npos ||
         d.find("Budget exceeded") != std::string::npos) {
       found_action_limit = true;
-      break;
+    }
+    if (d.find("Invalid transition") != std::string::npos) {
+      found_invalid_transition = true;
+    }
+  }
+  for (const auto& [from, to, ev] : transitions) {
+    if (ev == Event::kStopConditionMet && from == State::kThinking &&
+        to == State::kIdle) {
+      found_stop_condition = true;
     }
   }
   EXPECT_TRUE(found_action_limit);
+  EXPECT_TRUE(found_stop_condition);
+  EXPECT_FALSE(found_invalid_transition);
 }
 
 // ---------------------------------------------------------------------------

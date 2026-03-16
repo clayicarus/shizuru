@@ -1,0 +1,41 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default (auto-detect OpenSSL)",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "windows-conda",
+      "displayName": "Windows with Conda/Miniconda OpenSSL",
+      "inherits": "default",
+      "description": "Use when OpenSSL is provided by a Conda environment. Requires the target Conda env to be activated.",
+      "cacheVariables": {
+        "OPENSSL_ROOT_DIR": "$env{CONDA_PREFIX}/Library"
+      }
+    },
+    {
+      "name": "windows-system-openssl",
+      "displayName": "Windows with system OpenSSL (Win64 installer)",
+      "inherits": "default",
+      "description": "Use when OpenSSL is installed via the official Win64 installer (https://slproweb.com/products/Win32OpenSSL.html).",
+      "cacheVariables": {
+        "OPENSSL_ROOT_DIR": "C:/Program Files/OpenSSL-Win64"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "default",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "default",
+      "configuration": "Release"
+    }
+  ]
+}

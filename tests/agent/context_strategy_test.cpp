@@ -176,6 +176,35 @@ TEST(ContextStrategyTest, ToolCallResultPairing) {
   EXPECT_EQ(result_idx, call_idx + 1);
 }
 
+ TEST(ContextStrategyTest, ToolCallJsonConsumesBudget) {
+  ContextConfig config;
+  config.max_context_tokens = 2;
+
+  testing::MockMemoryStore store;
+  ContextStrategy strategy(config, store);
+
+  std::string sid = "s1";
+  strategy.InitSession(sid, "sys!");
+
+  MemoryEntry call;
+  call.type = MemoryEntryType::kToolCall;
+  call.role = "assistant";
+  call.tool_call_id = "tc_1";
+  call.tool_calls_json =
+      R"([{"id":"call_1","type":"function","function":{"name":"search","arguments":{"q":"test"}}}])";
+  call.timestamp = std::chrono::steady_clock::now();
+  store.Append(sid, call);
+
+  auto window = strategy.BuildContext(sid, MakeObservation("obs!"));
+
+  EXPECT_EQ(window.messages.size(), 2u);
+  EXPECT_EQ(window.messages[0].role, "system");
+  EXPECT_EQ(window.messages[0].content, "sys!");
+  EXPECT_EQ(window.messages[1].role, "user");
+  EXPECT_EQ(window.messages[1].content, "obs!");
+  EXPECT_LE(window.estimated_tokens, 2);
+ }
+
 // ---------------------------------------------------------------------------
 // Test: Summarization trigger at exact threshold
 // Requirements: 6.2

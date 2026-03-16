@@ -10,7 +10,29 @@ namespace {
 nlohmann::json MessageToJson(const core::ContextMessage& msg) {
   nlohmann::json j;
   j["role"] = msg.role;
-  j["content"] = msg.content;
+
+  if (!msg.tool_calls_json.empty()) {
+    // Assistant tool call message: content must be null, tool_calls is the array.
+    j["content"] = nullptr;
+    try {
+      auto tool_calls = nlohmann::json::parse(msg.tool_calls_json);
+      if (tool_calls.is_array()) {
+        for (auto& tc : tool_calls) {
+          if (tc.contains("function") && tc["function"].contains("arguments") &&
+              !tc["function"]["arguments"].is_string()) {
+            tc["function"]["arguments"] =
+                tc["function"]["arguments"].dump();
+          }
+        }
+      }
+      j["tool_calls"] = std::move(tool_calls);
+    } catch (...) {
+      j["tool_calls"] = nlohmann::json::array();
+    }
+  } else {
+    j["content"] = msg.content;
+  }
+
   if (!msg.tool_call_id.empty()) {
     j["tool_call_id"] = msg.tool_call_id;
   }

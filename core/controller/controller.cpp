@@ -23,6 +23,7 @@ const std::unordered_map<std::pair<State, Event>, State, PairHash>
         {{State::kThinking, Event::kLlmResult}, State::kRouting},
         {{State::kThinking, Event::kLlmFailure}, State::kError},
         {{State::kThinking, Event::kInterrupt}, State::kListening},
+        {{State::kThinking, Event::kStopConditionMet}, State::kIdle},
         {{State::kThinking, Event::kShutdown}, State::kTerminated},
 
         // Routing
@@ -188,6 +189,25 @@ void Controller::RunLoop() {
 
 // Build context, submit to LLM with retry, route the result.
 void Controller::HandleThinking(const Observation& obs) {
+  // Record user messages in memory immediately so every subsequent LLM call
+  // in this turn (including after tool denial) sees the original question.
+  // Re-enter via kContinuation so BuildContext does not duplicate it.
+  if (obs.type == ObservationType::kUserMessage) {
+    MemoryEntry user_entry;
+    user_entry.type = MemoryEntryType::kUserMessage;
+    user_entry.role = "user";
+    user_entry.content = obs.content;
+    user_entry.timestamp = obs.timestamp;
+    context_.RecordTurn("default", user_entry);
+
+    Observation cont;
+    cont.type = ObservationType::kContinuation;
+    cont.source = obs.source;
+    cont.timestamp = obs.timestamp;
+    HandleThinking(cont);
+    return;
+  }
+
   // Check budget first.
   if (CheckBudget()) {
     TryTransition(Event::kStopConditionMet);
@@ -278,14 +298,34 @@ void Controller::HandleRouting(ActionCandidate ac) {
 void Controller::HandleActing(ActionCandidate ac) {
   action_count_++;
 
+  // Record the assistant's tool call decision.
+  // ac.response_text holds the LLM-assigned tool_call_id (set in json_parser).
+  // ac.arguments is already a serialized JSON string from the LLM.
+  const std::string& tc_id =
+      ac.response_text.empty() ? ac.action_name : ac.response_text;
+  std::string tc_json =
+      "[{\"id\":\"" + tc_id + "\",\"type\":\"function\","
+      "\"function\":{\"name\":\"" + ac.action_name + "\","
+      "\"arguments\":" + ac.arguments + "}}]";
+
+  MemoryEntry call_entry;
+  call_entry.type = MemoryEntryType::kToolCall;
+  call_entry.role = "assistant";
+  call_entry.content = "";
+  call_entry.tool_call_id = tc_id;
+  call_entry.tool_calls_json = tc_json;
+  call_entry.timestamp = std::chrono::steady_clock::now();
+  context_.RecordTurn("default", call_entry);
+
   auto result = io_->Execute(ac);
 
-  // Record result as MemoryEntry.
+  // Record the tool result. Use ac.response_text as the tool_call_id so OpenAI
+  // can pair the tool result with the assistant's tool call above.
   MemoryEntry result_entry;
   result_entry.type = MemoryEntryType::kToolResult;
   result_entry.role = "tool";
   result_entry.content = result.success ? result.output : result.error_message;
-  result_entry.tool_call_id = ac.action_name;
+  result_entry.tool_call_id = ac.response_text.empty() ? ac.action_name : ac.response_text;
   result_entry.timestamp = std::chrono::steady_clock::now();
   context_.RecordTurn("default", result_entry);
 
@@ -295,13 +335,13 @@ void Controller::HandleActing(ActionCandidate ac) {
     TryTransition(Event::kActionFailed);
   }
 
-  // Create observation from result and continue thinking.
-  Observation result_obs;
-  result_obs.type = ObservationType::kToolResult;
-  result_obs.content = result.success ? result.output : result.error_message;
-  result_obs.source = "tool:" + ac.action_name;
-  result_obs.timestamp = std::chrono::steady_clock::now();
-  HandleThinking(result_obs);
+  // Use kContinuation so BuildContext does not re-append the tool result as a
+  // duplicate current observation (it is already in memory above).
+  Observation continuation;
+  continuation.type = ObservationType::kContinuation;
+  continuation.source = "controller";
+  continuation.timestamp = std::chrono::steady_clock::now();
+  HandleThinking(continuation);
 }
 
 // Deliver response, check stop conditions.

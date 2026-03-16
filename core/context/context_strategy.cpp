@@ -6,6 +6,10 @@
 
 namespace shizuru::core {
 
+int EntryTokens(const MemoryEntry& entry) {
+  return static_cast<int>((entry.content.size() + entry.tool_calls_json.size()) / 4);
+}
+
 ContextStrategy::ContextStrategy(ContextConfig config, MemoryStore& store)
     : config_(std::move(config)), store_(store) {}
 
@@ -35,24 +39,31 @@ ContextWindow ContextStrategy::BuildContext(
   }
 
   // 2. Convert current observation to a ContextMessage.
+  // kContinuation is a no-op signal: no message is appended to the context.
   ContextMessage obs_message;
-  switch (current_observation.type) {
-    case ObservationType::kUserMessage:
-      obs_message.role = "user";
-      break;
-    case ObservationType::kToolResult:
-      obs_message.role = "tool";
-      break;
-    case ObservationType::kSystemEvent:
-    case ObservationType::kInterruption:
-      obs_message.role = "system";
-      break;
+  bool append_obs = (current_observation.type != ObservationType::kContinuation);
+  if (append_obs) {
+    switch (current_observation.type) {
+      case ObservationType::kUserMessage:
+        obs_message.role = "user";
+        break;
+      case ObservationType::kToolResult:
+        obs_message.role = "tool";
+        break;
+      case ObservationType::kSystemEvent:
+      case ObservationType::kInterruption:
+        obs_message.role = "system";
+        break;
+      case ObservationType::kContinuation:
+        break;  // unreachable
+    }
+    obs_message.content = current_observation.content;
   }
-  obs_message.content = current_observation.content;
 
   // 3. Calculate fixed token costs.
   int system_tokens = static_cast<int>(system_instruction.size()) / 4;
-  int observation_tokens = static_cast<int>(obs_message.content.size()) / 4;
+  int observation_tokens =
+      append_obs ? static_cast<int>(obs_message.content.size()) / 4 : 0;
   int remaining_budget =
       config_.max_context_tokens - system_tokens - observation_tokens;
   if (remaining_budget < 0) {
@@ -68,7 +79,7 @@ ContextWindow ContextStrategy::BuildContext(
   int accumulated_tokens = 0;
 
   for (int i = static_cast<int>(all_entries.size()) - 1; i >= 0; --i) {
-    int entry_tokens = static_cast<int>(all_entries[i].content.size()) / 4;
+    int entry_tokens = EntryTokens(all_entries[i]);
     if (accumulated_tokens + entry_tokens <= remaining_budget) {
       included[i] = true;
       accumulated_tokens += entry_tokens;
@@ -87,16 +98,14 @@ ContextWindow ContextStrategy::BuildContext(
             all_entries[j].tool_call_id == all_entries[i].tool_call_id) {
           if (!included[j]) {
             // Try to include the paired tool_call.
-            int pair_tokens =
-                static_cast<int>(all_entries[j].content.size()) / 4;
+            int pair_tokens = EntryTokens(all_entries[j]);
             if (accumulated_tokens + pair_tokens <= remaining_budget) {
               included[j] = true;
               accumulated_tokens += pair_tokens;
             } else {
               // Can't fit the pair — remove both.
               included[i] = false;
-              accumulated_tokens -=
-                  static_cast<int>(all_entries[i].content.size()) / 4;
+              accumulated_tokens -= EntryTokens(all_entries[i]);
             }
           }
           found_pair = true;
@@ -116,16 +125,14 @@ ContextWindow ContextStrategy::BuildContext(
             all_entries[j].tool_call_id == all_entries[i].tool_call_id) {
           if (!included[j]) {
             // Try to include the paired tool_result.
-            int pair_tokens =
-                static_cast<int>(all_entries[j].content.size()) / 4;
+            int pair_tokens = EntryTokens(all_entries[j]);
             if (accumulated_tokens + pair_tokens <= remaining_budget) {
               included[j] = true;
               accumulated_tokens += pair_tokens;
             } else {
               // Can't fit the pair — remove both.
               included[i] = false;
-              accumulated_tokens -=
-                  static_cast<int>(all_entries[i].content.size()) / 4;
+              accumulated_tokens -= EntryTokens(all_entries[i]);
             }
           }
           found_pair = true;
@@ -157,11 +164,15 @@ ContextWindow ContextStrategy::BuildContext(
     msg.tool_call_id = all_entries[i].tool_call_id;
     // source_tag maps to name for tool messages.
     msg.name = all_entries[i].source_tag;
+    // Propagate tool_calls_json for assistant tool call entries.
+    msg.tool_calls_json = all_entries[i].tool_calls_json;
     window.messages.push_back(std::move(msg));
   }
 
-  // Current observation last.
-  window.messages.push_back(std::move(obs_message));
+  // Current observation last (skipped for kContinuation).
+  if (append_obs) {
+    window.messages.push_back(std::move(obs_message));
+  }
 
   // Calculate total estimated tokens.
   window.estimated_tokens = system_tokens + accumulated_tokens + observation_tokens;
@@ -215,7 +226,7 @@ void ContextStrategy::MaybeSummarize(const std::string& session_id) {
   // (compression ratio), with a minimum of the content size / 4.
   int summarized_tokens = 0;
   for (size_t i = 0; i < half; ++i) {
-    summarized_tokens += static_cast<int>(all[i].content.size()) / 4;
+    summarized_tokens += EntryTokens(all[i]);
   }
   summary.estimated_tokens =
       static_cast<int>(summary.content.size()) / 4;
@@ -227,7 +238,7 @@ int ContextStrategy::EstimateTokens(
     const std::vector<MemoryEntry>& entries) const {
   int total = 0;
   for (const auto& entry : entries) {
-    total += static_cast<int>(entry.content.size()) / 4;
+    total += EntryTokens(entry);
   }
   return total;
 }
