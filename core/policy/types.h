@@ -32,6 +32,15 @@ struct PolicyResult {
   uint64_t request_id = 0;              // Non-zero if RequireApproval (for async resolution)
 };
 
+inline const char* PolicyOutcomeName(PolicyOutcome o) {
+  switch (o) {
+    case PolicyOutcome::kAllow:           return "Allow";
+    case PolicyOutcome::kDeny:            return "Deny";
+    case PolicyOutcome::kRequireApproval: return "RequireApproval";
+    default:                              return "Unknown";
+  }
+}
+
 // A structured audit log entry.
 struct AuditRecord {
   uint64_t sequence_number = 0;

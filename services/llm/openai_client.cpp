@@ -167,6 +167,9 @@ core::LlmResult OpenAiClient::SubmitStreaming(
         !accumulated_tool_calls[0].empty()) {
       auto& tc = accumulated_tool_calls[0];
       result.candidate.type = core::ActionType::kToolCall;
+      if (tc.contains("id")) {
+        result.candidate.response_text = tc["id"].get<std::string>();
+      }
       if (tc.contains("function")) {
         if (tc["function"].contains("name")) {
           result.candidate.action_name =

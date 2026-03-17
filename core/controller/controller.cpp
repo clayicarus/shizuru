@@ -5,6 +5,8 @@
 #include <string>
 #include <thread>
 
+#include "async_logger.h"
+
 namespace shizuru::core {
 
 // Static transition table — all 24 transitions from the design.
@@ -23,6 +25,7 @@ const std::unordered_map<std::pair<State, Event>, State, PairHash>
         {{State::kThinking, Event::kLlmResult}, State::kRouting},
         {{State::kThinking, Event::kLlmFailure}, State::kError},
         {{State::kThinking, Event::kInterrupt}, State::kListening},
+        {{State::kThinking, Event::kStopConditionMet}, State::kIdle},
         {{State::kThinking, Event::kShutdown}, State::kTerminated},
 
         // Routing
@@ -49,12 +52,14 @@ const std::unordered_map<std::pair<State, Event>, State, PairHash>
 };
 
 // Constructor
-Controller::Controller(ControllerConfig config,
+Controller::Controller(std::string session_id,
+                       ControllerConfig config,
                        std::unique_ptr<LlmClient> llm,
                        std::unique_ptr<IoBridge> io,
                        ContextStrategy& context,
                        PolicyLayer& policy)
-    : config_(std::move(config)),
+    : session_id_(std::move(session_id)),
+      config_(std::move(config)),
       llm_(std::move(llm)),
       io_(std::move(io)),
       context_(context),
@@ -117,6 +122,8 @@ bool Controller::TryTransition(Event event) {
   State current = state_.load();
   auto it = kTransitionTable.find({current, event});
   if (it == kTransitionTable.end()) {
+    LOG_WARN("[{}] Invalid transition: {} --[{}]--> ?",
+             MODULE_NAME, StateName(current), EventName(event));
     EmitDiagnostic("Invalid transition from state " +
                    std::to_string(static_cast<int>(current)) + " on event " +
                    std::to_string(static_cast<int>(event)));
@@ -132,8 +139,8 @@ bool Controller::TryTransition(Event event) {
     cb(old_state, new_state, event);
   }
 
-  // Audit the transition.
-  policy_.AuditTransition("default", old_state, new_state, event);
+  // Audit the transition — LogAuditSink handles the debug log output.
+  policy_.AuditTransition(session_id_, old_state, new_state, event);
 
   return true;
 }
@@ -174,6 +181,7 @@ void Controller::RunLoop() {
     // Normal flow: if in Listening and got user observation.
     if (current == State::kListening &&
         obs.type == ObservationType::kUserMessage) {
+      LOG_INFO("[{}] User message received: \"{}\"", MODULE_NAME, obs.content);
       TryTransition(Event::kUserObservation);
       // Drive the thinking→routing→acting/responding cycle.
       try {
@@ -188,6 +196,25 @@ void Controller::RunLoop() {
 
 // Build context, submit to LLM with retry, route the result.
 void Controller::HandleThinking(const Observation& obs) {
+  // Record user messages in memory immediately so every subsequent LLM call
+  // in this turn (including after tool denial) sees the original question.
+  // Re-enter via kContinuation so BuildContext does not duplicate it.
+  if (obs.type == ObservationType::kUserMessage) {
+    MemoryEntry user_entry;
+    user_entry.type = MemoryEntryType::kUserMessage;
+    user_entry.role = "user";
+    user_entry.content = obs.content;
+    user_entry.timestamp = obs.timestamp;
+    context_.RecordTurn(session_id_, user_entry);
+
+    Observation cont;
+    cont.type = ObservationType::kContinuation;
+    cont.source = obs.source;
+    cont.timestamp = obs.timestamp;
+    HandleThinking(cont);
+    return;
+  }
+
   // Check budget first.
   if (CheckBudget()) {
     TryTransition(Event::kStopConditionMet);
@@ -195,23 +222,31 @@ void Controller::HandleThinking(const Observation& obs) {
   }
 
   // Build context window.
-  auto window = context_.BuildContext("default", obs);
+  auto window = context_.BuildContext(session_id_, obs);
+  LOG_DEBUG("[{}] Context built: {} messages, ~{} tokens",
+            MODULE_NAME, window.messages.size(), window.estimated_tokens);
 
   // Submit to LLM with retry and exponential backoff.
   LlmResult result;
   bool success = false;
   for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
     try {
+      LOG_DEBUG("[{}] LLM submit (attempt {}/{})",
+                MODULE_NAME, attempt + 1, config_.max_retries + 1);
       result = llm_->Submit(window);
       success = true;
       break;
     } catch (...) {
       if (attempt == config_.max_retries) {
+        LOG_ERROR("[{}] LLM submit failed after {} attempts",
+                  MODULE_NAME, config_.max_retries + 1);
         TryTransition(Event::kLlmFailure);
         return;
       }
       // Exponential backoff: base_delay * 2^attempt.
       auto delay = config_.retry_base_delay * (1 << attempt);
+      LOG_WARN("[{}] LLM submit error, retrying in {}ms",
+               MODULE_NAME, std::chrono::duration_cast<std::chrono::milliseconds>(delay).count());
       std::this_thread::sleep_for(delay);
     }
   }
@@ -225,6 +260,10 @@ void Controller::HandleThinking(const Observation& obs) {
   // Increment turn count.
   turn_count_++;
 
+  LOG_INFO("[{}] LLM result: turn={}, prompt_tokens={}, completion_tokens={}, total_tokens={}",
+           MODULE_NAME, turn_count_, result.prompt_tokens, result.completion_tokens,
+           total_prompt_tokens_ + total_completion_tokens_);
+
   // Transition to Routing.
   TryTransition(Event::kLlmResult);
 
@@ -237,11 +276,16 @@ void Controller::HandleRouting(ActionCandidate ac) {
   switch (ac.type) {
     case ActionType::kToolCall: {
       // Check policy permission.
-      auto permission = policy_.CheckPermission("default", ac);
+      LOG_INFO("[{}] Routing: tool_call=\"{}\" args={}",
+               MODULE_NAME, ac.action_name, ac.arguments);
+      auto permission = policy_.CheckPermission(session_id_, ac);
       if (permission.outcome == PolicyOutcome::kAllow) {
+        LOG_DEBUG("[{}] Policy: ALLOW tool=\"{}\"", MODULE_NAME, ac.action_name);
         TryTransition(Event::kRouteToAction);
         HandleActing(std::move(ac));
       } else {
+        LOG_WARN("[{}] Policy: DENY tool=\"{}\" reason=\"{}\"",
+                 MODULE_NAME, ac.action_name, permission.reason);
         // Denied — record denial as observation and re-enter thinking.
         MemoryEntry denial_entry;
         denial_entry.type = MemoryEntryType::kToolResult;
@@ -249,7 +293,7 @@ void Controller::HandleRouting(ActionCandidate ac) {
         denial_entry.content =
             "Action denied: " + permission.reason;
         denial_entry.timestamp = std::chrono::steady_clock::now();
-        context_.RecordTurn("default", denial_entry);
+        context_.RecordTurn(session_id_, denial_entry);
 
         TryTransition(Event::kRouteToContinue);
 
@@ -264,10 +308,13 @@ void Controller::HandleRouting(ActionCandidate ac) {
       break;
     }
     case ActionType::kResponse:
+      LOG_INFO("[{}] Routing: response text_len={}",
+               MODULE_NAME, ac.response_text.size());
       TryTransition(Event::kRouteToResponse);
       HandleResponding(std::move(ac));
       break;
     case ActionType::kContinue:
+      LOG_DEBUG("[{}] Routing: continue (no action, no response)", MODULE_NAME);
       TryTransition(Event::kRouteToContinue);
       // Will re-enter thinking on next loop iteration.
       break;
@@ -277,17 +324,47 @@ void Controller::HandleRouting(ActionCandidate ac) {
 // Execute IO action, record result, transition back to Thinking.
 void Controller::HandleActing(ActionCandidate ac) {
   action_count_++;
+  LOG_INFO("[{}] Acting: tool=\"{}\" call_id=\"{}\" args={}",
+           MODULE_NAME, ac.action_name, ac.response_text, ac.arguments);
+
+  // Record the assistant's tool call decision.
+  // ac.response_text holds the LLM-assigned tool_call_id (set in json_parser).
+  // ac.arguments is already a serialized JSON string from the LLM.
+  const std::string& tc_id =
+      ac.response_text.empty() ? ac.action_name : ac.response_text;
+  std::string tc_json =
+      "[{\"id\":\"" + tc_id + "\",\"type\":\"function\","
+      "\"function\":{\"name\":\"" + ac.action_name + "\","
+      "\"arguments\":" + ac.arguments + "}}]";
+
+  MemoryEntry call_entry;
+  call_entry.type = MemoryEntryType::kToolCall;
+  call_entry.role = "assistant";
+  call_entry.content = "";
+  call_entry.tool_call_id = tc_id;
+  call_entry.tool_calls_json = tc_json;
+  call_entry.timestamp = std::chrono::steady_clock::now();
+  context_.RecordTurn(session_id_, call_entry);
 
   auto result = io_->Execute(ac);
 
-  // Record result as MemoryEntry.
+  if (result.success) {
+    LOG_INFO("[{}] Tool result: tool=\"{}\" output={}",
+             MODULE_NAME, ac.action_name, result.output);
+  } else {
+    LOG_WARN("[{}] Tool failed: tool=\"{}\" error=\"{}\"",
+             MODULE_NAME, ac.action_name, result.error_message);
+  }
+
+  // Record the tool result. Use ac.response_text as the tool_call_id so OpenAI
+  // can pair the tool result with the assistant's tool call above.
   MemoryEntry result_entry;
   result_entry.type = MemoryEntryType::kToolResult;
   result_entry.role = "tool";
   result_entry.content = result.success ? result.output : result.error_message;
-  result_entry.tool_call_id = ac.action_name;
+  result_entry.tool_call_id = ac.response_text.empty() ? ac.action_name : ac.response_text;
   result_entry.timestamp = std::chrono::steady_clock::now();
-  context_.RecordTurn("default", result_entry);
+  context_.RecordTurn(session_id_, result_entry);
 
   if (result.success) {
     TryTransition(Event::kActionComplete);
@@ -295,17 +372,19 @@ void Controller::HandleActing(ActionCandidate ac) {
     TryTransition(Event::kActionFailed);
   }
 
-  // Create observation from result and continue thinking.
-  Observation result_obs;
-  result_obs.type = ObservationType::kToolResult;
-  result_obs.content = result.success ? result.output : result.error_message;
-  result_obs.source = "tool:" + ac.action_name;
-  result_obs.timestamp = std::chrono::steady_clock::now();
-  HandleThinking(result_obs);
+  // Use kContinuation so BuildContext does not re-append the tool result as a
+  // duplicate current observation (it is already in memory above).
+  Observation continuation;
+  continuation.type = ObservationType::kContinuation;
+  continuation.source = "controller";
+  continuation.timestamp = std::chrono::steady_clock::now();
+  HandleThinking(continuation);
 }
 
 // Deliver response, check stop conditions.
 void Controller::HandleResponding(ActionCandidate ac) {
+  LOG_INFO("[{}] Responding: \"{}\"", MODULE_NAME, ac.response_text);
+
   // Notify response callbacks before final state transition.
   for (const auto& cb : response_callbacks_) {
     cb(ac);
@@ -317,7 +396,7 @@ void Controller::HandleResponding(ActionCandidate ac) {
   response_entry.role = "assistant";
   response_entry.content = ac.response_text;
   response_entry.timestamp = std::chrono::steady_clock::now();
-  context_.RecordTurn("default", response_entry);
+  context_.RecordTurn(session_id_, response_entry);
 
   // Check stop conditions.
   if (turn_count_ >= config_.max_turns ||
@@ -325,6 +404,10 @@ void Controller::HandleResponding(ActionCandidate ac) {
       action_count_ >= config_.action_count_limit ||
       std::chrono::steady_clock::now() - session_start_ >=
           config_.wall_clock_timeout) {
+    LOG_INFO("[{}] Stop condition met: turns={}, tokens={}, actions={}",
+             MODULE_NAME, turn_count_,
+             total_prompt_tokens_ + total_completion_tokens_,
+             action_count_);
     TryTransition(Event::kStopConditionMet);  // → Idle
   } else {
     TryTransition(Event::kResponseDelivered);  // → Listening
@@ -359,6 +442,7 @@ bool Controller::CheckBudget() {
 
 // Cancel in-progress work and transition to Listening.
 void Controller::HandleInterrupt() {
+  LOG_WARN("[{}] Interrupt received in state {}", MODULE_NAME, StateName(state_.load()));
   llm_->Cancel();
   io_->Cancel();
 
@@ -368,7 +452,7 @@ void Controller::HandleInterrupt() {
   interrupt_entry.role = "system";
   interrupt_entry.content = "Turn interrupted";
   interrupt_entry.timestamp = std::chrono::steady_clock::now();
-  context_.RecordTurn("default", interrupt_entry);
+  context_.RecordTurn(session_id_, interrupt_entry);
 
   TryTransition(Event::kInterrupt);  // → Listening
 

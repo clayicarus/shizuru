@@ -33,7 +33,10 @@ struct PairHash {
 class Controller {
  public:
   // All dependencies injected via constructor.
-  Controller(ControllerConfig config,
+  // session_id must match the key used to initialize ContextStrategy and
+  // PolicyLayer (via InitSession), so all lookups resolve to the same slot.
+  Controller(std::string session_id,
+             ControllerConfig config,
              std::unique_ptr<LlmClient> llm,
              std::unique_ptr<IoBridge> io,
              ContextStrategy& context,
@@ -67,6 +70,10 @@ class Controller {
   void OnResponse(ResponseCallback cb);
 
  private:
+  static constexpr char MODULE_NAME[] = "Controller";
+
+  std::string session_id_;
+
   void RunLoop();                            // Main reasoning loop
   bool TryTransition(Event event);           // Validate + execute transition
   void HandleThinking(const Observation& obs); // Build context, call LLM
