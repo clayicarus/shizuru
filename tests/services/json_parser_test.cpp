@@ -63,6 +63,31 @@ TEST(JsonParserTest, SerializeRequest_WithToolCallId) {
   EXPECT_EQ(j["messages"][1]["name"], "my_tool");
 }
 
+TEST(JsonParserTest, SerializeRequest_AssistantToolCallArgumentsAreString) {
+  core::ContextWindow ctx;
+  core::ContextMessage system_msg;
+  system_msg.role = "system";
+  system_msg.content = "sys";
+
+  core::ContextMessage assistant_msg;
+  assistant_msg.role = "assistant";
+  assistant_msg.tool_calls_json =
+      R"([{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":{"city":"Tokyo"}}}])";
+
+  ctx.messages = {system_msg, assistant_msg};
+
+  OpenAiConfig config;
+  std::string body = SerializeRequest(ctx, config);
+  auto j = nlohmann::json::parse(body);
+
+  ASSERT_EQ(j["messages"].size(), 2u);
+  EXPECT_TRUE(j["messages"][1]["content"].is_null());
+  ASSERT_EQ(j["messages"][1]["tool_calls"].size(), 1u);
+  EXPECT_TRUE(j["messages"][1]["tool_calls"][0]["function"]["arguments"].is_string());
+  EXPECT_EQ(j["messages"][1]["tool_calls"][0]["function"]["arguments"],
+            R"({"city":"Tokyo"})");
+}
+
 TEST(JsonParserTest, SerializeRequest_NoToolsOmitsField) {
   core::ContextWindow ctx;
   ctx.messages = {{"user", "hi", "", ""}};

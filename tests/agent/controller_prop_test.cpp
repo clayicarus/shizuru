@@ -84,6 +84,7 @@ static const std::vector<std::tuple<State, Event, State>> kAllTransitions = {
     {State::kThinking, Event::kLlmResult, State::kRouting},
     {State::kThinking, Event::kLlmFailure, State::kError},
     {State::kThinking, Event::kInterrupt, State::kListening},
+    {State::kThinking, Event::kStopConditionMet, State::kIdle},
     {State::kThinking, Event::kShutdown, State::kTerminated},
     {State::kRouting, Event::kRouteToAction, State::kActing},
     {State::kRouting, Event::kRouteToResponse, State::kResponding},
@@ -154,11 +155,11 @@ struct TestHarness {
     ContextConfig ctx_config;
     ctx_config.max_context_tokens = 100000;
     context = std::make_unique<ContextStrategy>(ctx_config, memory_store);
-    context->InitSession("default");
+    context->InitSession("test-session");
 
     PolicyConfig pol_config;
     policy = std::make_unique<PolicyLayer>(pol_config, audit_sink);
-    policy->InitSession("default");
+    policy->InitSession("test-session");
 
     auto llm = std::make_unique<testing::MockLlmClient>();
     auto io = std::make_unique<testing::MockIoBridge>();
@@ -176,7 +177,7 @@ struct TestHarness {
     };
 
     controller = std::make_unique<Controller>(
-        config, std::move(llm), std::move(io), *context, *policy);
+        "test-session", config, std::move(llm), std::move(io), *context, *policy);
   }
 };
 
@@ -342,13 +343,13 @@ RC_GTEST_PROP(ControllerPropTest, prop_action_routing_by_type, (void)) {
   ContextConfig ctx_cfg;
   ctx_cfg.max_context_tokens = 100000;
   ContextStrategy context(ctx_cfg, memory_store);
-  context.InitSession("default");
+  context.InitSession("test-session");
 
   PolicyConfig pol_cfg;
   pol_cfg.initial_rules = {allow_rule};
   PolicyLayer policy(pol_cfg, audit_sink);
-  policy.InitSession("default");
-  policy.GrantCapability("default", "test_cap");
+  policy.InitSession("test-session");
+  policy.GrantCapability("test-session", "test_cap");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
   auto io = std::make_unique<testing::MockIoBridge>();
@@ -380,7 +381,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_action_routing_by_type, (void)) {
     return ActionResult{true, "ok", ""};
   };
 
-  Controller ctrl(cfg, std::move(llm), std::move(io), context, policy);
+  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), context, policy);
 
   // Track transitions to observe routing behavior.
   std::vector<std::tuple<State, State, Event>> transitions;
@@ -516,11 +517,11 @@ RC_GTEST_PROP(ControllerPropTest, prop_turn_count_stop, (void)) {
   ContextConfig ctx_cfg;
   ctx_cfg.max_context_tokens = 1000000;
   ContextStrategy context(ctx_cfg, memory_store);
-  context.InitSession("default");
+  context.InitSession("test-session");
 
   PolicyConfig pol_cfg;
   PolicyLayer policy(pol_cfg, audit_sink);
-  policy.InitSession("default");
+  policy.InitSession("test-session");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
   auto io = std::make_unique<testing::MockIoBridge>();
@@ -539,7 +540,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_turn_count_stop, (void)) {
   std::vector<std::tuple<State, State, Event>> transitions;
   std::mutex trans_mu;
 
-  Controller ctrl(cfg, std::move(llm), std::move(io), context, policy);
+  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), context, policy);
   ctrl.OnTransition(
       [&](State from, State to, Event event) {
         std::lock_guard<std::mutex> lock(trans_mu);
@@ -672,7 +673,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_io_failure_feeds_thinking, (void)) {
   TestHarness h(cfg);
 
   // Grant capability so the tool call is allowed by policy.
-  h.policy->GrantCapability("default", "test_cap");
+  h.policy->GrantCapability("test-session", "test_cap");
   PolicyRule allow_rule;
   allow_rule.priority = 0;
   allow_rule.action_pattern = "failing_tool";
@@ -685,13 +686,13 @@ RC_GTEST_PROP(ControllerPropTest, prop_io_failure_feeds_thinking, (void)) {
   ContextConfig ctx_cfg;
   ctx_cfg.max_context_tokens = 100000;
   ContextStrategy context2(ctx_cfg, memory_store2);
-  context2.InitSession("default");
+  context2.InitSession("test-session");
 
   PolicyConfig pol_cfg;
   pol_cfg.initial_rules = {allow_rule};
   PolicyLayer policy2(pol_cfg, audit_sink2);
-  policy2.InitSession("default");
-  policy2.GrantCapability("default", "test_cap");
+  policy2.InitSession("test-session");
+  policy2.GrantCapability("test-session", "test_cap");
 
   auto llm2 = std::make_unique<testing::MockLlmClient>();
   auto io2 = std::make_unique<testing::MockIoBridge>();
@@ -723,7 +724,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_io_failure_feeds_thinking, (void)) {
   };
 
   std::vector<std::tuple<State, State, Event>> transitions;
-  Controller ctrl2(cfg, std::move(llm2), std::move(io2), context2, policy2);
+  Controller ctrl2("test-session", cfg, std::move(llm2), std::move(io2), context2, policy2);
   ctrl2.OnTransition(
       [&](State from, State to, Event event) {
         transitions.push_back({from, to, event});
@@ -783,11 +784,11 @@ RC_GTEST_PROP(ControllerPropTest, prop_budget_guardrails, (void)) {
   ContextConfig ctx_cfg;
   ctx_cfg.max_context_tokens = 1000000;
   ContextStrategy context(ctx_cfg, memory_store);
-  context.InitSession("default");
+  context.InitSession("test-session");
 
   PolicyConfig pol_cfg;
   PolicyLayer policy(pol_cfg, audit_sink);
-  policy.InitSession("default");
+  policy.InitSession("test-session");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
   auto io = std::make_unique<testing::MockIoBridge>();
@@ -807,7 +808,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_budget_guardrails, (void)) {
   std::vector<std::tuple<State, State, Event>> transitions;
   std::mutex trans_mu;
 
-  Controller ctrl(cfg, std::move(llm), std::move(io), context, policy);
+  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), context, policy);
   ctrl.OnTransition(
       [&](State from, State to, Event event) {
         std::lock_guard<std::mutex> lock(trans_mu);
@@ -868,11 +869,11 @@ RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
   ContextConfig ctx_cfg;
   ctx_cfg.max_context_tokens = 1000000;
   ContextStrategy context(ctx_cfg, memory_store);
-  context.InitSession("default");
+  context.InitSession("test-session");
 
   PolicyConfig pol_cfg;
   PolicyLayer policy(pol_cfg, audit_sink);
-  policy.InitSession("default");
+  policy.InitSession("test-session");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
   auto io = std::make_unique<testing::MockIoBridge>();
@@ -906,7 +907,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
   std::mutex diag_mu;
   std::mutex trans_mu;
 
-  Controller ctrl(cfg, std::move(llm), std::move(io), context, policy);
+  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), context, policy);
   ctrl.OnDiagnostic(
       [&](const std::string& msg) {
         std::lock_guard<std::mutex> lock(diag_mu);
@@ -965,7 +966,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
   }
 
   // Verify: memory store has an entry about the interruption.
-  auto entries = memory_store.GetAll("default");
+  auto entries = memory_store.GetAll("test-session");
   bool found_interrupt_memory = false;
   for (const auto& e : entries) {
     if (e.content.find("interrupted") != std::string::npos ||

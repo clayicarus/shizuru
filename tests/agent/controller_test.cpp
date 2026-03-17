@@ -35,10 +35,10 @@ class ControllerTest : public ::testing::Test {
   void SetUp() override {
     ctx_config_.max_context_tokens = 100000;
     context_ = std::make_unique<ContextStrategy>(ctx_config_, memory_store_);
-    context_->InitSession("default");
+    context_->InitSession("test-session");
 
     policy_ = std::make_unique<PolicyLayer>(pol_config_, audit_sink_);
-    policy_->InitSession("default");
+    policy_->InitSession("test-session");
   }
 
   // Build a Controller with the given config and mock behaviors.
@@ -60,7 +60,8 @@ class ControllerTest : public ::testing::Test {
     };
 
     return std::make_unique<Controller>(
-        std::move(cfg), std::move(llm), std::move(io), *context_, *policy_);
+        "test-session", std::move(cfg), std::move(llm), std::move(io),
+        *context_, *policy_);
   }
 
   Observation MakeUserObs(const std::string& content) {
@@ -167,8 +168,8 @@ TEST_F(ControllerTest, TransitionSequence_ToolCallCycle) {
 
   testing::MockAuditSink audit2;
   PolicyLayer policy2(pol_cfg, audit2);
-  policy2.InitSession("default");
-  policy2.GrantCapability("default", "tool_cap");
+  policy2.InitSession("test-session");
+  policy2.GrantCapability("test-session", "tool_cap");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
   auto io = std::make_unique<testing::MockIoBridge>();
@@ -196,7 +197,7 @@ TEST_F(ControllerTest, TransitionSequence_ToolCallCycle) {
     return ActionResult{true, "tool output", ""};
   };
 
-  Controller ctrl(DefaultConfig(), std::move(llm), std::move(io),
+  Controller ctrl("test-session", DefaultConfig(), std::move(llm), std::move(io),
                   *context_, policy2);
 
   std::vector<std::tuple<State, State, Event>> transitions;
@@ -252,7 +253,7 @@ TEST_F(ControllerTest, ErrorRecovery_LlmFailureThenRecover) {
     return r;
   };
 
-  Controller ctrl(cfg, std::move(llm), std::move(io), *context_, *policy_);
+  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), *context_, *policy_);
 
   std::vector<std::tuple<State, State, Event>> transitions;
   ctrl.OnTransition([&](State from, State to, Event event) {
@@ -353,8 +354,8 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
 
   testing::MockAuditSink audit2;
   PolicyLayer policy2(pol_cfg, audit2);
-  policy2.InitSession("default");
-  policy2.GrantCapability("default", "cap");
+  policy2.InitSession("test-session");
+  policy2.GrantCapability("test-session", "cap");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
   auto io = std::make_unique<testing::MockIoBridge>();
@@ -376,11 +377,15 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
     return ActionResult{true, "ok", ""};
   };
 
-  Controller ctrl(cfg, std::move(llm), std::move(io), *context_, policy2);
+  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), *context_, policy2);
 
   std::vector<std::string> diagnostics;
+  std::vector<std::tuple<State, State, Event>> transitions;
   ctrl.OnDiagnostic(
       [&](const std::string& msg) { diagnostics.push_back(msg); });
+  ctrl.OnTransition([&](State from, State to, Event event) {
+    transitions.push_back({from, to, event});
+  });
 
   ctrl.Start();
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -390,14 +395,26 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
   ctrl.Shutdown();
 
   bool found_action_limit = false;
+  bool found_stop_condition = false;
+  bool found_invalid_transition = false;
   for (const auto& d : diagnostics) {
     if (d.find("action count") != std::string::npos ||
         d.find("Budget exceeded") != std::string::npos) {
       found_action_limit = true;
-      break;
+    }
+    if (d.find("Invalid transition") != std::string::npos) {
+      found_invalid_transition = true;
+    }
+  }
+  for (const auto& [from, to, ev] : transitions) {
+    if (ev == Event::kStopConditionMet && from == State::kThinking &&
+        to == State::kIdle) {
+      found_stop_condition = true;
     }
   }
   EXPECT_TRUE(found_action_limit);
+  EXPECT_TRUE(found_stop_condition);
+  EXPECT_FALSE(found_invalid_transition);
 }
 
 // ---------------------------------------------------------------------------
@@ -458,11 +475,11 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
   ContextConfig ctx_cfg;
   ctx_cfg.max_context_tokens = 100000;
   ContextStrategy context2(ctx_cfg, memory2);
-  context2.InitSession("default");
+  context2.InitSession("test-session");
 
   PolicyConfig pol_cfg;
   PolicyLayer policy2(pol_cfg, audit2);
-  policy2.InitSession("default");
+  policy2.InitSession("test-session");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
   auto io = std::make_unique<testing::MockIoBridge>();
@@ -487,7 +504,7 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
     return r;
   };
 
-  Controller ctrl(cfg, std::move(llm), std::move(io), context2, policy2);
+  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), context2, policy2);
 
   std::vector<std::string> diagnostics;
   std::vector<std::tuple<State, State, Event>> transitions;
@@ -528,7 +545,7 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
   EXPECT_TRUE(found_interrupt);
 
   // Verify memory entry about interruption was recorded.
-  auto entries = memory2.GetAll("default");
+  auto entries = memory2.GetAll("test-session");
   bool found_memory = false;
   for (const auto& e : entries) {
     if (e.content.find("interrupted") != std::string::npos ||
