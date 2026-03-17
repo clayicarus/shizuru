@@ -94,6 +94,8 @@ class AgentRuntime {
 
   bool ShouldSynthesizeAudio(const core::ActionCandidate& response) const;
 
+  static constexpr char MODULE_NAME[] = "Runtime";
+
   RuntimeConfig config_;
   services::ToolRegistry& tools_;
   std::unique_ptr<core::AgentSession> session_;

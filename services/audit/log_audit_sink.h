@@ -5,6 +5,8 @@
 #include <vector>
 
 #include "interfaces/audit_sink.h"
+#include "controller/types.h"
+#include "policy/types.h"
 #include "async_logger.h"
 
 namespace shizuru::services {
@@ -13,23 +15,49 @@ namespace shizuru::services {
 // Also keeps an in-memory buffer for programmatic access.
 class LogAuditSink : public core::AuditSink {
  public:
+  static constexpr char MODULE_NAME[] = "Audit";
+
   void Write(const core::AuditRecord& record) override {
     std::lock_guard<std::mutex> lock(mu_);
     records_.push_back(record);
 
-    // Log to spdlog.
     auto logger = core::GetLogger();
     if (logger) {
-      std::string msg = FormatRecord(record);
-      logger->info("[audit] {}", msg);
+      if (record.previous_state.has_value()) {
+        // State transition record.
+        logger->debug("[{}] seq={} session={} transition: {} --[{}]--> {}",
+                      MODULE_NAME,
+                      record.sequence_number,
+                      record.session_id,
+                      core::StateName(record.previous_state.value()),
+                      record.triggering_event.has_value()
+                          ? core::EventName(record.triggering_event.value())
+                          : "?",
+                      core::StateName(record.new_state.value()));
+      } else if (record.action_type.has_value()) {
+        // Action / policy record.
+        logger->info("[{}] seq={} session={} action={} outcome={}{}",
+                     MODULE_NAME,
+                     record.sequence_number,
+                     record.session_id,
+                     record.action_type.value(),
+                     record.policy_outcome.has_value()
+                         ? core::PolicyOutcomeName(record.policy_outcome.value())
+                         : "?",
+                     record.denial_reason.has_value()
+                         ? " denial=\"" + record.denial_reason.value() + "\""
+                         : "");
+      } else {
+        // Fallback for any other record type.
+        logger->info("[{}] seq={} session={}", MODULE_NAME, record.sequence_number,
+                     record.session_id);
+      }
     }
   }
 
   void Flush() override {
     auto logger = core::GetLogger();
-    if (logger) {
-      logger->flush();
-    }
+    if (logger) { logger->flush(); }
   }
 
   // Retrieve all recorded audit entries (for debugging / inspection).
@@ -39,33 +67,6 @@ class LogAuditSink : public core::AuditSink {
   }
 
  private:
-  static std::string FormatRecord(const core::AuditRecord& r) {
-    std::string msg = "seq=" + std::to_string(r.sequence_number) +
-                      " session=" + r.session_id;
-
-    if (r.previous_state.has_value() && r.new_state.has_value()) {
-      msg += " transition=" +
-             std::to_string(static_cast<int>(r.previous_state.value())) +
-             "->" +
-             std::to_string(static_cast<int>(r.new_state.value()));
-    }
-    if (r.triggering_event.has_value()) {
-      msg += " event=" +
-             std::to_string(static_cast<int>(r.triggering_event.value()));
-    }
-    if (r.action_type.has_value()) {
-      msg += " action=" + r.action_type.value();
-    }
-    if (r.policy_outcome.has_value()) {
-      msg += " outcome=" +
-             std::to_string(static_cast<int>(r.policy_outcome.value()));
-    }
-    if (r.denial_reason.has_value()) {
-      msg += " denial=" + r.denial_reason.value();
-    }
-    return msg;
-  }
-
   mutable std::mutex mu_;
   std::vector<core::AuditRecord> records_;
 };

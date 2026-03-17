@@ -15,6 +15,8 @@ class ToolDispatcher : public core::IoBridge {
   void Cancel() override;
 
  private:
+  static constexpr char MODULE_NAME[] = "ToolDispatcher";
+
   ToolRegistry& registry_;
 };
 

@@ -97,6 +97,9 @@ void AgentRuntime::SendInput(const std::string& payload,
     return;
   }
 
+  LOG_DEBUG("[{}] SendInput mime_type={} payload_len={}",
+            MODULE_NAME, mime_type, payload.size());
+
   if (IsAudioMimeType(mime_type)) {
     last_input_was_audio_.store(true);
 
@@ -149,6 +152,7 @@ void AgentRuntime::EnqueueUserText(const std::string& content) {
     return;
   }
 
+  LOG_INFO("[{}] Enqueue user text: \"{}\"", MODULE_NAME, content);
   core::Observation obs;
   obs.type = core::ObservationType::kUserMessage;
   obs.content = content;
@@ -309,6 +313,8 @@ void AgentRuntime::HandleAssistantResponse(const core::ActionCandidate& response
   if (response.type != core::ActionType::kResponse) {
     return;
   }
+
+  LOG_INFO("[{}] Assistant response: \"{}\"", MODULE_NAME, response.response_text);
 
   RuntimeOutput output;
   output.text = response.response_text;
