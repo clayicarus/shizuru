@@ -1,4 +1,10 @@
-All the markdown documents should be written in English.
+# Shizuru — Agent Guidelines
+
+All markdown documents must be written in English.
+
+## Development Philosophy
+
+This project is in its early stages. Always solve problems directly — no workarounds, no shortcuts, no deferred hacks. If something is broken, fix the root cause.
 
 ## Technology Stack
 
