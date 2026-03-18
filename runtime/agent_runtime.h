@@ -6,6 +6,15 @@
 #include <mutex>
 #include <string>
 
+// Windows <windows.h> defines SendMessage as a macro expanding to
+// SendMessageA or SendMessageW, which breaks any C++ method with the same
+// name.  Undefine it so our AgentRuntime::SendMessage compiles correctly.
+// This guard is harmless on non-Windows platforms where the macro does not
+// exist.
+#ifdef SendMessage
+#undef SendMessage
+#endif
+
 #include "context/config.h"
 #include "controller/config.h"
 #include "controller/types.h"
