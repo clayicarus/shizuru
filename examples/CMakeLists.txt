@@ -9,6 +9,10 @@ target_link_libraries(tool_call_example
   PRIVATE httplib::httplib
 )
 
+# WAV file playout example
+add_executable(wav_playout wav_playout.cpp)
+target_link_libraries(wav_playout PRIVATE shizuru_audio)
+
 # TTS playout example: ElevenLabs streaming TTS → PortAudio player
 add_executable(tts_playout tts_playout.cpp)
 target_link_libraries(tts_playout
