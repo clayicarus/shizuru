@@ -103,7 +103,21 @@ int main(int argc, char* argv[]) {
     bool    has_carry = false;
     size_t  total_bytes = 0;
 
+    // ── Latency tracking ──────────────────────────────────────────────────
+    using Clock = std::chrono::steady_clock;
+    const auto tts_request_time = Clock::now();
+    bool first_chunk_reported = false;
+
     tts.Synthesize(req, [&](const void* data, size_t bytes) {
+      // TTS first-chunk latency: time from Synthesize() call to first audio data
+      if (!first_chunk_reported) {
+        const auto ttfb = std::chrono::duration_cast<std::chrono::milliseconds>(
+            Clock::now() - tts_request_time);
+        std::printf("TTS first-chunk latency:  %lld ms\n",
+                    static_cast<long long>(ttfb.count()));
+        first_chunk_reported = true;
+      }
+
       total_bytes += bytes;
       const auto* src = static_cast<const uint8_t*>(data);
       size_t offset = 0;
@@ -147,6 +161,12 @@ int main(int argc, char* argv[]) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // ── Playout latency: first Write() → first PortAudio callback consumption
+    if (const auto lat = player->PlayoutLatency()) {
+      std::printf("Playout latency:          %lld ms\n",
+                  static_cast<long long>(lat->count()));
+    }
 
     player->Stop();
     std::printf("Done.\n");
