@@ -14,16 +14,8 @@ FetchContent_Declare(
   URL      https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.1.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-# OpenSSL is needed for HTTPS (e.g., api.openai.com).
-# Set to OFF if using a local HTTP-only endpoint (e.g., Ollama).
-find_package(OpenSSL QUIET)
-if(OpenSSL_FOUND)
-  set(HTTPLIB_REQUIRE_OPENSSL ON CACHE BOOL "Require OpenSSL for HTTPS" FORCE)
-else()
-  message(WARNING "OpenSSL not found — HTTPS support disabled. "
-                  "Set base_url to an HTTP endpoint (e.g., http://localhost:11434).")
-  set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
-endif()
+# OpenSSL detection is handled in the root CMakeLists.txt.
+# HTTPLIB_REQUIRE_OPENSSL is already set; just make httplib available.
 FetchContent_MakeAvailable(httplib)
 
 add_library(shizuru_llm STATIC

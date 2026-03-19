@@ -14,12 +14,8 @@ FetchContent_Declare(
   URL      https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.1.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-find_package(OpenSSL QUIET)
-if(OpenSSL_FOUND)
-  set(HTTPLIB_REQUIRE_OPENSSL ON CACHE BOOL "" FORCE)
-else()
-  set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
-endif()
+# OpenSSL detection is handled in the root CMakeLists.txt.
+# HTTPLIB_REQUIRE_OPENSSL is already set; just make httplib available.
 FetchContent_MakeAvailable(httplib)
 
 add_library(shizuru_tts STATIC
