@@ -5,54 +5,46 @@
 
 #include "async_logger.h"
 
-namespace shizuru::services {
+namespace shizuru::io {
 
-ElevenLabsTtsDevice::ElevenLabsTtsDevice(ElevenLabsConfig config,
-                                          std::string device_id)
+ElevenLabsTtsDevice::ElevenLabsTtsDevice(services::ElevenLabsConfig config,
+                                         std::string device_id)
     : device_id_(std::move(device_id)),
-      client_(std::make_unique<ElevenLabsClient>(std::move(config))) {}
+      client_(std::make_unique<services::ElevenLabsClient>(std::move(config))) {}
 
-ElevenLabsTtsDevice::ElevenLabsTtsDevice(std::unique_ptr<TtsClient> client,
-                                          std::string device_id)
+ElevenLabsTtsDevice::ElevenLabsTtsDevice(std::unique_ptr<services::TtsClient> client,
+                                         std::string device_id)
     : device_id_(std::move(device_id)), client_(std::move(client)) {}
 
-std::string ElevenLabsTtsDevice::GetDeviceId() const {
-  return device_id_;
-}
+std::string ElevenLabsTtsDevice::GetDeviceId() const { return device_id_; }
 
-std::vector<io::PortDescriptor> ElevenLabsTtsDevice::GetPortDescriptors() const {
+std::vector<PortDescriptor> ElevenLabsTtsDevice::GetPortDescriptors() const {
   return {
-      {kTextIn,   io::PortDirection::kInput,  "text/plain"},
-      {kAudioOut, io::PortDirection::kOutput, "audio/pcm"},
+      {kTextIn,   PortDirection::kInput,  "text/plain"},
+      {kAudioOut, PortDirection::kOutput, "audio/pcm"},
   };
 }
 
-void ElevenLabsTtsDevice::OnInput(const std::string& port_name,
-                                   io::DataFrame frame) {
+void ElevenLabsTtsDevice::OnInput(const std::string& port_name, DataFrame frame) {
   if (!active_.load()) { return; }
-
   if (port_name != kTextIn) {
     LOG_WARN("ElevenLabsTtsDevice: unsupported input port: {}", port_name);
     return;
   }
-
   const std::string text(frame.payload.begin(), frame.payload.end());
   if (text.empty()) { return; }
 
-  // Run synthesis on a background thread so OnInput returns immediately.
   std::lock_guard<std::mutex> lock(synth_mutex_);
   if (synth_thread_.joinable()) { synth_thread_.join(); }
   synth_thread_ = std::thread([this, text] { Synthesize(text); });
 }
 
-void ElevenLabsTtsDevice::SetOutputCallback(io::OutputCallback cb) {
+void ElevenLabsTtsDevice::SetOutputCallback(OutputCallback cb) {
   std::lock_guard<std::mutex> lock(output_cb_mutex_);
   output_cb_ = std::move(cb);
 }
 
-void ElevenLabsTtsDevice::Start() {
-  active_.store(true);
-}
+void ElevenLabsTtsDevice::Start() { active_.store(true); }
 
 void ElevenLabsTtsDevice::Stop() {
   active_.store(false);
@@ -61,9 +53,7 @@ void ElevenLabsTtsDevice::Stop() {
   if (synth_thread_.joinable()) { synth_thread_.join(); }
 }
 
-void ElevenLabsTtsDevice::CancelSynthesis() {
-  Stop();
-}
+void ElevenLabsTtsDevice::CancelSynthesis() { Stop(); }
 
 // ---------------------------------------------------------------------------
 // Private
@@ -74,15 +64,15 @@ void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
     client_->Synthesize(text, [this](const void* data, size_t bytes) {
       if (!active_.load() || bytes == 0) { return; }
 
-      io::DataFrame frame;
+      DataFrame frame;
       frame.type = "audio/pcm";
       frame.payload.assign(static_cast<const uint8_t*>(data),
                            static_cast<const uint8_t*>(data) + bytes);
       frame.source_device = device_id_;
-      frame.source_port = kAudioOut;
-      frame.timestamp = std::chrono::steady_clock::now();
+      frame.source_port   = kAudioOut;
+      frame.timestamp     = std::chrono::steady_clock::now();
 
-      io::OutputCallback cb;
+      OutputCallback cb;
       {
         std::lock_guard<std::mutex> lock(output_cb_mutex_);
         cb = output_cb_;
@@ -94,4 +84,4 @@ void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
   }
 }
 
-}  // namespace shizuru::services
+}  // namespace shizuru::io

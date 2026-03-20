@@ -16,7 +16,6 @@ FetchContent_MakeAvailable(httplib)
 
 add_library(shizuru_tts_elevenlabs STATIC
   elevenlabs_client.cpp
-  elevenlabs_tts_device.cpp
 )
 
 target_include_directories(shizuru_tts_elevenlabs

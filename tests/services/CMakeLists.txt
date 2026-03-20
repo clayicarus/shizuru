@@ -57,12 +57,13 @@ add_executable(elevenlabs_tts_device_test
   elevenlabs_tts_device_test.cpp
 )
 target_link_libraries(elevenlabs_tts_device_test
-  PRIVATE shizuru_tts_elevenlabs
+  PRIVATE shizuru_tts_elevenlabs_device
   PRIVATE GTest::gtest_main
   PRIVATE rapidcheck_gtest
 )
 target_include_directories(elevenlabs_tts_device_test
   PRIVATE ${CMAKE_SOURCE_DIR}
+  PRIVATE ${CMAKE_SOURCE_DIR}/services
 )
 add_test(NAME elevenlabs_tts_device_test COMMAND elevenlabs_tts_device_test)
 set_tests_properties(elevenlabs_tts_device_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=50")

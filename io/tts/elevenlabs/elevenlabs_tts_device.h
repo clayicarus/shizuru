@@ -12,26 +12,26 @@
 #include "tts/tts_client.h"
 #include "tts/config.h"
 
-namespace shizuru::services {
+namespace shizuru::io {
 
 // ElevenLabs implementation of TtsDevice.
 // Wraps ElevenLabsClient: accepts text/plain DataFrames on "text_in",
 // emits audio/pcm DataFrames on "audio_out".
-class ElevenLabsTtsDevice : public io::TtsDevice {
+class ElevenLabsTtsDevice : public TtsDevice {
  public:
   // Production constructor: creates ElevenLabsClient from config.
-  explicit ElevenLabsTtsDevice(ElevenLabsConfig config,
-                                std::string device_id = "elevenlabs_tts");
+  explicit ElevenLabsTtsDevice(services::ElevenLabsConfig config,
+                               std::string device_id = "elevenlabs_tts");
 
   // Test constructor: inject any TtsClient (e.g. a mock).
-  ElevenLabsTtsDevice(std::unique_ptr<TtsClient> client,
+  ElevenLabsTtsDevice(std::unique_ptr<services::TtsClient> client,
                       std::string device_id);
 
   // IoDevice interface
   std::string GetDeviceId() const override;
-  std::vector<io::PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, io::DataFrame frame) override;
-  void SetOutputCallback(io::OutputCallback cb) override;
+  std::vector<PortDescriptor> GetPortDescriptors() const override;
+  void OnInput(const std::string& port_name, DataFrame frame) override;
+  void SetOutputCallback(OutputCallback cb) override;
   void Start() override;
   void Stop() override;
 
@@ -45,15 +45,14 @@ class ElevenLabsTtsDevice : public io::TtsDevice {
   static constexpr char kAudioOut[] = "audio_out";
 
   std::string device_id_;
-  std::unique_ptr<TtsClient> client_;  // owned, polymorphic
+  std::unique_ptr<services::TtsClient> client_;
   std::atomic<bool> active_{false};
 
   mutable std::mutex output_cb_mutex_;
-  io::OutputCallback output_cb_;
+  OutputCallback output_cb_;
 
-  // Synthesis runs on a background thread to avoid blocking OnInput.
   std::mutex synth_mutex_;
   std::thread synth_thread_;
 };
 
-}  // namespace shizuru::services
+}  // namespace shizuru::io

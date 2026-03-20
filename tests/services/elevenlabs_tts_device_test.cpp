@@ -16,9 +16,9 @@
 #include "io/data_frame.h"
 #include "tts/tts_client.h"
 #include "tts/config.h"
-#include "services/tts/elevenlabs/elevenlabs_tts_device.h"
+#include "io/tts/elevenlabs/elevenlabs_tts_device.h"
 
-namespace shizuru::services {
+namespace shizuru::io {
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -192,4 +192,4 @@ TEST(ElevenLabsTtsDeviceTest, FrameDiscardedWhenStopped) {
 }
 
 }  // namespace
-}  // namespace shizuru::services
+}  // namespace shizuru::io

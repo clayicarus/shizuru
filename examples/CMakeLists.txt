@@ -26,3 +26,18 @@ target_link_libraries(baidu_voice_test
   PRIVATE shizuru_asr_baidu
   PRIVATE shizuru_tts_baidu
 )
+
+# Voice pipeline: Microphone → Baidu ASR → Baidu TTS → Speaker
+add_executable(voice_pipeline voice_pipeline.cpp)
+target_link_libraries(voice_pipeline
+  PRIVATE shizuru_asr_baidu_device
+  PRIVATE shizuru_tts_baidu_device
+  PRIVATE shizuru_io_probe
+  PRIVATE shizuru_audio
+  PRIVATE shizuru_utils
+)
+target_include_directories(voice_pipeline
+  PRIVATE ${CMAKE_SOURCE_DIR}
+  PRIVATE ${CMAKE_SOURCE_DIR}/services
+  PRIVATE ${CMAKE_SOURCE_DIR}/io
+)
