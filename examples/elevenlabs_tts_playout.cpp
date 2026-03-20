@@ -8,7 +8,7 @@
 #include "async_logger.h"
 #include "audio_device/port_audio/pa_player.h"
 #include "tts/config.h"
-#include "tts/elevenlabs_client.h"
+#include "tts/elevenlabs/elevenlabs_client.h"
 
 static void PrintUsage(const char* prog) {
   std::fprintf(stderr,

@@ -12,10 +12,10 @@
 #include <memory>
 #include <string>
 
-#include "baidu/baidu_config.h"
-#include "baidu/token_manager.h"
-#include "baidu/tts/baidu_tts_client.h"
-#include "baidu/asr/baidu_asr_client.h"
+#include "utils/baidu/baidu_config.h"
+#include "utils/baidu/baidu_token_manager.h"
+#include "asr/baidu/baidu_asr_client.h"
+#include "tts/baidu/baidu_tts_client.h"
 
 int main() {
   std::printf("=== Baidu Voice Integration Test ===\n\n");

@@ -14,14 +14,15 @@ add_executable(wav_playout wav_playout.cpp)
 target_link_libraries(wav_playout PRIVATE shizuru_audio)
 
 # TTS playout example: ElevenLabs streaming TTS → PortAudio player
-add_executable(tts_playout tts_playout.cpp)
-target_link_libraries(tts_playout
-  PRIVATE shizuru_tts
+add_executable(elevenlabs_tts_playout elevenlabs_tts_playout.cpp)
+target_link_libraries(elevenlabs_tts_playout
+  PRIVATE shizuru_tts_elevenlabs
   PRIVATE shizuru_audio
 )
 
 # Baidu voice integration test
 add_executable(baidu_voice_test baidu_voice_test.cpp)
 target_link_libraries(baidu_voice_test
-  PRIVATE shizuru_baidu
+  PRIVATE shizuru_asr_baidu
+  PRIVATE shizuru_tts_baidu
 )

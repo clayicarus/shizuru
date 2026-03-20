@@ -236,7 +236,6 @@ int main(int argc, char* argv[]) {
     config.policy.initial_rules = {allow_weather};
   }
   config.controller.max_turns        = 100;
-  config.auto_tts_on_audio_input     = false;
 
   // Create runtime.
   shizuru::runtime::AgentRuntime runtime(config, tools);
