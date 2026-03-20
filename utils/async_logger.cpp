@@ -11,6 +11,9 @@ std::shared_ptr<spdlog::logger> g_logger;
 }  // namespace
 
 void InitLogger(const LoggerConfig& config) {
+  // Idempotent: skip if already initialized.
+  if (g_logger) return;
+
   // Create the async thread pool (shared by all async loggers).
   spdlog::init_thread_pool(config.async_queue_size,
                            config.async_thread_count);

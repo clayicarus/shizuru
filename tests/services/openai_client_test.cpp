@@ -16,7 +16,7 @@
 #include "controller/types.h"
 #include "interfaces/llm_client.h"
 #include "llm/config.h"
-#include "llm/openai_client.h"
+#include "llm/openai/openai_client.h"
 #include "test_utils.h"
 
 namespace shizuru::services {

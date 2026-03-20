@@ -9,7 +9,7 @@
 #include "controller/types.h"
 #include "interfaces/llm_client.h"
 #include "llm/config.h"
-#include "llm/json_parser.h"
+#include "llm/openai/json_parser.h"
 
 namespace shizuru::services {
 namespace {
