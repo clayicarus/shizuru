@@ -10,3 +10,12 @@ build/
 
 # OS
 Thumbs.db
+
+# Runtime artifacts
+*.log
+*.mp3
+*.wav
+
+# Temporary docs
+PR_DESCRIPTION.md
+STATUS.md

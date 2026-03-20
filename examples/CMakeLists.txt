@@ -19,3 +19,9 @@ target_link_libraries(tts_playout
   PRIVATE shizuru_tts
   PRIVATE shizuru_audio
 )
+
+# Baidu voice integration test
+add_executable(baidu_voice_test baidu_voice_test.cpp)
+target_link_libraries(baidu_voice_test
+  PRIVATE shizuru_baidu
+)

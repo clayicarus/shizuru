@@ -25,5 +25,6 @@ else()
 endif()
 
 add_subdirectory(llm)
+add_subdirectory(baidu)
 add_subdirectory(io)
 add_subdirectory(tts)
