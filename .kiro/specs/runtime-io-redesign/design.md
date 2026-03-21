@@ -127,24 +127,27 @@ io/
   ├── io_device.h           ← IoDevice base interface + OutputCallback
   ├── data_frame.h          ← DataFrame struct
   ├── audio/                ← existing, unchanged
+  ├── asr/
+  │   ├── asr_device.h      ← AsrDevice interface (extends IoDevice)
+  │   ├── types.h           ← AsrRequest/AsrResult types
+  │   └── baidu/            → shizuru_asr_baidu_device  (BaiduAsrDevice)
   ├── tts/
   │   ├── tts_device.h      ← TtsDevice interface (extends IoDevice)
-  │   └── types.h           ← TtsRequest/TtsResult types
-  └── asr/
-      ├── asr_device.h      ← AsrDevice interface (extends IoDevice)
-      └── types.h           ← AsrRequest/AsrResult types
+  │   ├── types.h           ← TtsRequest/TtsResult types
+  │   ├── baidu/            → shizuru_tts_baidu_device  (BaiduTtsDevice)
+  │   └── elevenlabs/       → shizuru_tts_elevenlabs_device  (ElevenLabsTtsDevice)
+  └── probe/                → shizuru_io_probe  (LogDevice; future: perf, metering)
 
 runtime/
   ├── agent_runtime.h/.cpp  ← rewritten as bus router
   ├── route_table.h         ← RouteTable + Route structs
   └── core_device.h/.cpp    ← CoreDevice adapter
 
-services/
-  ├── tts/elevenlabs/
-  │   └── elevenlabs_tts_device.h/.cpp  ← ElevenLabs TtsDevice impl
-  ├── asr/baidu/
-  │   └── baidu_asr_device.h/.cpp       ← Baidu AsrDevice impl
-  └── ...                               ← existing services unchanged
+services/                   ← vendor client implementations only
+  ├── asr/baidu/            → shizuru_asr_baidu        (BaiduAsrClient)
+  ├── tts/baidu/            → shizuru_tts_baidu         (BaiduTtsClient)
+  ├── tts/elevenlabs/       → shizuru_tts_elevenlabs    (ElevenLabsClient)
+  └── ...                   ← other services unchanged
 ```
 
 ### IoDevice Interface (`io/io_device.h`)
@@ -656,8 +659,8 @@ tests/
     agent_runtime_test.cpp        ← unit + integration tests for AgentRuntime
     agent_runtime_prop_test.cpp   ← property tests for AgentRuntime (Properties 2, 11, 12, 13)
   services/
-    elevenlabs_tts_device_test.cpp
-    baidu_asr_device_test.cpp
+    elevenlabs_tts_device_test.cpp  ← tests for io::ElevenLabsTtsDevice
+    baidu_asr_device_test.cpp       ← tests for io::BaiduAsrDevice
 ```
 
 ### Mock Strategy

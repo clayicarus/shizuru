@@ -179,26 +179,39 @@ flowchart LR
 
 ## Services Directory Layout
 
-Services follow a `services/<module>/<vendor>` layout. Each vendor target is a standalone CMake static library.
+Services contain only vendor **client** implementations. IoDevice wrappers live in `io/`.
 
 ```
 services/
 ├── llm/
 │   └── openai/          → shizuru_llm_openai
 ├── asr/
-│   └── baidu/           → shizuru_asr_baidu
+│   └── baidu/           → shizuru_asr_baidu        (BaiduAsrClient only)
 ├── tts/
-│   ├── baidu/           → shizuru_tts_baidu
-│   └── elevenlabs/      → shizuru_tts_elevenlabs
+│   ├── baidu/           → shizuru_tts_baidu         (BaiduTtsClient only)
+│   └── elevenlabs/      → shizuru_tts_elevenlabs    (ElevenLabsClient only)
 ├── utils/
 │   └── baidu/           → shizuru_baidu_utils  (BaiduConfig + BaiduTokenManager)
 ├── io/                  → shizuru_io_services   (ToolDispatcher, ToolRegistry)
 └── memory/              (InMemoryStore — header-only)
 ```
 
+IoDevice implementations that wrap service clients live under `io/`:
+
+```
+io/
+├── asr/
+│   └── baidu/           → shizuru_asr_baidu_device  (BaiduAsrDevice)
+├── tts/
+│   ├── baidu/           → shizuru_tts_baidu_device  (BaiduTtsDevice)
+│   └── elevenlabs/      → shizuru_tts_elevenlabs_device  (ElevenLabsTtsDevice)
+└── probe/               → shizuru_io_probe  (LogDevice, and future perf/metering devices)
+```
+
 When adding a new vendor implementation:
-- Create `services/<module>/<vendor>/` with its own `CMakeLists.txt`
-- Add `add_subdirectory(<vendor>)` in the parent `services/<module>/CMakeLists.txt`
+- Create `services/<module>/<vendor>/` with its own `CMakeLists.txt` for the client
+- Create `io/<module>/<vendor>/` with its own `CMakeLists.txt` for the IoDevice wrapper
+- Add `add_subdirectory(<vendor>)` in the respective parent `CMakeLists.txt`
 - Shared vendor utilities (e.g., auth tokens) go in `services/utils/<vendor>/`
 - Do not add vendor source files directly to a parent CMakeLists target
 
