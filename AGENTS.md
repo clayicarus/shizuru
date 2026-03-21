@@ -177,6 +177,16 @@ flowchart LR
 4. Data plane should avoid token-by-token LLM involvement for streaming media.
 5. Flutter UI communicates with C++ core via dart:ffi; no business logic in Dart.
 
+### VAD Device Design
+
+`EnergyVadDevice` combines VAD detection and audio gating into a single `IoDevice`:
+- Sliding window RMS max-filter (configurable window size, default 10 frames ~200ms)
+- Pre-roll buffer: replays the last N frames on `speech_start` so onset frames are not lost
+- Emits confirmed speech frames only on `audio_out`
+- Emits `speech_start` / `speech_active` / `speech_end` events on `vad_out` for observability
+
+`VadEventDevice` is a generic event sink: fires a callback when a specified VAD event arrives. Used to trigger `asr.Flush()` on `speech_end` without coupling VAD to ASR directly.
+
 ## Services Directory Layout
 
 Services contain only vendor **client** implementations. IoDevice wrappers live in `io/`.
@@ -200,12 +210,15 @@ IoDevice implementations that wrap service clients live under `io/`:
 
 ```
 io/
+├── audio/               → shizuru_audio  (AudioCaptureDevice, AudioPlayoutDevice)
+│   └── audio_device/    → platform backends (PortAudio, Oboe, CoreAudio)
 ├── asr/
 │   └── baidu/           → shizuru_asr_baidu_device  (BaiduAsrDevice)
 ├── tts/
 │   ├── baidu/           → shizuru_tts_baidu_device  (BaiduTtsDevice)
 │   └── elevenlabs/      → shizuru_tts_elevenlabs_device  (ElevenLabsTtsDevice)
-└── probe/               → shizuru_io_probe  (LogDevice, and future perf/metering devices)
+├── vad/                 → shizuru_vad  (EnergyVadDevice, VadEventDevice)
+└── probe/               → shizuru_io_probe  (LogDevice, PcmDumpDevice)
 ```
 
 When adding a new vendor implementation:

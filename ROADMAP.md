@@ -28,17 +28,19 @@
 - [x] `services/tts/elevenlabs/` → `shizuru_tts_elevenlabs`
 - [x] `services/utils/baidu/` → `shizuru_baidu_utils` (shared token manager)
 
-## Phase 4 — Voice Pipeline
+## Phase 4 — Voice Pipeline (Done)
 
-Wire voice components as `IoDevice` instances into the runtime bus.
-
-- [ ] VAD device: voice activity detection (WebRTC VAD or Silero)
-- [ ] ASR device: wrap `BaiduAsrClient` / Whisper as an `IoDevice`
-- [ ] TTS device: wrap `BaiduTtsClient` / ElevenLabs as an `IoDevice`
-- [ ] Audio capture device: push/callback-driven recorder `IoDevice`
-- [ ] Audio playout device: player `IoDevice`
-- [ ] DMA routes: capture → VAD → ASR → CoreDevice (audio_in), CoreDevice → TTS → playout
-- [ ] Control plane: interrupt and reroute commands from controller to voice devices
+- [x] `AudioCaptureDevice` / `AudioPlayoutDevice`: PortAudio-backed `IoDevice` wrappers
+- [x] `EnergyVadDevice`: energy-based VAD with sliding window RMS max-filter, pre-roll buffering, and audio gating — all in one `IoDevice`
+- [x] `VadEventDevice`: fires a callback on configurable VAD events (e.g. `speech_end` → `asr.Flush()`)
+- [x] `BaiduAsrDevice`: wraps `BaiduAsrClient` as an `IoDevice` (audio_in → text_out)
+- [x] `BaiduTtsDevice`: wraps `BaiduTtsClient` as an `IoDevice` (text_in → audio_out)
+- [x] `ElevenLabsTtsDevice`: wraps `ElevenLabsClient` as an `IoDevice`
+- [x] `LogDevice` / `PcmDumpDevice`: observability probes (`shizuru_io_probe`)
+- [x] DMA routes: capture → VAD → ASR → CoreDevice, CoreDevice → TTS → playout
+- [x] VAD unit tests: 32 tests covering state machine, audio gating, pre-roll, sliding window
+- [x] `asr_tts_echo_pipeline` example: full voice echo pipeline without LLM
+- [x] `voice_agent` example: full voice agent (VAD + ASR + LLM + TTS)
 
 ## Phase 5 — Platform Audio Backends
 
@@ -61,4 +63,5 @@ Wire voice components as `IoDevice` instances into the runtime bus.
 - [ ] Human-in-the-loop approval flow (`PolicyLayer::ResolveApproval`)
 - [ ] Built-in tools: filesystem read/write, HTTP fetch, code runner
 - [ ] CI: GitHub Actions on macOS, Linux, Windows
-- [ ] Integration test: full voice pipeline end-to-end (capture → VAD → ASR → agent → TTS → playout)
+- [ ] VAD: upgrade to WebRTC VAD or Silero for production accuracy
+- [ ] Control plane: interrupt and reroute commands from controller to voice devices

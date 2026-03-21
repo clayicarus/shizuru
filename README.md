@@ -22,10 +22,17 @@ cmake -B build -G Ninja
 cmake --build build
 ```
 
-## Run
+## Test
 
 ```bash
-# Built-in mock LLM server — no API key needed
+ctest --test-dir build
+```
+
+## Examples
+
+**Text agent with tool calling** (no audio hardware needed):
+```bash
+# Built-in mock LLM — no API key required
 ./build/examples/tool_call_example
 
 # Local Ollama
@@ -35,19 +42,27 @@ cmake --build build
 ./build/examples/tool_call_example https://api.openai.com sk-your-key gpt-4o
 ```
 
-## Test
-
+**Voice echo pipeline** — microphone → VAD → Baidu ASR → Baidu TTS → speaker:
 ```bash
-ctest --test-dir build
+export BAIDU_API_KEY=...
+export BAIDU_SECRET_KEY=...
+./build/examples/asr_tts_echo_pipeline
+```
+
+**Full voice agent** — microphone → VAD → ASR → LLM → TTS → speaker:
+```bash
+export BAIDU_API_KEY=...
+export BAIDU_SECRET_KEY=...
+export OPENAI_API_KEY=...
+./build/examples/voice_agent [--base-url <url>] [--model <model>] [--debug]
 ```
 
 ## Project structure
 
 ```
 core/        Agent framework: controller, context strategy, policy, session
-services/    Vendor implementations: LLM, ASR, TTS, tools, memory
-             Layout: services/<module>/<vendor>/
-io/          IoDevice abstraction + audio device interfaces
+services/    Vendor clients: LLM (OpenAI), ASR (Baidu), TTS (Baidu, ElevenLabs)
+io/          IoDevice abstraction, audio capture/playout, VAD, ASR/TTS device wrappers
 runtime/     AgentRuntime (device bus), CoreDevice, RouteTable
 examples/    Runnable examples
 tests/       Unit and property-based tests
@@ -58,18 +73,25 @@ tests/       Unit and property-based tests
 The runtime is a device bus. Every component — including the agent session — is an `IoDevice`. Data flows as typed `DataFrame` packets routed by a `RouteTable`.
 
 ```
-User input
+Microphone
+    │  audio/pcm (DMA)
+    ▼
+EnergyVadDevice  ──vad/event──►  VadEventDevice (triggers ASR flush)
+    │  audio/pcm (speech frames only, with pre-roll)
+    ▼
+BaiduAsrDevice
     │  text/plain
     ▼
-CoreDevice (AgentSession adapter)
-    │  text/plain
+CoreDevice (AgentSession — LLM reasoning loop)
+    │  text/plain  (via OnOutput callback)
     ▼
-app_output sink → OutputCallback
+BaiduTtsDevice
+    │  audio/pcm (DMA)
+    ▼
+Speaker
 ```
 
-Audio and voice components (VAD, ASR, TTS) are registered as `IoDevice` instances and connected via routes. DMA routes (`requires_control_plane = false`) bypass the LLM loop for low-latency audio streaming.
-
-The agent core is modeled after an OS: controller as state machine, LLM as CPU, context strategy as memory manager, policy layer as permission boundary.
+DMA routes (`requires_control_plane = false`) bypass the LLM loop for low-latency audio. The agent core is modeled after an OS: controller as state machine, LLM as CPU, context strategy as memory manager, policy layer as permission boundary.
 
 ## Cross-platform
 
