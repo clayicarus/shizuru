@@ -101,7 +101,7 @@ std::vector<io::PortDescriptor> CoreDevice::GetPortDescriptors() const {
 }
 
 void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
-  if (!active_) {
+  if (!active_.load()) {
     return;
   }
 
@@ -132,12 +132,12 @@ void CoreDevice::SetOutputCallback(io::OutputCallback cb) {
 }
 
 void CoreDevice::Start() {
-  active_ = true;
+  active_.store(true);
   session_->Start();
 }
 
 void CoreDevice::Stop() {
-  active_ = false;
+  active_.store(false);
   session_->Shutdown();
 }
 

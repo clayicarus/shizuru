@@ -1,5 +1,6 @@
 #include "controller/controller.h"
 
+#include <cassert>
 #include <chrono>
 #include <exception>
 #include <string>
@@ -104,16 +105,22 @@ State Controller::GetState() const {
 
 // Register callbacks for state transitions.
 void Controller::OnTransition(TransitionCallback cb) {
+  std::lock_guard<std::mutex> lock(callbacks_mutex_);
+  assert(!loop_thread_.joinable() && "OnTransition must be called before Start()");
   transition_callbacks_.push_back(std::move(cb));
 }
 
 // Register callback for diagnostic events.
 void Controller::OnDiagnostic(DiagnosticCallback cb) {
+  std::lock_guard<std::mutex> lock(callbacks_mutex_);
+  assert(!loop_thread_.joinable() && "OnDiagnostic must be called before Start()");
   diagnostic_callbacks_.push_back(std::move(cb));
 }
 
 // Register callback for assistant text responses.
 void Controller::OnResponse(ResponseCallback cb) {
+  std::lock_guard<std::mutex> lock(callbacks_mutex_);
+  assert(!loop_thread_.joinable() && "OnResponse must be called before Start()");
   response_callbacks_.push_back(std::move(cb));
 }
 

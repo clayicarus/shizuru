@@ -77,16 +77,17 @@ Steps:
 
 The following tracks are prioritized in order. Please coordinate before starting work on Phase B or C to avoid conflicts.
 
-### Phase A — Thread Safety (Priority: High)
+### Phase A — Thread Safety (Done)
 
-The current implementation has several concurrency issues that must be fixed before further architectural work.
+T1-1 through T1-6 are complete. T1-7 is planned.
 
-- **T1-1** `AgentRuntime::DispatchFrame`: add `std::shared_mutex` to protect `devices_` and `route_table_`. `DispatchFrame` holds a shared lock; `RegisterDevice`, `UnregisterDevice`, `AddRoute`, and `Shutdown` hold a unique lock. Prevents use-after-free when `Shutdown` races with an in-flight frame.
-- **T1-2** `BaiduAsrDevice::Flush()`: remove the blocking `join` from the PortAudio callback thread. Introduce an internal worker thread + task queue; `Flush()` posts a task and returns immediately.
-- **T1-3** `ElevenLabsTtsDevice::OnInput`: remove the blocking `join` from `Controller::loop_thread_`. Same pattern: post to an internal queue, do not join on the caller's thread.
-- **T1-4** `CoreDevice::active_`: change from `bool` to `std::atomic<bool>`. The current plain `bool` is accessed from multiple threads without synchronization.
-- **T1-5** `Controller` callbacks: `OnResponse`, `OnTransition`, `OnDiagnostic` register into `std::vector` without a lock. Add a mutex or enforce (with `assert`) that all registrations happen before `Start()`.
-- **T1-6** `AudioPlayoutDevice`: remove the debug `static fopen` / `fwrite` from the production code path.
+- **T1-1** ✅ `AgentRuntime::DispatchFrame`: `std::shared_mutex` added to protect `devices_` and `route_table_`. `DispatchFrame` holds a shared lock; `RegisterDevice`, `UnregisterDevice`, `AddRoute`, `RemoveRoute`, and `Shutdown` hold a unique lock.
+- **T1-2** ✅ `BaiduAsrDevice::Flush()`: blocking `join` removed from PortAudio callback thread. Internal worker thread + task queue introduced; `Flush()` snapshots audio and posts a task, returning immediately.
+- **T1-3** ✅ `ElevenLabsTtsDevice::OnInput`: blocking `join` removed from `Controller::loop_thread_`. Same pattern: internal worker thread + task queue; `OnInput` posts text and returns immediately.
+- **T1-4** ✅ `CoreDevice::active_`: changed from `bool` to `std::atomic<bool>`.
+- **T1-5** ✅ `Controller` callbacks: `OnResponse`, `OnTransition`, `OnDiagnostic` now assert that `loop_thread_` is not yet running, enforcing pre-`Start()` registration.
+- **T1-6** ✅ `AudioPlayoutDevice`: debug `static fopen` / `fwrite` removed from production code path.
+- **T1-7** `IoExecutor`: introduce a shared thread pool in `AgentRuntime` for network I/O tasks. `BaiduAsrDevice` and `ElevenLabsTtsDevice` replace their per-device worker threads with an injected `Executor&`. Audio-path devices (capture, VAD, playout) are unaffected — they run on PortAudio's real-time thread and must not share the pool. Enables future migration to a lock-free MPSC queue without changing device code.
 
 ### Phase B — Core / Tool Call Decoupling (Priority: Medium)
 

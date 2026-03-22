@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -82,11 +83,12 @@ class AgentRuntime {
   bool HasActiveSession() const;
 
  private:
-  // Central routing function: looks up route table and delivers frame to
-  // all destination devices. Zero data transformation.
+  // Private helpers
   void DispatchFrame(const std::string& device_id,
                      const std::string& port_name,
                      io::DataFrame frame);
+  // Non-locking version for internal use (caller must hold devices_mutex_).
+  bool HasActiveSessionLocked() const { return core_device_ != nullptr; }
 
   static constexpr char MODULE_NAME[] = "Runtime";
 
@@ -99,6 +101,7 @@ class AgentRuntime {
 
   CoreDevice* core_device_ = nullptr;  // non-owning pointer into devices_
 
+  mutable std::shared_mutex devices_mutex_;  // protects devices_ and route_table_
   mutable std::mutex output_cb_mutex_;
   OutputCallback output_cb_;
 };

@@ -1,8 +1,11 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <thread>
 #include <vector>
@@ -17,6 +20,7 @@ namespace shizuru::io {
 // Baidu implementation of AsrDevice.
 // Accepts audio/pcm DataFrames on "audio_in", emits text/plain on "text_out".
 // Accumulates audio until Flush() is called (or Stop()), then transcribes.
+// Flush() is non-blocking: it posts a task to an internal worker thread.
 class BaiduAsrDevice : public AsrDevice {
  public:
   // Creates its own BaiduTokenManager internally.
@@ -27,6 +31,8 @@ class BaiduAsrDevice : public AsrDevice {
   BaiduAsrDevice(services::BaiduConfig config,
                  std::shared_ptr<services::BaiduTokenManager> token_mgr,
                  std::string device_id = "baidu_asr");
+
+  ~BaiduAsrDevice();
 
   // IoDevice interface
   std::string GetDeviceId() const override;
@@ -39,11 +45,12 @@ class BaiduAsrDevice : public AsrDevice {
   // AsrDevice interface
   void CancelTranscription() override;
 
-  // Flush accumulated audio and run transcription.
+  // Non-blocking: posts a transcription task to the internal worker thread.
   void Flush();
 
  private:
-  void Transcribe();
+  void WorkerLoop();
+  void Transcribe(std::vector<uint8_t> audio);
 
   static constexpr char kAudioIn[] = "audio_in";
   static constexpr char kTextOut[] = "text_out";
@@ -61,8 +68,12 @@ class BaiduAsrDevice : public AsrDevice {
   std::mutex audio_mutex_;
   std::vector<uint8_t> audio_buffer_;
 
-  std::mutex transcribe_mutex_;
-  std::thread transcribe_thread_;
+  // Internal worker thread + task queue (replaces per-Flush thread).
+  std::mutex worker_mutex_;
+  std::condition_variable worker_cv_;
+  std::queue<std::function<void()>> task_queue_;
+  std::thread worker_thread_;
+  std::atomic<bool> worker_stop_{false};
 };
 
 }  // namespace shizuru::io

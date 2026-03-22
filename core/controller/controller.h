@@ -113,7 +113,8 @@ class Controller {
   std::thread loop_thread_;
   std::atomic<bool> shutdown_requested_{false};
 
-  // Callbacks
+  // Callbacks (must be registered before Start())
+  std::mutex callbacks_mutex_;
   std::vector<TransitionCallback> transition_callbacks_;
   std::vector<DiagnosticCallback> diagnostic_callbacks_;
   std::vector<ResponseCallback> response_callbacks_;

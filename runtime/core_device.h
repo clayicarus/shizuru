@@ -56,7 +56,7 @@ class CoreDevice : public io::IoDevice {
   std::unique_ptr<core::AgentSession> session_;
   io::OutputCallback output_cb_;
   mutable std::mutex output_cb_mutex_;
-  bool active_ = false;
+  std::atomic<bool> active_{false};
 };
 
 }  // namespace shizuru::runtime

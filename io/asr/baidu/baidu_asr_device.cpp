@@ -22,6 +22,18 @@ BaiduAsrDevice::BaiduAsrDevice(services::BaiduConfig config,
       token_mgr_(std::move(token_mgr)),
       client_(std::make_unique<services::BaiduAsrClient>(config, token_mgr_)) {}
 
+BaiduAsrDevice::~BaiduAsrDevice() {
+  // Ensure worker thread is stopped cleanly.
+  if (worker_thread_.joinable()) {
+    {
+      std::lock_guard<std::mutex> lock(worker_mutex_);
+      worker_stop_.store(true);
+    }
+    worker_cv_.notify_one();
+    worker_thread_.join();
+  }
+}
+
 std::string BaiduAsrDevice::GetDeviceId() const { return device_id_; }
 
 std::vector<PortDescriptor> BaiduAsrDevice::GetPortDescriptors() const {
@@ -47,12 +59,20 @@ void BaiduAsrDevice::SetOutputCallback(OutputCallback cb) {
   output_cb_ = std::move(cb);
 }
 
-void BaiduAsrDevice::Start() { active_.store(true); }
+void BaiduAsrDevice::Start() {
+  active_.store(true);
+  worker_stop_.store(false);
+  worker_thread_ = std::thread(&BaiduAsrDevice::WorkerLoop, this);
+}
 
 void BaiduAsrDevice::Stop() {
   active_.store(false);
-  std::lock_guard<std::mutex> lock(transcribe_mutex_);
-  if (transcribe_thread_.joinable()) { transcribe_thread_.join(); }
+  {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    worker_stop_.store(true);
+  }
+  worker_cv_.notify_one();
+  if (worker_thread_.joinable()) { worker_thread_.join(); }
 }
 
 void BaiduAsrDevice::CancelTranscription() {
@@ -60,18 +80,10 @@ void BaiduAsrDevice::CancelTranscription() {
   audio_buffer_.clear();
 }
 
+// Non-blocking: snapshot audio and post a task to the worker thread.
 void BaiduAsrDevice::Flush() {
   if (!active_.load()) { return; }
-  std::lock_guard<std::mutex> lock(transcribe_mutex_);
-  if (transcribe_thread_.joinable()) { transcribe_thread_.join(); }
-  transcribe_thread_ = std::thread([this] { Transcribe(); });
-}
 
-// ---------------------------------------------------------------------------
-// Private
-// ---------------------------------------------------------------------------
-
-void BaiduAsrDevice::Transcribe() {
   std::vector<uint8_t> audio;
   {
     std::lock_guard<std::mutex> lock(audio_mutex_);
@@ -82,6 +94,38 @@ void BaiduAsrDevice::Transcribe() {
     LOG_WARN("BaiduAsrDevice: Flush called with no audio data");
     return;
   }
+
+  {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    task_queue_.push([this, audio = std::move(audio)]() mutable {
+      Transcribe(std::move(audio));
+    });
+  }
+  worker_cv_.notify_one();
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+void BaiduAsrDevice::WorkerLoop() {
+  while (true) {
+    std::function<void()> task;
+    {
+      std::unique_lock<std::mutex> lock(worker_mutex_);
+      worker_cv_.wait(lock, [&] {
+        return !task_queue_.empty() || worker_stop_.load();
+      });
+      if (worker_stop_.load() && task_queue_.empty()) { break; }
+      task = std::move(task_queue_.front());
+      task_queue_.pop();
+    }
+    task();
+  }
+}
+
+void BaiduAsrDevice::Transcribe(std::vector<uint8_t> audio) {
+  if (audio.empty()) { return; }
 
   const std::string audio_str(reinterpret_cast<const char*>(audio.data()),
                                audio.size());

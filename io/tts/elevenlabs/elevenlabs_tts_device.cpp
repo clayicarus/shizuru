@@ -16,6 +16,17 @@ ElevenLabsTtsDevice::ElevenLabsTtsDevice(std::unique_ptr<services::TtsClient> cl
                                          std::string device_id)
     : device_id_(std::move(device_id)), client_(std::move(client)) {}
 
+ElevenLabsTtsDevice::~ElevenLabsTtsDevice() {
+  if (worker_thread_.joinable()) {
+    {
+      std::lock_guard<std::mutex> lock(worker_mutex_);
+      worker_stop_.store(true);
+    }
+    worker_cv_.notify_one();
+    worker_thread_.join();
+  }
+}
+
 std::string ElevenLabsTtsDevice::GetDeviceId() const { return device_id_; }
 
 std::vector<PortDescriptor> ElevenLabsTtsDevice::GetPortDescriptors() const {
@@ -25,6 +36,7 @@ std::vector<PortDescriptor> ElevenLabsTtsDevice::GetPortDescriptors() const {
   };
 }
 
+// Non-blocking: post text to the worker thread instead of joining inline.
 void ElevenLabsTtsDevice::OnInput(const std::string& port_name, DataFrame frame) {
   if (!active_.load()) { return; }
   if (port_name != kTextIn) {
@@ -34,9 +46,11 @@ void ElevenLabsTtsDevice::OnInput(const std::string& port_name, DataFrame frame)
   const std::string text(frame.payload.begin(), frame.payload.end());
   if (text.empty()) { return; }
 
-  std::lock_guard<std::mutex> lock(synth_mutex_);
-  if (synth_thread_.joinable()) { synth_thread_.join(); }
-  synth_thread_ = std::thread([this, text] { Synthesize(text); });
+  {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    text_queue_.push(text);
+  }
+  worker_cv_.notify_one();
 }
 
 void ElevenLabsTtsDevice::SetOutputCallback(OutputCallback cb) {
@@ -44,27 +58,53 @@ void ElevenLabsTtsDevice::SetOutputCallback(OutputCallback cb) {
   output_cb_ = std::move(cb);
 }
 
-void ElevenLabsTtsDevice::Start() { active_.store(true); }
+void ElevenLabsTtsDevice::Start() {
+  active_.store(true);
+  worker_stop_.store(false);
+  worker_thread_ = std::thread(&ElevenLabsTtsDevice::WorkerLoop, this);
+}
 
 void ElevenLabsTtsDevice::Stop() {
   active_.store(false);
   client_->Cancel();
-  std::lock_guard<std::mutex> lock(synth_mutex_);
-  if (synth_thread_.joinable()) { synth_thread_.join(); }
+  {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    worker_stop_.store(true);
+  }
+  worker_cv_.notify_one();
+  if (worker_thread_.joinable()) { worker_thread_.join(); }
 }
 
-void ElevenLabsTtsDevice::CancelSynthesis() { Stop(); }
+void ElevenLabsTtsDevice::CancelSynthesis() {
+  active_.store(false);
+  client_->Cancel();
+  // Drain the queue so no pending tasks run after cancel.
+  std::lock_guard<std::mutex> lock(worker_mutex_);
+  while (!text_queue_.empty()) { text_queue_.pop(); }
+  active_.store(true);
+}
 
 // ---------------------------------------------------------------------------
 // Private
 // ---------------------------------------------------------------------------
 
+void ElevenLabsTtsDevice::WorkerLoop() {
+  while (true) {
+    std::string text;
+    {
+      std::unique_lock<std::mutex> lock(worker_mutex_);
+      worker_cv_.wait(lock, [&] {
+        return !text_queue_.empty() || worker_stop_.load();
+      });
+      if (worker_stop_.load() && text_queue_.empty()) { break; }
+      text = std::move(text_queue_.front());
+      text_queue_.pop();
+    }
+    Synthesize(text);
+  }
+}
+
 void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
-  // Carry buffer: holds at most 1 leftover byte from the previous chunk.
-  // s16le PCM requires 2-byte alignment; HTTP chunks may arrive with an odd
-  // byte count, splitting a sample across two consecutive callbacks.
-  // Pattern mirrors elevenlabs_tts_playout.cpp: stitch carry first, then
-  // process the bulk, then stash any trailing odd byte.
   uint8_t carry     = 0;
   bool    has_carry = false;
 
@@ -91,8 +131,6 @@ void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
       const auto* src = static_cast<const uint8_t*>(data);
       size_t offset = 0;
 
-      // Step 1: if we have a carry byte, stitch it with src[0] to complete
-      // the sample, emit that single aligned pair, then advance past it.
       if (has_carry) {
         uint8_t pair[2] = {carry, src[0]};
         emit(pair, 2);
@@ -100,12 +138,10 @@ void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
         offset = 1;
       }
 
-      // Step 2: emit the aligned bulk of the remaining bytes.
       const size_t remaining = bytes - offset;
       const size_t aligned   = (remaining / sizeof(int16_t)) * sizeof(int16_t);
       emit(src + offset, aligned);
 
-      // Step 3: stash any trailing odd byte for the next chunk.
       if (remaining % sizeof(int16_t) != 0) {
         carry     = src[offset + aligned];
         has_carry = true;

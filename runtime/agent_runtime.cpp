@@ -1,6 +1,7 @@
 #include "agent_runtime.h"
 
 #include <chrono>
+#include <shared_mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -27,26 +28,28 @@ AgentRuntime::~AgentRuntime() {
 
 void AgentRuntime::RegisterDevice(std::unique_ptr<io::IoDevice> device) {
   const std::string id = device->GetDeviceId();
-  if (devices_.count(id)) {
-    throw std::invalid_argument("Device already registered: " + id);
-  }
 
-  // Wire the device's output callback to DispatchFrame.
+  // Wire the device's output callback to DispatchFrame before taking the lock,
+  // so the lambda captures `this` safely (runtime outlives devices).
   device->SetOutputCallback(
       [this](const std::string& device_id, const std::string& port_name,
              io::DataFrame frame) {
         DispatchFrame(device_id, port_name, std::move(frame));
       });
 
+  std::unique_lock<std::shared_mutex> lock(devices_mutex_);
+  if (devices_.count(id)) {
+    throw std::invalid_argument("Device already registered: " + id);
+  }
   registration_order_.push_back(id);
   devices_[id] = std::move(device);
 }
 
 void AgentRuntime::UnregisterDevice(const std::string& device_id) {
+  std::unique_lock<std::shared_mutex> lock(devices_mutex_);
   auto it = devices_.find(device_id);
   if (it == devices_.end()) { return; }
 
-  // Remove all routes that reference this device.
   for (auto& route : route_table_.AllRoutes()) {
     if (route.source.device_id == device_id ||
         route.destination.device_id == device_id) {
@@ -67,11 +70,13 @@ void AgentRuntime::UnregisterDevice(const std::string& device_id) {
 
 void AgentRuntime::AddRoute(PortAddress source, PortAddress destination,
                              RouteOptions options) {
+  std::unique_lock<std::shared_mutex> lock(devices_mutex_);
   route_table_.AddRoute(std::move(source), std::move(destination), options);
 }
 
 void AgentRuntime::RemoveRoute(const PortAddress& source,
                                 const PortAddress& destination) {
+  std::unique_lock<std::shared_mutex> lock(devices_mutex_);
   route_table_.RemoveRoute(source, destination);
 }
 
@@ -80,9 +85,22 @@ void AgentRuntime::RemoveRoute(const PortAddress& source,
 // ---------------------------------------------------------------------------
 
 std::string AgentRuntime::StartSession() {
-  // Shut down any existing session first.
-  if (HasActiveSession()) {
-    Shutdown();
+  {
+    std::unique_lock<std::shared_mutex> lock(devices_mutex_);
+    if (HasActiveSessionLocked()) {
+      // Stop devices under the lock before rebuilding.
+      for (auto it = registration_order_.rbegin();
+           it != registration_order_.rend(); ++it) {
+        auto dev_it = devices_.find(*it);
+        if (dev_it != devices_.end()) {
+          try { dev_it->second->Stop(); } catch (...) {}
+        }
+      }
+      devices_.clear();
+      registration_order_.clear();
+      route_table_ = RouteTable{};
+      core_device_ = nullptr;
+    }
   }
 
   const std::string session_id =
@@ -100,19 +118,34 @@ std::string AgentRuntime::StartSession() {
       config_.controller, config_.context, config_.policy,
       std::move(llm), std::move(io), std::move(memory), std::move(audit));
 
-  core_device_ = core.get();
-  RegisterDevice(std::move(core));
+  // Wire output callback before registering.
+  core->SetOutputCallback(
+      [this](const std::string& device_id, const std::string& port_name,
+             io::DataFrame frame) {
+        DispatchFrame(device_id, port_name, std::move(frame));
+      });
 
-  // Wire CoreDevice text_out → output callback sink.
-  // We use a special sentinel device ID "app_output" that is never registered
-  // as a real device; DispatchFrame handles it inline.
-  AddRoute(PortAddress{"core", "text_out"},
-           PortAddress{"app_output", "text_in"},
-           RouteOptions{.requires_control_plane = false});
+  {
+    std::unique_lock<std::shared_mutex> lock(devices_mutex_);
+    core_device_ = core.get();
+    registration_order_.push_back("core");
+    devices_["core"] = std::move(core);
 
-  // Start all devices.
-  for (const auto& id : registration_order_) {
-    devices_.at(id)->Start();
+    route_table_.AddRoute(PortAddress{"core", "text_out"},
+                          PortAddress{"app_output", "text_in"},
+                          RouteOptions{.requires_control_plane = false});
+  }
+
+  // Start all devices (outside the lock — Start() may call back into DispatchFrame).
+  std::vector<std::string> order;
+  {
+    std::shared_lock<std::shared_mutex> lock(devices_mutex_);
+    order = registration_order_;
+  }
+  for (const auto& id : order) {
+    std::shared_lock<std::shared_mutex> lock(devices_mutex_);
+    auto it = devices_.find(id);
+    if (it != devices_.end()) { it->second->Start(); }
   }
 
   LOG_INFO("[{}] Session started: {}", MODULE_NAME, session_id);
@@ -142,6 +175,7 @@ void AgentRuntime::OnOutput(OutputCallback cb) {
 }
 
 void AgentRuntime::Shutdown() {
+  std::unique_lock<std::shared_mutex> lock(devices_mutex_);
   if (devices_.empty()) { return; }
 
   // Stop devices in reverse registration order (Requirement 8.6).
@@ -167,11 +201,13 @@ void AgentRuntime::Shutdown() {
 }
 
 core::State AgentRuntime::GetState() const {
+  std::shared_lock<std::shared_mutex> lock(devices_mutex_);
   if (!core_device_) { return core::State::kTerminated; }
   return core_device_->GetState();
 }
 
 bool AgentRuntime::HasActiveSession() const {
+  std::shared_lock<std::shared_mutex> lock(devices_mutex_);
   return core_device_ != nullptr;
 }
 
@@ -183,6 +219,8 @@ void AgentRuntime::DispatchFrame(const std::string& device_id,
                                   const std::string& port_name,
                                   io::DataFrame frame) {
   PortAddress source{device_id, port_name};
+
+  std::shared_lock<std::shared_mutex> lock(devices_mutex_);
   auto destinations = route_table_.Lookup(source);
 
   if (destinations.empty()) {

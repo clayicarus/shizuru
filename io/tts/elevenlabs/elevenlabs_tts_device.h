@@ -1,8 +1,11 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <thread>
 #include <vector>
@@ -17,6 +20,7 @@ namespace shizuru::io {
 // ElevenLabs implementation of TtsDevice.
 // Wraps ElevenLabsClient: accepts text/plain DataFrames on "text_in",
 // emits audio/pcm DataFrames on "audio_out".
+// OnInput() is non-blocking: synthesis is posted to an internal worker thread.
 class ElevenLabsTtsDevice : public TtsDevice {
  public:
   // Production constructor: creates ElevenLabsClient from config.
@@ -26,6 +30,8 @@ class ElevenLabsTtsDevice : public TtsDevice {
   // Test constructor: inject any TtsClient (e.g. a mock).
   ElevenLabsTtsDevice(std::unique_ptr<services::TtsClient> client,
                       std::string device_id);
+
+  ~ElevenLabsTtsDevice();
 
   // IoDevice interface
   std::string GetDeviceId() const override;
@@ -39,6 +45,7 @@ class ElevenLabsTtsDevice : public TtsDevice {
   void CancelSynthesis() override;
 
  private:
+  void WorkerLoop();
   void Synthesize(const std::string& text);
 
   static constexpr char kTextIn[]   = "text_in";
@@ -51,8 +58,12 @@ class ElevenLabsTtsDevice : public TtsDevice {
   mutable std::mutex output_cb_mutex_;
   OutputCallback output_cb_;
 
-  std::mutex synth_mutex_;
-  std::thread synth_thread_;
+  // Internal worker thread + task queue (replaces per-OnInput thread).
+  std::mutex worker_mutex_;
+  std::condition_variable worker_cv_;
+  std::queue<std::string> text_queue_;
+  std::thread worker_thread_;
+  std::atomic<bool> worker_stop_{false};
 };
 
 }  // namespace shizuru::io

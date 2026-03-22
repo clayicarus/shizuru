@@ -47,9 +47,6 @@ void AudioPlayoutDevice::OnInput(const std::string& port_name,
     af.channel_count = channel_count;
     af.sample_count  = chunk;
     std::memcpy(af.data, src + written, chunk * sizeof(int16_t));
-    static auto *fp = fopen("playout.pcm", "wbe");
-    assert(fp);
-    fwrite(af.data, sizeof(int16_t), channel_count * chunk, fp);
     player_->Write(af);
 
     written += chunk;

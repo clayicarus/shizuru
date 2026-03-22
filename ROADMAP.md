@@ -42,14 +42,15 @@
 - [x] `asr_tts_echo_pipeline` example: full voice echo pipeline without LLM
 - [x] `voice_agent` example: full voice agent (VAD + ASR + LLM + TTS)
 
-## Phase 5 — Thread Safety + Architecture Hardening (Planned)
+## Phase 5 — Thread Safety + Architecture Hardening (In Progress)
 
-- [ ] **T1-1** `AgentRuntime::DispatchFrame`: add `shared_mutex` to protect `devices_` and `route_table_` from concurrent access during `Shutdown`
-- [ ] **T1-2** `BaiduAsrDevice::Flush()`: remove blocking `join` from PortAudio callback thread; introduce internal worker queue
-- [ ] **T1-3** `ElevenLabsTtsDevice::OnInput`: remove blocking `join` from `Controller::loop_thread_`; post to internal queue
-- [ ] **T1-4** `CoreDevice::active_`: change `bool` to `std::atomic<bool>`
-- [ ] **T1-5** `Controller` callbacks: guard `OnResponse`/`OnTransition`/`OnDiagnostic` registration with a mutex or pre-`Start()` assertion
-- [ ] **T1-6** `AudioPlayoutDevice`: remove debug `static fopen`/`fwrite` from production code path
+- [x] **T1-1** `AgentRuntime::DispatchFrame`: add `shared_mutex` to protect `devices_` and `route_table_` from concurrent access during `Shutdown`
+- [x] **T1-2** `BaiduAsrDevice::Flush()`: remove blocking `join` from PortAudio callback thread; introduce internal worker queue
+- [x] **T1-3** `ElevenLabsTtsDevice::OnInput`: remove blocking `join` from `Controller::loop_thread_`; post to internal queue
+- [x] **T1-4** `CoreDevice::active_`: change `bool` to `std::atomic<bool>`
+- [x] **T1-5** `Controller` callbacks: guard `OnResponse`/`OnTransition`/`OnDiagnostic` registration with a mutex or pre-`Start()` assertion
+- [x] **T1-6** `AudioPlayoutDevice`: remove debug `static fopen`/`fwrite` from production code path
+- [ ] **T1-7** `IoExecutor`: introduce a shared thread pool in `AgentRuntime` for network I/O tasks (ASR transcribe, TTS synthesize). Device-owned worker threads are replaced by injection of an `Executor&`; audio-path devices (capture, VAD, playout) are unaffected. Enables future migration to a lock-free MPSC queue without changing device code.
 - [ ] **T2-1** `Controller`: remove `IoBridge` dependency; `HandleActing` emits `action_out` DataFrame and suspends in `kActing` until `kToolResult` observation arrives
 - [ ] **T2-2** `CoreDevice`: remove `InterceptingIoBridge`; move `action_out` emit into `Controller`
 - [ ] **T2-3** Add `ToolDispatchDevice`: `IoDevice` that executes tools from `ToolRegistry` and returns results as DataFrames
@@ -76,14 +77,14 @@ Desktop platforms (PortAudio) have no hardware 3A. Mobile platforms (Oboe, CoreA
 - [ ] iOS: CoreAudio backend (`io/audio/audio_device/core_audio/`) with hardware 3A via AVAudioSession
 - [ ] Windows: WASAPI backend (`io/audio/audio_device/wasapi/`)
 
-## Phase 7 — Flutter UI
+## Phase 8 — Flutter UI
 
 - [ ] dart:ffi bridge: expose `AgentRuntime` as a C API, bind from Dart
 - [ ] Conversation view: message history, input field, audio waveform indicator
 - [ ] Debug panel: state machine status, token usage, tool call log, route table view
 - [ ] Cross-platform Flutter app scaffolding (desktop + mobile)
 
-## Phase 8 — Production Hardening
+## Phase 9 — Production Hardening
 
 - [ ] Config loader: `RuntimeConfig` from JSON/YAML file
 - [ ] Persistent `MemoryStore`: SQLite-backed, survives restarts
