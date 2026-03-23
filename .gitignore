@@ -6,6 +6,7 @@ build/
 # Editor directories and files
 .vscode/
 .windsurfrules
+.windsurf/skills/
 .DS_Store
 .kiro/settings/
 .kiro/**/.config.kiro
