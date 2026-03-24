@@ -42,7 +42,7 @@
 - [x] `asr_tts_echo_pipeline` example: full voice echo pipeline without LLM
 - [x] `voice_agent` example: full voice agent (VAD + ASR + LLM + TTS)
 
-## Phase 5 — Thread Safety + Architecture Hardening (In Progress)
+## Phase 5 — Thread Safety + Architecture Hardening (Done)
 
 - [x] **T1-1** `AgentRuntime::DispatchFrame`: add `shared_mutex` to protect `devices_` and `route_table_` from concurrent access during `Shutdown`
 - [x] **T1-2** `BaiduAsrDevice::Flush()`: remove blocking `join` from PortAudio callback thread; introduce internal worker queue
@@ -50,26 +50,33 @@
 - [x] **T1-4** `CoreDevice::active_`: change `bool` to `std::atomic<bool>`
 - [x] **T1-5** `Controller` callbacks: guard `OnResponse`/`OnTransition`/`OnDiagnostic` registration with a mutex or pre-`Start()` assertion
 - [x] **T1-6** `AudioPlayoutDevice`: remove debug `static fopen`/`fwrite` from production code path
-- [ ] **T1-7** `IoExecutor`: introduce a shared thread pool in `AgentRuntime` for network I/O tasks (ASR transcribe, TTS synthesize). Device-owned worker threads are replaced by injection of an `Executor&`; audio-path devices (capture, VAD, playout) are unaffected. Enables future migration to a lock-free MPSC queue without changing device code.
-- [ ] **T2-1** `Controller`: remove `IoBridge` dependency; `HandleActing` emits `action_out` DataFrame and suspends in `kActing` until `kToolResult` observation arrives
-- [ ] **T2-2** `CoreDevice`: remove `InterceptingIoBridge`; move `action_out` emit into `Controller`
-- [ ] **T2-3** Add `ToolDispatchDevice`: `IoDevice` that executes tools from `ToolRegistry` and returns results as DataFrames
-- [ ] **T2-4** Wire `core:action_out → tool_dispatch:action_in` and `tool_dispatch:result_out → core:tool_result_in` in `AgentRuntime`
-- [ ] **T3-1** Add `control_out` port to `CoreDevice`; `Controller` emits control frames on interrupt and response delivery
-- [ ] **T3-2** Define control frame protocol (`control/cancel`, `control/flush`) in a shared header
-- [ ] **T3-3** Add `control_in` port to `ElevenLabsTtsDevice`, `AudioPlayoutDevice`, `BaiduAsrDevice`
-- [ ] **T3-4** Remove direct `asr_ptr->Flush()` from `VadEventDevice`; route all control through `CoreDevice`
+- [x] **T2-1** `Controller`: remove `IoBridge` dependency; `HandleActing` emits `action_out` DataFrame and suspends in `kActing` until `kToolResult` observation arrives. `EmitFrameCallback` + `CancelCallback` replace `IoBridge`.
+- [x] **T2-2** `CoreDevice`: remove `InterceptingIoBridge`; `action_out` emit handled directly by `Controller` via `EmitFrameCallback`
+- [x] **T2-3** `ToolDispatchDevice`: `IoDevice` that executes tools from `ToolRegistry` and returns results as DataFrames on `result_out`
+- [x] **T2-4** Wire `core:action_out → tool_dispatch:action_in` and `tool_dispatch:result_out → core:tool_result_in` in `AgentRuntime`
+- [x] **T3-1** `CoreDevice`: add `control_out` port; emits `cancel` on `kInterrupt` (not on `kResponseDelivered`)
+- [x] **T3-2** Control frame protocol (`cancel`, `flush`) defined in `io/control_frame.h`
+- [x] **T3-3** `control_in` port added to `ElevenLabsTtsDevice`, `AudioPlayoutDevice`, `BaiduAsrDevice`
+- [x] **T3-4** `VadEventDevice` refactored as a pass-through `IoDevice` with `vad_out` port; VAD events routed to `CoreDevice:vad_in` via `RouteTable`. `CoreDevice` emits `flush` on `speech_end` and `cancel` on `speech_start` (VAD interrupt).
+- [x] **T1-7 (partial)** Device-owned worker threads retained; `IoExecutor` shared pool deferred to a later phase.
+- [x] `AudioPlayer::Flush()`: new interface method — clears ring buffer without closing the PortAudio stream, used by `AudioPlayoutDevice` on `cancel` so subsequent TTS audio plays correctly
+- [x] `ElevenLabsTtsDevice`: carry-byte buffer ensures every emitted PCM payload is even-sized (fixes int16 misalignment from odd-length HTTP chunks)
+- [x] `PcmDumpDevice` probes added to `voice_agent`: `capture.pcm`, `vad_dump.pcm`, `playout_dump.pcm`
+- [x] `MockLlmClient`: fixed mutex deadlock in `Cancel()` + added `WaitForCancel()` helper
 
 ## Phase 6 — Audio Quality: 3A Processing
 
-Desktop platforms (PortAudio) have no hardware 3A. Mobile platforms (Oboe, CoreAudio) expose hardware 3A which is sufficient at 16 kHz for both ASR input and TTS playout — no software processing needed there.
+On macOS, `VoiceProcessingIO` Audio Unit provides system-level AEC + AGC + NS, but PortAudio opens a plain `RemoteIO` unit and does not activate it. A dedicated CoreAudio backend (`io/audio/audio_device/core_audio/`) using `VoiceProcessingIO` would expose hardware 3A on macOS without any software implementation. On Android (Oboe) and iOS (CoreAudio with AVAudioSession), hardware 3A is similarly available via platform APIs.
 
-- [ ] **AEC** (Acoustic Echo Cancellation): software implementation for desktop; cancels TTS playout from the capture signal so the ASR does not transcribe the agent's own voice. Implemented as an `IoDevice` (`io/audio/aec/`) inserted between capture and VAD.
-- [ ] **ANS** (Ambient Noise Suppression): software implementation for desktop; reduces background noise before ASR. Implemented as an `IoDevice` (`io/audio/ans/`) inserted between capture (or AEC output) and VAD.
-- [ ] **AGC** (Automatic Gain Control): software implementation for desktop; normalizes capture level to keep ASR input within a consistent amplitude range. Implemented as an `IoDevice` (`io/audio/agc/`) in the same capture chain.
-- [ ] Mobile: enable hardware 3A via Oboe (`AAudioStream` / `AudioEffect`) and CoreAudio session category flags — no additional `IoDevice` needed on those platforms.
-- [ ] CMake: gate software 3A targets on `NOT (ANDROID OR IOS)`; mobile builds skip the `io/audio/aec`, `io/audio/ans`, `io/audio/agc` subdirectories entirely.
-- [ ] Candidate library: [WebRTC AudioProcessing Module](https://chromium.googlesource.com/external/webrtc/) (APM) — provides AEC3, NS, AGC2 in a single C++ library, well-tested at 16 kHz.
+For Linux and Windows (PortAudio only), software 3A remains necessary.
+
+- [ ] **macOS**: CoreAudio backend (`io/audio/audio_device/core_audio/`) using `kAudioUnitSubType_VoiceProcessingIO` — enables hardware AEC + AGC + NS, no software processing needed
+- [ ] **AEC** (Acoustic Echo Cancellation): software implementation for Linux/Windows; cancels TTS playout from the capture signal so ASR does not transcribe the agent's own voice. `IoDevice` at `io/audio/aec/`, inserted between capture and VAD.
+- [ ] **ANS** (Ambient Noise Suppression): software implementation for Linux/Windows. `IoDevice` at `io/audio/ans/`.
+- [ ] **AGC** (Automatic Gain Control): software implementation for Linux/Windows. `IoDevice` at `io/audio/agc/`.
+- [ ] Mobile: enable hardware 3A via Oboe (`AAudioStream` / `AudioEffect`) and CoreAudio AVAudioSession — no additional `IoDevice` needed on those platforms.
+- [ ] CMake: gate software 3A targets on `NOT (APPLE OR ANDROID OR IOS)`; Apple and mobile builds use platform hardware 3A instead.
+- [ ] Candidate library for software 3A: [WebRTC AudioProcessing Module](https://chromium.googlesource.com/external/webrtc/) (APM) — provides AEC3, NS, AGC2 in a single C++ library, well-tested at 16 kHz.
 
 ## Phase 7 — Platform Audio Backends
 

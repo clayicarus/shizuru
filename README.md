@@ -54,8 +54,11 @@ export BAIDU_SECRET_KEY=...
 export BAIDU_API_KEY=...
 export BAIDU_SECRET_KEY=...
 export OPENAI_API_KEY=...
-./build/examples/voice_agent [--base-url <url>] [--model <model>] [--debug]
+export ELEVENLABS_API_KEY=...
+./build/examples/voice_agent [--base-url <url>] [--model <model>] [--voice-id <id>] [--debug]
 ```
+
+PCM dumps are written to the working directory: `capture.pcm`, `vad_dump.pcm`, `playout_dump.pcm` (raw s16le 16 kHz mono).
 
 ## Project structure
 
@@ -76,22 +79,32 @@ The runtime is a device bus. Every component — including the agent session —
 Microphone
     │  audio/pcm (DMA)
     ▼
-EnergyVadDevice  ──vad/event──►  VadEventDevice (triggers ASR flush)
-    │  audio/pcm (speech frames only, with pre-roll)
-    ▼
-BaiduAsrDevice
-    │  text/plain
-    ▼
-CoreDevice (AgentSession — LLM reasoning loop)
-    │  text/plain  (via OnOutput callback)
-    ▼
-BaiduTtsDevice
+PcmDumpDevice (capture.pcm)
     │  audio/pcm (DMA)
     ▼
-Speaker
+EnergyVadDevice ──vad/event──► VadEventDevice ──vad/event──► CoreDevice:vad_in
+    │  audio/pcm (speech frames only, with pre-roll)                │
+    ▼                                                               │ control/command (flush → ASR, cancel → TTS/playout)
+PcmDumpDevice (vad_dump.pcm)                                        ▼
+    │  audio/pcm (DMA)                              ┌─────────────────────────────┐
+    ▼                                               │  CoreDevice (AgentSession)  │
+BaiduAsrDevice ──text/plain──────────────────────► │  LLM reasoning loop         │
+                                                    │  action_out ──► ToolDispatch│
+                                                    └──────┬──────────────────────┘
+                                                           │  text/plain
+                                                           ▼
+                                                   ElevenLabsTtsDevice
+                                                           │  audio/pcm (DMA)
+                                                           ▼
+                                                   PcmDumpDevice (playout_dump.pcm)
+                                                           │  audio/pcm (DMA)
+                                                           ▼
+                                                        Speaker
 ```
 
-DMA routes (`requires_control_plane = false`) bypass the LLM loop for low-latency audio. The agent core is modeled after an OS: controller as state machine, LLM as CPU, context strategy as memory manager, policy layer as permission boundary.
+DMA routes (`requires_control_plane = false`) bypass the LLM loop for low-latency audio. Control commands (`cancel`, `flush`) flow from `CoreDevice:control_out` to `BaiduAsrDevice`, `ElevenLabsTtsDevice`, and `AudioPlayoutDevice` via the control plane. On VAD `speech_start`, TTS and playout are cancelled immediately; on `speech_end`, ASR is flushed.
+
+The agent core is modeled after an OS: controller as state machine, LLM as CPU, context strategy as memory manager, policy layer as permission boundary.
 
 ## Cross-platform
 
