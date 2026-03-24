@@ -197,7 +197,7 @@ int main(int argc, char* argv[]) {
   // Register tools.
   shizuru::services::ToolRegistry tools;
   tools.Register("get_weather",
-                 [](const std::string& args) -> shizuru::core::ActionResult {
+                 [](const std::string& args) -> shizuru::services::ToolResult {
                    auto j = nlohmann::json::parse(args);
                    std::string city = j.value("city", "unknown");
                    std::printf("[tool]  get_weather(city=%s)\n", city.c_str());

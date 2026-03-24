@@ -154,10 +154,9 @@ int main(int argc, char* argv[]) {
   io::BaiduAsrDevice asr(cfg, token_mgr);
   io::BaiduTtsDevice tts(cfg, token_mgr);
 
-  // VadEventDevice: triggers asr.Flush() on speech_end.
-  io::VadEventDevice asr_flush([&asr](const std::string& /*event*/) {
-    asr.Flush();
-  });
+  // VadEventDevice: forwards vad events as DataFrames on vad_out.
+  // speech_end → asr.Flush() is handled by routing vad_out → asr control_in.
+  io::VadEventDevice asr_flush;
 
   // LogDevices for observability.
   io::LogDevice log_vad("log_vad",      spdlog::level::info);

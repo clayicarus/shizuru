@@ -1,14 +1,25 @@
 // Voice agent example: Microphone → VAD → ASR → AgentRuntime (LLM) → TTS → Speaker
 //
-// Pipeline topology:
+// Pipeline topology (DMA routes registered manually below):
 //
-//   [AudioCaptureDevice]    audio_out ──► [EnergyVadDevice]    audio_in
-//   [EnergyVadDevice]       audio_out ──► [BaiduAsrDevice]     audio_in
+//   [AudioCaptureDevice]    audio_out ──► [PcmDumpDevice]      pass_in   (capture.pcm)
+//   [PcmDumpDevice]         pass_out  ──► [EnergyVadDevice]    audio_in
+//   [EnergyVadDevice]       audio_out ──► [PcmDumpDevice]      pass_in   (vad_dump.pcm)
+//   [PcmDumpDevice]         pass_out  ──► [BaiduAsrDevice]     audio_in
 //   [EnergyVadDevice]       vad_out   ──► [VadEventDevice]     vad_in
-//                                             └── on speech_end → asr.Flush()
 //   [BaiduAsrDevice]        text_out  ──► [core]               text_in
 //   [core]                  text_out  ──► app_output (AgentRuntime built-in sink)
-//   [ElevenLabsTtsDevice]   audio_out ──► [AudioPlayoutDevice] audio_in
+//   [ElevenLabsTtsDevice]   audio_out ──► [PcmDumpDevice]      pass_in   (playout_dump.pcm)
+//   [PcmDumpDevice]         pass_out  ──► [AudioPlayoutDevice] audio_in
+//
+// Control routes registered automatically by AgentRuntime::StartSession:
+//
+//   [VadEventDevice]        vad_out   ──► [core]               vad_in
+//   [core]                  control_out ► [BaiduAsrDevice]     control_in
+//   [core]                  control_out ► [ElevenLabsTtsDevice] control_in
+//   [core]                  control_out ► [AudioPlayoutDevice] control_in
+//   [core]                  action_out  ► [ToolDispatchDevice] action_in
+//   [ToolDispatchDevice]    result_out  ► [core]               tool_result_in
 //
 // The TTS device is driven by the AgentRuntime output callback: when the LLM
 // produces a final text response, it is fed directly into ElevenLabsTtsDevice.
@@ -40,6 +51,7 @@
 #include "io/vad/energy_vad_device.h"
 #include "io/vad/vad_event_device.h"
 #include "audio/audio_capture_device.h"
+#include "io/probe/pcm_dump_device.h"
 #include "audio/audio_playout_device.h"
 #include "audio_device/port_audio/pa_player.h"
 #include "audio_device/port_audio/pa_recorder.h"
@@ -129,11 +141,14 @@ int main(int argc, char* argv[]) {
   // ── Voice devices (owned by AgentRuntime via RegisterDevice) ─────────────
   auto capture = std::make_unique<io::AudioCaptureDevice>(
       std::make_unique<io::PaRecorder>(rec_cfg));
+  auto capture_dump  = std::make_unique<io::PcmDumpDevice>("capture");
+  auto vad_dump      = std::make_unique<io::PcmDumpDevice>("vad_dump");
+  auto playout_dump  = std::make_unique<io::PcmDumpDevice>("playout_dump");
   auto playout = std::make_unique<io::AudioPlayoutDevice>(
       std::make_unique<io::PaPlayer>(play_cfg));
 
   io::EnergyVadConfig vad_cfg;
-  vad_cfg.energy_threshold        = 600.0F;
+  vad_cfg.energy_threshold        = 400.0F;
   vad_cfg.speech_onset_frames     = 3;   // ~60ms
   vad_cfg.silence_hangover_frames = 20;  // ~400ms
   vad_cfg.pre_roll_frames         = 3;
@@ -149,12 +164,10 @@ int main(int argc, char* argv[]) {
   auto tts = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
 
   // Keep raw pointers before moving ownership into the runtime.
-  io::BaiduAsrDevice*       asr_ptr = asr.get();
   io::ElevenLabsTtsDevice*  tts_ptr = tts.get();
 
-  // VadEventDevice: triggers asr.Flush() on speech_end.
-  auto asr_flush = std::make_unique<io::VadEventDevice>(
-      [asr_ptr](const std::string& /*event*/) { asr_ptr->Flush(); });
+  // VadEventDevice: emits vad/event frames on vad_out (routed to core:vad_in).
+  auto asr_flush = std::make_unique<io::VadEventDevice>();
 
   // ── AgentRuntime config ───────────────────────────────────────────────────
   runtime::RuntimeConfig rt_cfg;
@@ -176,22 +189,29 @@ int main(int argc, char* argv[]) {
 
   // ── Register voice devices ────────────────────────────────────────────────
   runtime.RegisterDevice(std::move(capture));
+  runtime.RegisterDevice(std::move(capture_dump));
   runtime.RegisterDevice(std::move(vad));
+  runtime.RegisterDevice(std::move(vad_dump));
   runtime.RegisterDevice(std::move(asr_flush));
   runtime.RegisterDevice(std::move(asr));
   runtime.RegisterDevice(std::move(tts));
+  runtime.RegisterDevice(std::move(playout_dump));
   runtime.RegisterDevice(std::move(playout));
 
   // ── Routes (all DMA — requires_control_plane = false) ────────────────────
   constexpr runtime::RouteOptions kDma{.requires_control_plane = false};
 
-  // capture → vad
+  // capture → dump → vad
   runtime.AddRoute({"audio_capture", "audio_out"},
+                   {"capture",       io::PcmDumpDevice::kPassIn}, kDma);
+  runtime.AddRoute({"capture",       io::PcmDumpDevice::kPassOut},
                    {"vad",           io::EnergyVadDevice::kAudioIn}, kDma);
 
-  // vad audio_out (speech frames) → asr
-  runtime.AddRoute({"vad",       io::EnergyVadDevice::kAudioOut},
-                   {"baidu_asr", "audio_in"}, kDma);
+  // vad audio_out (speech frames) → vad_dump → asr
+  runtime.AddRoute({"vad",      io::EnergyVadDevice::kAudioOut},
+                   {"vad_dump", io::PcmDumpDevice::kPassIn}, kDma);
+  runtime.AddRoute({"vad_dump", io::PcmDumpDevice::kPassOut},
+                   {"baidu_asr","audio_in"}, kDma);
 
   // vad vad_out (events) → asr_flush (triggers Flush on speech_end)
   runtime.AddRoute({"vad",       io::EnergyVadDevice::kVadOut},
@@ -201,8 +221,10 @@ int main(int argc, char* argv[]) {
   runtime.AddRoute({"baidu_asr", "text_out"},
                    {"core",      "text_in"}, kDma);
 
-  // tts audio_out → playout
+  // tts audio_out → playout_dump → playout
   runtime.AddRoute({"elevenlabs_tts", "audio_out"},
+                   {"playout_dump",   io::PcmDumpDevice::kPassIn}, kDma);
+  runtime.AddRoute({"playout_dump",   io::PcmDumpDevice::kPassOut},
                    {"audio_playout",  "audio_in"}, kDma);
 
   // ── Output callback: LLM response → TTS ──────────────────────────────────
