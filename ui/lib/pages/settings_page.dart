@@ -48,8 +48,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   void _save() {
-    final s = context.read<AppProvider>().settings;
-    s
+    final provider = context.read<AppProvider>();
+    provider.settings
       ..llmBaseUrl   = _llmUrlCtrl.text.trim()
       ..llmApiKey    = _llmKeyCtrl.text.trim()
       ..llmModel     = _llmModelCtrl.text.trim()
@@ -60,9 +60,11 @@ class _SettingsPageState extends State<SettingsPage> {
       ..ttsVoiceId   = _ttsVoiceCtrl.text.trim()
       ..systemPrompt = _promptCtrl.text;
 
+    provider.applySettings();
+
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('设置已保存。重启会话后生效。'),
+        content: Text('设置已保存，会话已重启。'),
         duration: Duration(seconds: 2),
       ),
     );
@@ -141,6 +143,17 @@ class _SettingsPageState extends State<SettingsPage> {
                       'You are a helpful voice assistant. Keep responses concise and natural.',
                   contentPadding:
                       EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  icon: const Icon(Icons.refresh_rounded, size: 15),
+                  label: const Text('重置为默认', style: TextStyle(fontSize: 12)),
+                  onPressed: () => setState(() {
+                    _promptCtrl.text = AppSettings.defaultSystemPrompt;
+                  }),
                 ),
               ),
             ],

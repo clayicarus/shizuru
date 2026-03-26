@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../bridge/shizuru_bridge.dart';
 import '../models/agent_state.dart';
 import '../models/message.dart';
@@ -27,9 +28,13 @@ class AppSettings {
     this.asrSecretKey = '',
     this.ttsApiKey = '',
     this.ttsVoiceId = '',
-    this.systemPrompt =
-        '你是 Shizuru，一个友好的 AI 助手。用简洁自然的中文回答问题。',
+    this.systemPrompt = defaultSystemPrompt,
   });
+
+  static const String defaultSystemPrompt =
+      '你是 Shizuru，一个友好的语音 AI 助手。'
+      '你的每一条回复都会通过语音合成（TTS）朗读给用户，所以请始终用简洁自然的口语中文回答，避免使用 Markdown 格式（不要用 **加粗**、列表符号等）。'
+      '你完全具备语音输出能力，不要说自己不能发送语音。';
 
   RuntimeConfig toRuntimeConfig() => RuntimeConfig(
         llmBaseUrl: llmBaseUrl,
@@ -42,6 +47,44 @@ class AppSettings {
         ttsVoiceId: ttsVoiceId.isNotEmpty ? ttsVoiceId : null,
         systemPrompt: systemPrompt,
       );
+
+  static const _kLlmBaseUrl    = 'llm_base_url';
+  static const _kLlmApiKey    = 'llm_api_key';
+  static const _kLlmModel     = 'llm_model';
+  static const _kLlmApiPath   = 'llm_api_path';
+  static const _kAsrApiKey    = 'asr_api_key';
+  static const _kAsrSecretKey = 'asr_secret_key';
+  static const _kTtsApiKey    = 'tts_api_key';
+  static const _kTtsVoiceId   = 'tts_voice_id';
+  static const _kSystemPrompt = 'system_prompt';
+
+  Future<void> save() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kLlmBaseUrl,    llmBaseUrl);
+    await prefs.setString(_kLlmApiKey,    llmApiKey);
+    await prefs.setString(_kLlmModel,     llmModel);
+    await prefs.setString(_kLlmApiPath,   llmApiPath);
+    await prefs.setString(_kAsrApiKey,    asrApiKey);
+    await prefs.setString(_kAsrSecretKey, asrSecretKey);
+    await prefs.setString(_kTtsApiKey,    ttsApiKey);
+    await prefs.setString(_kTtsVoiceId,   ttsVoiceId);
+    await prefs.setString(_kSystemPrompt, systemPrompt);
+  }
+
+  static Future<AppSettings> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final s = AppSettings();
+    s.llmBaseUrl    = prefs.getString(_kLlmBaseUrl)    ?? s.llmBaseUrl;
+    s.llmApiKey     = prefs.getString(_kLlmApiKey)     ?? s.llmApiKey;
+    s.llmModel      = prefs.getString(_kLlmModel)      ?? s.llmModel;
+    s.llmApiPath    = prefs.getString(_kLlmApiPath)    ?? s.llmApiPath;
+    s.asrApiKey     = prefs.getString(_kAsrApiKey)     ?? s.asrApiKey;
+    s.asrSecretKey  = prefs.getString(_kAsrSecretKey)  ?? s.asrSecretKey;
+    s.ttsApiKey     = prefs.getString(_kTtsApiKey)     ?? s.ttsApiKey;
+    s.ttsVoiceId    = prefs.getString(_kTtsVoiceId)    ?? s.ttsVoiceId;
+    s.systemPrompt  = prefs.getString(_kSystemPrompt)  ?? s.systemPrompt;
+    return s;
+  }
 }
 
 // ─── Input mode ───────────────────────────────────────────────────────────────
@@ -83,34 +126,56 @@ class AppProvider extends ChangeNotifier {
 
   AppProvider() {
     _registerBridgeCallbacks();
-    _newSessionInternal();
+    _loadSettingsAndInit();
+  }
+
+  Future<void> _loadSettingsAndInit() async {
+    final saved = await AppSettings.load();
+    settings
+      ..llmBaseUrl   = saved.llmBaseUrl
+      ..llmApiKey    = saved.llmApiKey
+      ..llmModel     = saved.llmModel
+      ..llmApiPath   = saved.llmApiPath
+      ..asrApiKey    = saved.asrApiKey
+      ..asrSecretKey = saved.asrSecretKey
+      ..ttsApiKey    = saved.ttsApiKey
+      ..ttsVoiceId   = saved.ttsVoiceId
+      ..systemPrompt = saved.systemPrompt;
+    await _newSessionInternal();
+  }
+
+  Future<void> applySettings() async {
+    await settings.save();
+    await _newSessionInternal();
   }
 
   // ── Bridge callbacks ──────────────────────────────────────────────────────
 
   void _registerBridgeCallbacks() {
-    ShizuruBridge.instance.onStateChange((cppState) {
+    final bridge = ShizuruBridge.instance;
+
+    bridge.onStateChange((cppState) {
+      final prevState = _agentState;
       _agentState = AgentState.values[cppState.index];
       _addLog('[State] → ${_agentState.label}');
+      // FfiBridge: sendMessage() is fire-and-forget, so TTS must fire here
+      // when the agent finishes responding (responding → idle/listening).
+      if (bridge is FfiBridge &&
+          prevState == AgentState.responding &&
+          (_agentState == AgentState.idle ||
+           _agentState == AgentState.listening)) {
+        _triggerTtsIfEnabled();
+      }
       notifyListeners();
     });
 
-    ShizuruBridge.instance.onOutput((text) {
+    bridge.onOutput((text) {
       if (_currentSession == null) return;
 
       // Special tool-call notification from mock bridge (\x00tool:<name>)
       if (text.startsWith('\x00tool:')) {
         final toolName = text.substring(6);
-        final toolMsg = ChatMessage(
-          id: _uuid(),
-          role: MessageRole.toolCall,
-          content: toolName,
-          toolName: toolName,
-          timestamp: DateTime.now(),
-        );
-        _currentSession!.messages.add(toolMsg);
-        toolCallLog.add('⚙ $toolName');
-        notifyListeners();
+        _addToolCallMessage(toolName);
         return;
       }
 
@@ -132,6 +197,28 @@ class AppProvider extends ChangeNotifier {
       }
       notifyListeners();
     });
+
+    // Register tool call notification from C++ core (FfiBridge only).
+    if (bridge is FfiBridge) {
+      bridge.onToolCall((toolName, arguments) {
+        _addLog('[Tool] $toolName($arguments)');
+        _addToolCallMessage(toolName);
+      });
+    }
+  }
+
+  void _addToolCallMessage(String toolName) {
+    if (_currentSession == null) return;
+    final toolMsg = ChatMessage(
+      id: _uuid(),
+      role: MessageRole.toolCall,
+      content: toolName,
+      toolName: toolName,
+      timestamp: DateTime.now(),
+    );
+    _currentSession!.messages.add(toolMsg);
+    toolCallLog.add('⚙ $toolName');
+    notifyListeners();
   }
 
   // ── Session management ────────────────────────────────────────────────────
@@ -209,6 +296,20 @@ class AppProvider extends ChangeNotifier {
         _addLog('[TTS] Speaking ${lastMsg.content.length} chars');
         await ShizuruBridge.instance.speakText(lastMsg.content);
       }
+    }
+  }
+
+  void _triggerTtsIfEnabled() {
+    if (!enableTts || _currentSession == null) return;
+    final msgs = _currentSession!.messages;
+    if (msgs.isEmpty) return;
+    final lastMsg = msgs.lastWhere(
+      (m) => m.isAssistant && m.content.isNotEmpty,
+      orElse: () => msgs.last,
+    );
+    if (lastMsg.isAssistant && lastMsg.content.isNotEmpty) {
+      _addLog('[TTS] Speaking ${lastMsg.content.length} chars');
+      ShizuruBridge.instance.speakText(lastMsg.content);
     }
   }
 

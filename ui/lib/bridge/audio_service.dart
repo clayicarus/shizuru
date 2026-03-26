@@ -84,7 +84,6 @@ class AudioService {
   /// Supports WAV format. Saves to temp file, plays synchronously, cleans up.
   Future<void> playAudioBytes(Uint8List audioBytes, String mimeType) async {
     _tempDir ??= (await getTemporaryDirectory()).path;
-
     final ext = _extFromMime(mimeType);
     final filePath =
         p.join(_tempDir!, 'shizuru_tts_${DateTime.now().millisecondsSinceEpoch}.$ext');
@@ -94,19 +93,17 @@ class AudioService {
     _isPlaying = true;
     try {
       // Use PowerShell's SoundPlayer for WAV playback (guaranteed on Windows).
+      // Process.run() auto-drains stdout/stderr to avoid pipe buffer deadlock.
       final escaped = filePath.replaceAll("'", "''");
-      _playbackProcess = await Process.start(
+      await Process.run(
         'powershell',
         [
           '-NoProfile',
           '-Command',
           '\$p = New-Object System.Media.SoundPlayer \'$escaped\'; \$p.PlaySync(); \$p.Dispose()',
         ],
-        mode: ProcessStartMode.normal,
       );
-      await _playbackProcess!.exitCode;
     } catch (_) {
-      // Playback failure is non-fatal.
     } finally {
       _isPlaying = false;
       _playbackProcess = null;

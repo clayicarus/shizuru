@@ -45,8 +45,7 @@ class _InputBarState extends State<InputBar> {
     final prov = context.watch<AppProvider>();
     final theme = Theme.of(context);
     final isVoice = prov.inputMode == InputMode.voice;
-    final busy = prov.agentState != AgentState.idle &&
-        prov.agentState != AgentState.error;
+    final busy = _isBusy;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),

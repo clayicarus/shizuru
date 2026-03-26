@@ -58,6 +58,32 @@ add_subdirectory("runner")
 include(flutter/generated_plugins.cmake)
 
 
+# === Shizuru C++ core (shizuru_api.dll) ===
+# The C++ core must be built separately from the project root:
+#   cmake -B build -DCMAKE_BUILD_TYPE=Release
+#   cmake --build build --config Release
+# The DLL is then copied into the Flutter bundle automatically.
+set(SHIZURU_CORE_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../build"
+    CACHE PATH "Path to the shizuru C++ core build directory")
+
+# Locate the DLL (support both single-config and multi-config generators).
+set(SHIZURU_API_DLL "")
+foreach(_subdir "api" "api/Release" "api/Debug" "api/RelWithDebInfo")
+  if(EXISTS "${SHIZURU_CORE_BUILD_DIR}/${_subdir}/shizuru_api.dll")
+    set(SHIZURU_API_DLL "${SHIZURU_CORE_BUILD_DIR}/${_subdir}/shizuru_api.dll")
+    break()
+  endif()
+endforeach()
+
+if(SHIZURU_API_DLL)
+  message(STATUS "Found shizuru_api.dll: ${SHIZURU_API_DLL}")
+else()
+  message(WARNING
+    "shizuru_api.dll not found in ${SHIZURU_CORE_BUILD_DIR}/api/. "
+    "Build the C++ core first, or set SHIZURU_CORE_BUILD_DIR. "
+    "The app will fall back to _HttpBridge (pure Dart) at runtime.")
+endif()
+
 # === Installation ===
 # Support files are copied into place next to the executable, so that it can
 # run in place. This is done instead of making a separate bundle (as on Linux)
@@ -106,3 +132,9 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# Install shizuru_api.dll alongside the executable (if found).
+if(SHIZURU_API_DLL)
+  install(FILES "${SHIZURU_API_DLL}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()

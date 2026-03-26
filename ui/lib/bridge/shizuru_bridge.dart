@@ -9,14 +9,19 @@
 //      dart:ffi.
 //   3. The abstract interface below stays unchanged — the UI never changes.
 
+import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
+
+import 'package:ffi/ffi.dart';
 
 import 'audio_service.dart';
 import 'baidu_asr_client.dart';
 import 'baidu_token_manager.dart';
 import 'baidu_tts_client.dart';
+import 'shizuru_ffi.dart';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -332,6 +337,268 @@ class _HttpBridge extends ShizuruBridge {
 
   @override
   bool get hasActiveSession => _active;
+}
+
+// ─── FFI bridge — calls C++ AgentRuntime via dart:ffi ────────────────────────
+
+class FfiBridge extends ShizuruBridge {
+  late final ShizuruNativeBindings _bindings;
+  Pointer<ShizuruRuntime>? _handle;
+  CppAgentState _state = CppAgentState.idle;
+  void Function(String)? _outputCb;
+  void Function(CppAgentState)? _stateCb;
+  void Function(String toolName, String arguments)? _toolCallCb;
+
+  // NativeCallable instances must be kept alive for the callback pointers.
+  NativeCallable<NativeOutputCallback>? _nativeOutputCb;
+  NativeCallable<NativeStateCallback>? _nativeStateCb;
+  NativeCallable<NativeToolCallCallback>? _nativeToolCallCb;
+
+  // Voice configured flag (set after successful shizuru_setup_voice call).
+  bool _voiceConfigured = false;
+
+  // Audio output: polls shizuru_take_audio() after each speakText() call.
+  final AudioService _audioService = AudioService();
+  Timer? _audioPoller;
+
+  FfiBridge({String? libraryPath}) {
+    if (libraryPath != null) {
+      _bindings = ShizuruNativeBindings.fromPath(libraryPath);
+    } else {
+      _bindings = ShizuruNativeBindings();
+    }
+  }
+
+  @override
+  Future<void> initRuntime(RuntimeConfig config) async {
+    // Destroy previous runtime if any.
+    if (_handle != null) {
+      _bindings.destroy(_handle!);
+      _handle = null;
+    }
+    _disposeNativeCallbacks();
+
+    final configJson = jsonEncode({
+      'llm_base_url': config.llmBaseUrl,
+      'llm_api_path': config.llmApiPath,
+      'llm_api_key': config.llmApiKey,
+      'llm_model': config.llmModel,
+      'system_prompt': config.systemPrompt,
+    });
+
+    final configPtr = configJson.toNativeUtf8();
+    try {
+      _handle = _bindings.create(configPtr);
+    } finally {
+      calloc.free(configPtr);
+    }
+
+    if (_handle == null || _handle == nullptr) {
+      throw StateError('shizuru_create returned null — check config and logs');
+    }
+
+    // Wire C++ TTS pipeline via shizuru_setup_voice.
+    _voiceConfigured = false;
+    final hasBaidu = config.asrApiKey != null &&
+        config.asrApiKey!.isNotEmpty &&
+        config.asrSecretKey != null &&
+        config.asrSecretKey!.isNotEmpty;
+    final hasElevenLabs = config.ttsApiKey != null &&
+        config.ttsApiKey!.isNotEmpty;
+    if (hasBaidu || hasElevenLabs) {
+      final voiceCfg = jsonEncode({
+        'tts_provider': hasElevenLabs ? 'elevenlabs' : 'baidu',
+        if (config.asrApiKey != null)  'asr_api_key':    config.asrApiKey,
+        if (config.asrSecretKey != null) 'asr_secret_key': config.asrSecretKey,
+        if (config.ttsApiKey != null)  'tts_api_key':    config.ttsApiKey,
+        if (config.ttsVoiceId != null) 'tts_voice_id':   config.ttsVoiceId,
+      });
+      final voicePtr = voiceCfg.toNativeUtf8();
+      try {
+        final result = _bindings.setupVoice(_handle!, voicePtr);
+        _voiceConfigured = result != 0;
+      } finally {
+        calloc.free(voicePtr);
+      }
+    }
+
+    if (_voiceConfigured) {
+      await _audioService.init();
+    }
+
+    // Register callbacks via NativeCallable.listener (safe from any thread).
+    _nativeOutputCb = NativeCallable<NativeOutputCallback>.listener(
+      (Pointer<Utf8> textPtr, Pointer<Void> _) {
+        final text = textPtr.toDartString();
+        _bindings.freeString(textPtr);
+        _outputCb?.call(text);
+      },
+    );
+
+    _nativeStateCb = NativeCallable<NativeStateCallback>.listener(
+      (int state, Pointer<Void> _) {
+        if (state >= 0 && state < CppAgentState.values.length) {
+          _state = CppAgentState.values[state];
+          _stateCb?.call(_state);
+        }
+      },
+    );
+
+    _nativeToolCallCb = NativeCallable<NativeToolCallCallback>.listener(
+      (Pointer<Utf8> namePtr, Pointer<Utf8> argsPtr, Pointer<Void> _) {
+        final name = namePtr.toDartString();
+        final args = argsPtr.toDartString();
+        _bindings.freeString(namePtr);
+        _bindings.freeString(argsPtr);
+        _toolCallCb?.call(name, args);
+      },
+    );
+
+    _bindings.setOutputCallback(
+        _handle!, _nativeOutputCb!.nativeFunction, nullptr);
+    _bindings.setStateCallback(
+        _handle!, _nativeStateCb!.nativeFunction, nullptr);
+    _bindings.setToolCallCallback(
+        _handle!, _nativeToolCallCb!.nativeFunction, nullptr);
+    // TODO: register transcription callback once ASR pipeline is wired.
+  }
+
+  /// Register a tool call notification callback.
+  void onToolCall(void Function(String toolName, String arguments) callback) {
+    _toolCallCb = callback;
+  }
+
+  @override
+  Future<String> startSession() async {
+    if (_handle == null) throw StateError('Runtime not initialized');
+    final idPtr = _bindings.startSession(_handle!);
+    if (idPtr == nullptr) throw StateError('shizuru_start_session returned null');
+    final sessionId = idPtr.toDartString();
+    _bindings.freeString(idPtr);
+    return sessionId;
+  }
+
+  @override
+  Future<void> sendMessage(String content) async {
+    if (_handle == null) return;
+    final contentPtr = content.toNativeUtf8();
+    try {
+      _bindings.sendMessage(_handle!, contentPtr);
+    } finally {
+      calloc.free(contentPtr);
+    }
+  }
+
+  @override
+  CppAgentState getState() {
+    if (_handle == null) return CppAgentState.terminated;
+    final raw = _bindings.getState(_handle!);
+    if (raw >= 0 && raw < CppAgentState.values.length) {
+      return CppAgentState.values[raw];
+    }
+    return CppAgentState.error;
+  }
+
+  @override
+  void onOutput(void Function(String) callback) => _outputCb = callback;
+
+  @override
+  void onStateChange(void Function(CppAgentState) callback) =>
+      _stateCb = callback;
+
+  @override
+  Future<void> shutdown() async {
+    if (_handle == null) return;
+    _bindings.shutdown(_handle!);
+  }
+
+  @override
+  bool get hasActiveSession {
+    if (_handle == null) return false;
+    return _bindings.hasActiveSession(_handle!) != 0;
+  }
+
+  // TODO: implement startRecording / stopRecordingAndTranscribe once
+  // shizuru_start_recording / shizuru_stop_recording are wired in shizuru_api.cpp.
+  @override
+  Future<bool> startRecording() async => false;
+  @override
+  Future<String?> stopRecordingAndTranscribe() async => null;
+
+  @override
+  Future<void> speakText(String text) async {
+    if (!_voiceConfigured || text.isEmpty || _handle == null) return;
+    final textPtr = text.toNativeUtf8();
+    try {
+      _bindings.speak(_handle!, textPtr);
+    } finally {
+      calloc.free(textPtr);
+    }
+    _pollForAudio();
+  }
+
+  // Poll shizuru_peek_audio_size() / shizuru_take_audio_into() until WAV bytes
+  // arrive, then play via AudioService.  Dart owns the buffer — no cross-DLL
+  // malloc/free required.
+  void _pollForAudio() {
+    _audioPoller?.cancel();
+    var attempts = 0;
+    const maxAttempts = 150; // 30 s at 200 ms
+    _audioPoller = Timer.periodic(const Duration(milliseconds: 200), (timer) {
+      if (_handle == null) { timer.cancel(); return; }
+      try {
+        final size = _bindings.peekAudioSize(_handle!);
+        if (size > 0) {
+          timer.cancel();
+          final buf = calloc<Uint8>(size);
+          try {
+            final copied = _bindings.takeAudioInto(_handle!, buf, size);
+            if (copied > 0) {
+              final audio = Uint8List.fromList(buf.asTypedList(copied));
+              _audioService.playAudioBytes(audio, 'audio/wav').ignore();
+            }
+          } finally {
+            calloc.free(buf);
+          }
+        } else if (++attempts >= maxAttempts) {
+          timer.cancel();
+        }
+      } catch (e, s) {
+        timer.cancel();
+      }
+    });
+  }
+
+  @override
+  Future<void> stopSpeaking() async {
+    if (_handle == null) return;
+    _bindings.stopSpeaking(_handle!);
+  }
+
+  @override
+  bool get isSpeaking => false; // TODO: expose device state query in C API
+  @override
+  bool get isRecording => false;
+
+  void _disposeNativeCallbacks() {
+    _nativeOutputCb?.close();
+    _nativeOutputCb = null;
+    _nativeStateCb?.close();
+    _nativeStateCb = null;
+    _nativeToolCallCb?.close();
+    _nativeToolCallCb = null;
+    _audioPoller?.cancel();
+    _audioPoller = null;
+  }
+
+  /// Call when the bridge is no longer needed.
+  void dispose() {
+    _disposeNativeCallbacks();
+    if (_handle != null) {
+      _bindings.destroy(_handle!);
+      _handle = null;
+    }
+  }
 }
 
 // ─── Mock bridge (kept for offline testing) ──────────────────────────────────
