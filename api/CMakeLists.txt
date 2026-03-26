@@ -18,5 +18,6 @@ target_link_libraries(shizuru_api
   PRIVATE shizuru_audio
   PRIVATE shizuru_tts_baidu_device
   PRIVATE shizuru_tts_elevenlabs_device
+  PRIVATE shizuru_asr_baidu
   PRIVATE shizuru_baidu_utils
 )

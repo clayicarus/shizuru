@@ -2,12 +2,14 @@
 
 #include "shizuru_api.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -26,6 +28,11 @@
 #include "io/audio/audio_device/port_audio/pa_player.h"
 #include "services/tts/config.h"
 #include "services/utils/baidu/baidu_config.h"
+
+// ASR pipeline headers
+#include "io/audio/audio_device/port_audio/pa_recorder.h"
+#include "asr/baidu/baidu_asr_client.h"
+#include "utils/baidu/baidu_token_manager.h"
 
 using json = nlohmann::json;
 
@@ -65,6 +72,17 @@ struct ShizuruRuntime {
   // Pending audio bytes (filled by DartAudioOutputDevice; Dart reads via shizuru_take_audio).
   std::mutex pending_audio_mutex;
   std::vector<uint8_t> pending_audio;
+
+  // ASR recording state (click-to-talk; managed directly, not via IoDevice bus).
+  std::unique_ptr<shizuru::io::PaRecorder> asr_recorder;
+  std::unique_ptr<shizuru::services::BaiduAsrClient> asr_client;
+  std::shared_ptr<shizuru::services::BaiduTokenManager> asr_token_mgr;
+  std::mutex asr_audio_mutex;
+  std::vector<uint8_t> asr_audio_buffer;
+  std::atomic<bool> asr_recording{false};
+  std::thread asr_thread;
+  ShizuruTranscriptionCallback transcription_cb = nullptr;
+  void* transcription_ud = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -154,6 +172,14 @@ ShizuruRuntime* shizuru_create(const char* config_json) {
 
 void shizuru_destroy(ShizuruRuntime* rt) {
   if (!rt) return;
+  // Stop ASR recording if active and join transcription thread.
+  if (rt->asr_recording.load() && rt->asr_recorder) {
+    rt->asr_recording.store(false);
+    rt->asr_recorder->Stop();
+  }
+  if (rt->asr_thread.joinable()) {
+    rt->asr_thread.join();
+  }
   if (rt->runtime) {
     rt->runtime->Shutdown();
   }
@@ -213,6 +239,18 @@ const char* shizuru_start_session(ShizuruRuntime* rt) {
 
     }
 
+    // Stop any in-progress ASR from a previous session.
+    if (rt->asr_recording.load() && rt->asr_recorder) {
+      rt->asr_recording.store(false);
+      rt->asr_recorder->Stop();
+    }
+    if (rt->asr_thread.joinable()) {
+      rt->asr_thread.join();
+    }
+    rt->asr_recorder.reset();
+    rt->asr_client.reset();
+    rt->asr_token_mgr.reset();
+
     // --- TTS + audio playout pipeline ----------------------------------------
     if (rt->voice_configured) {
       using namespace shizuru;
@@ -246,9 +284,34 @@ const char* shizuru_start_session(ShizuruRuntime* rt) {
       rt->runtime->RegisterDevice(std::make_unique<DartAudioOutputDevice>(rt));
       rt->runtime->AddRoute({tts_id,           "audio_out"},
                              {"dart_audio_out", "audio_in"}, kDma);
+
+      // --- ASR recording pipeline (click-to-talk) ----------------------------
+      const std::string asr_key = vc.value("asr_api_key", "");
+      const std::string asr_sec = vc.value("asr_secret_key", "");
+      if (!asr_key.empty() && !asr_sec.empty()) {
+        services::BaiduConfig asr_cfg;
+        asr_cfg.api_key    = asr_key;
+        asr_cfg.secret_key = asr_sec;
+        asr_cfg.asr_format = "pcm";
+        rt->asr_token_mgr = std::make_shared<services::BaiduTokenManager>(asr_cfg);
+        rt->asr_client = std::make_unique<services::BaiduAsrClient>(asr_cfg,
+                                                                      rt->asr_token_mgr);
+
+        io::RecorderConfig rec_cfg;
+        rec_cfg.sample_rate             = 16000;
+        rec_cfg.channel_count           = 1;
+        rec_cfg.frames_per_buffer       = 320;       // 20ms at 16kHz
+        rec_cfg.buffer_capacity_samples = 16000 * 30; // 30s max buffer
+        rt->asr_recorder = std::make_unique<io::PaRecorder>(rec_cfg);
+        rt->asr_recorder->SetFrameCallback([rt](const io::AudioFrame& frame) {
+          if (!rt->asr_recording.load()) return;
+          const auto* bytes = reinterpret_cast<const uint8_t*>(frame.data);
+          const size_t n = frame.NumSamples() * sizeof(int16_t);
+          std::lock_guard<std::mutex> lock(rt->asr_audio_mutex);
+          rt->asr_audio_buffer.insert(rt->asr_audio_buffer.end(), bytes, bytes + n);
+        });
+      }
     }
-    // TODO: Wire audio capture → VAD → ASR → transcription callback
-    // once the non-UI ASR pipeline is ready (see shizuru_start_recording).
 
     std::string session_id = rt->runtime->StartSession();
     return api_strdup(session_id.c_str());
@@ -425,14 +488,75 @@ void shizuru_stop_speaking(ShizuruRuntime* rt) {
   rt->runtime->StopSpeaking();
 }
 
-void shizuru_start_recording(ShizuruRuntime* rt) {
-  // TODO: start audio capture device once ASR pipeline is wired in shizuru_start_session.
-  (void)rt;
+void shizuru_set_transcription_callback(ShizuruRuntime* rt,
+                                         ShizuruTranscriptionCallback cb,
+                                         void* user_data) {
+  if (!rt) return;
+  rt->transcription_cb = cb;
+  rt->transcription_ud = user_data;
+}
+
+int32_t shizuru_start_recording(ShizuruRuntime* rt) {
+  if (!rt || !rt->asr_recorder) return 0;
+  if (rt->asr_recording.load()) return 1;  // already recording
+  {
+    std::lock_guard<std::mutex> lock(rt->asr_audio_mutex);
+    rt->asr_audio_buffer.clear();
+  }
+  rt->asr_recording.store(true);
+  try {
+    rt->asr_recorder->Start();
+    return 1;
+  } catch (const std::exception& e) {
+    rt->asr_recording.store(false);
+    LOG_ERROR("shizuru_start_recording: {}", e.what());
+    return 0;
+  }
 }
 
 void shizuru_stop_recording(ShizuruRuntime* rt) {
-  // TODO: stop audio capture and flush ASR once pipeline is wired.
-  (void)rt;
+  if (!rt || !rt->asr_recorder) return;
+  if (!rt->asr_recording.load()) return;
+
+  rt->asr_recording.store(false);
+  rt->asr_recorder->Stop();
+
+  std::vector<uint8_t> audio;
+  {
+    std::lock_guard<std::mutex> lock(rt->asr_audio_mutex);
+    audio.swap(rt->asr_audio_buffer);
+  }
+
+  if (rt->asr_thread.joinable()) {
+    rt->asr_thread.join();
+  }
+
+  rt->asr_thread = std::thread([rt, audio = std::move(audio)]() {
+    ShizuruTranscriptionCallback cb = rt->transcription_cb;
+    void* ud = rt->transcription_ud;
+    if (!cb) return;
+
+    if (audio.empty() || !rt->asr_client) {
+      cb(nullptr, ud);
+      return;
+    }
+
+    try {
+      const std::string audio_str(reinterpret_cast<const char*>(audio.data()),
+                                   audio.size());
+      const std::string transcript =
+          rt->asr_client->Transcribe(audio_str, "audio/pcm");
+      if (!transcript.empty()) {
+        char* text = api_strdup(transcript.c_str());
+        cb(text, ud);
+      } else {
+        cb(nullptr, ud);
+      }
+    } catch (const std::exception& e) {
+      LOG_ERROR("shizuru_stop_recording: transcription failed: {}", e.what());
+      cb(nullptr, ud);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

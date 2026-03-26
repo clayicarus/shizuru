@@ -117,8 +117,27 @@ typedef ShizuruSpeakDart = void Function(
 typedef ShizuruStopSpeakingNative = Void Function(Pointer<ShizuruRuntime> rt);
 typedef ShizuruStopSpeakingDart = void Function(Pointer<ShizuruRuntime> rt);
 
-// TODO: shizuru_set_transcription_callback / shizuru_start_recording / shizuru_stop_recording
-// — add bindings once the ASR pipeline is wired in shizuru_api.cpp.
+// void (*ShizuruTranscriptionCallback)(const char* transcript, void* user_data);
+typedef NativeTranscriptionCallback = Void Function(
+    Pointer<Utf8> transcript, Pointer<Void> userData);
+
+// void shizuru_set_transcription_callback(rt, cb, user_data);
+typedef ShizuruSetTranscriptionCallbackNative = Void Function(
+    Pointer<ShizuruRuntime> rt,
+    Pointer<NativeFunction<NativeTranscriptionCallback>> cb,
+    Pointer<Void> userData);
+typedef ShizuruSetTranscriptionCallbackDart = void Function(
+    Pointer<ShizuruRuntime> rt,
+    Pointer<NativeFunction<NativeTranscriptionCallback>> cb,
+    Pointer<Void> userData);
+
+// int32_t shizuru_start_recording(rt);
+typedef ShizuruStartRecordingNative = Int32 Function(Pointer<ShizuruRuntime> rt);
+typedef ShizuruStartRecordingDart = int Function(Pointer<ShizuruRuntime> rt);
+
+// void shizuru_stop_recording(rt);
+typedef ShizuruStopRecordingNative = Void Function(Pointer<ShizuruRuntime> rt);
+typedef ShizuruStopRecordingDart = void Function(Pointer<ShizuruRuntime> rt);
 
 // int64_t shizuru_peek_audio_size(rt);
 typedef ShizuruPeekAudioSizeNative = Int64 Function(Pointer<ShizuruRuntime> rt);
@@ -155,9 +174,11 @@ class ShizuruNativeBindings {
   late final ShizuruSetupVoiceDart setupVoice;
   late final ShizuruSpeakDart speak;
   late final ShizuruStopSpeakingDart stopSpeaking;
+  late final ShizuruSetTranscriptionCallbackDart setTranscriptionCallback;
+  late final ShizuruStartRecordingDart startRecording;
+  late final ShizuruStopRecordingDart stopRecording;
   late final ShizuruPeekAudioSizeDart peekAudioSize;
   late final ShizuruTakeAudioIntoDart takeAudioInto;
-  // TODO: setTranscriptionCallback, startRecording, stopRecording
   late final ShizuruFreeStringDart freeString;
 
   ShizuruNativeBindings() {
@@ -199,6 +220,16 @@ class ShizuruNativeBindings {
         'shizuru_speak');
     stopSpeaking = _lib.lookupFunction<ShizuruStopSpeakingNative, ShizuruStopSpeakingDart>(
         'shizuru_stop_speaking');
+    setTranscriptionCallback = _lib.lookupFunction<
+            ShizuruSetTranscriptionCallbackNative,
+            ShizuruSetTranscriptionCallbackDart>(
+        'shizuru_set_transcription_callback');
+    startRecording = _lib.lookupFunction<ShizuruStartRecordingNative,
+            ShizuruStartRecordingDart>(
+        'shizuru_start_recording');
+    stopRecording = _lib.lookupFunction<ShizuruStopRecordingNative,
+            ShizuruStopRecordingDart>(
+        'shizuru_stop_recording');
     peekAudioSize = _lib.lookupFunction<ShizuruPeekAudioSizeNative, ShizuruPeekAudioSizeDart>(
         'shizuru_peek_audio_size');
     takeAudioInto = _lib.lookupFunction<ShizuruTakeAudioIntoNative, ShizuruTakeAudioIntoDart>(

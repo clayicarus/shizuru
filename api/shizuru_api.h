@@ -193,6 +193,28 @@ SHIZURU_API void shizuru_speak(ShizuruRuntime* rt, const char* text);
 SHIZURU_API void shizuru_stop_speaking(ShizuruRuntime* rt);
 
 // ---------------------------------------------------------------------------
+// ASR recording (click-to-talk; call setup_voice with asr_api_key first)
+// ---------------------------------------------------------------------------
+
+// Callback invoked when transcription completes (on a C++ worker thread).
+// transcript is a malloc-allocated UTF-8 string; caller MUST free it with
+// shizuru_free_string().  May be NULL if transcription failed or was empty.
+typedef void (*ShizuruTranscriptionCallback)(const char* transcript,
+                                              void* user_data);
+
+// Register transcription callback (call before shizuru_start_session).
+SHIZURU_API void shizuru_set_transcription_callback(
+    ShizuruRuntime* rt, ShizuruTranscriptionCallback cb, void* user_data);
+
+// Start microphone recording.
+// Returns 1 on success, 0 on failure (ASR not configured, device error).
+SHIZURU_API int32_t shizuru_start_recording(ShizuruRuntime* rt);
+
+// Stop recording and asynchronously transcribe the captured audio.
+// The transcript is delivered via ShizuruTranscriptionCallback (may be NULL).
+SHIZURU_API void shizuru_stop_recording(ShizuruRuntime* rt);
+
+// ---------------------------------------------------------------------------
 // TTS audio output (Dart-side polling bridge)
 // ---------------------------------------------------------------------------
 

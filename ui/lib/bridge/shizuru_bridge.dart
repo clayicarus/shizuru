@@ -353,6 +353,7 @@ class FfiBridge extends ShizuruBridge {
   NativeCallable<NativeOutputCallback>? _nativeOutputCb;
   NativeCallable<NativeStateCallback>? _nativeStateCb;
   NativeCallable<NativeToolCallCallback>? _nativeToolCallCb;
+  NativeCallable<NativeTranscriptionCallback>? _nativeTranscriptionCb;
 
   // Voice configured flag (set after successful shizuru_setup_voice call).
   bool _voiceConfigured = false;
@@ -360,6 +361,10 @@ class FfiBridge extends ShizuruBridge {
   // Audio output: polls shizuru_take_audio() after each speakText() call.
   final AudioService _audioService = AudioService();
   Timer? _audioPoller;
+
+  // ASR recording state.
+  bool _recording = false;
+  Completer<String?>? _transcriptionCompleter;
 
   FfiBridge({String? libraryPath}) {
     if (libraryPath != null) {
@@ -454,13 +459,27 @@ class FfiBridge extends ShizuruBridge {
       },
     );
 
+    _nativeTranscriptionCb =
+        NativeCallable<NativeTranscriptionCallback>.listener(
+      (Pointer<Utf8> textPtr, Pointer<Void> _) {
+        String? text;
+        if (textPtr.address != 0) {
+          text = textPtr.toDartString();
+          _bindings.freeString(textPtr);
+        }
+        _transcriptionCompleter?.complete(text);
+        _transcriptionCompleter = null;
+      },
+    );
+
     _bindings.setOutputCallback(
         _handle!, _nativeOutputCb!.nativeFunction, nullptr);
     _bindings.setStateCallback(
         _handle!, _nativeStateCb!.nativeFunction, nullptr);
     _bindings.setToolCallCallback(
         _handle!, _nativeToolCallCb!.nativeFunction, nullptr);
-    // TODO: register transcription callback once ASR pipeline is wired.
+    _bindings.setTranscriptionCallback(
+        _handle!, _nativeTranscriptionCb!.nativeFunction, nullptr);
   }
 
   /// Register a tool call notification callback.
@@ -518,12 +537,26 @@ class FfiBridge extends ShizuruBridge {
     return _bindings.hasActiveSession(_handle!) != 0;
   }
 
-  // TODO: implement startRecording / stopRecordingAndTranscribe once
-  // shizuru_start_recording / shizuru_stop_recording are wired in shizuru_api.cpp.
   @override
-  Future<bool> startRecording() async => false;
+  Future<bool> startRecording() async {
+    if (_handle == null || !_voiceConfigured) return false;
+    final ok = _bindings.startRecording(_handle!);
+    if (ok != 0) {
+      _recording = true;
+    }
+    return ok != 0;
+  }
+
   @override
-  Future<String?> stopRecordingAndTranscribe() async => null;
+  Future<String?> stopRecordingAndTranscribe() async {
+    if (_handle == null || !_recording) return null;
+    _recording = false;
+    // Complete any pending completer before starting a new one.
+    _transcriptionCompleter?.complete(null);
+    _transcriptionCompleter = Completer<String?>();
+    _bindings.stopRecording(_handle!);
+    return _transcriptionCompleter!.future;
+  }
 
   @override
   Future<void> speakText(String text) async {
@@ -578,7 +611,7 @@ class FfiBridge extends ShizuruBridge {
   @override
   bool get isSpeaking => false; // TODO: expose device state query in C API
   @override
-  bool get isRecording => false;
+  bool get isRecording => _recording;
 
   void _disposeNativeCallbacks() {
     _nativeOutputCb?.close();
@@ -587,6 +620,11 @@ class FfiBridge extends ShizuruBridge {
     _nativeStateCb = null;
     _nativeToolCallCb?.close();
     _nativeToolCallCb = null;
+    _nativeTranscriptionCb?.close();
+    _nativeTranscriptionCb = null;
+    _transcriptionCompleter?.complete(null);
+    _transcriptionCompleter = null;
+    _recording = false;
     _audioPoller?.cancel();
     _audioPoller = null;
   }
