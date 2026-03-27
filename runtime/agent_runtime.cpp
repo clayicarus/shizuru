@@ -267,6 +267,8 @@ void AgentRuntime::DispatchFrame(const std::string& device_id,
       if (frame.type == "text/plain") {
         RuntimeOutput output;
         output.text = std::string(frame.payload.begin(), frame.payload.end());
+        output.is_partial = (frame.metadata.count("streaming") &&
+                             frame.metadata.at("streaming") == "1");
         OutputCallback cb;
         {
           std::lock_guard<std::mutex> lock(output_cb_mutex_);

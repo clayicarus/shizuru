@@ -182,6 +182,7 @@ int main(int argc, char* argv[]) {
       "You are a helpful voice assistant. Keep responses concise and natural "
       "for speech. Avoid markdown formatting.";
   rt_cfg.controller.max_turns          = 100;
+  rt_cfg.controller.use_streaming      = true;  // Enable SSE streaming
 
   services::ToolRegistry tools;  // no tools for this example
 
@@ -228,11 +229,20 @@ int main(int argc, char* argv[]) {
                    {"audio_playout",  "audio_in"}, kDma);
 
   // ── Output callback: LLM response → TTS ──────────────────────────────────
+  // Streaming tokens are printed in real-time; only the final complete response
+  // is fed into TTS to avoid fragmented audio synthesis.
   runtime.OnOutput([tts_ptr](const runtime::RuntimeOutput& output) {
-    std::printf("[agent] %s\n", output.text.c_str());
+    if (output.is_partial) {
+      // Print streaming token without newline for real-time display.
+      std::printf("%s", output.text.c_str());
+      std::fflush(stdout);
+      return;
+    }
+
+    // Final response: newline + feed into TTS.
+    std::printf("\n[agent] %s\n", output.text.c_str());
     std::fflush(stdout);
 
-    // Feed LLM text into TTS for voice playback.
     io::DataFrame frame;
     frame.type    = "text/plain";
     frame.payload = std::vector<uint8_t>(output.text.begin(), output.text.end());

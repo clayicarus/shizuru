@@ -64,6 +64,20 @@ CoreDevice::CoreDevice(std::string device_id,
           EmitFrame(kTextOut, std::move(frame));
         }
       });
+
+  // Hook Controller::OnStreamToken to emit partial token DataFrames.
+  // Consumers can distinguish streaming chunks via frame.metadata["streaming"] == "1".
+  session_->GetController().OnStreamToken(
+      [this](const std::string& token) {
+        io::DataFrame frame;
+        frame.type = "text/plain";
+        frame.payload = std::vector<uint8_t>(token.begin(), token.end());
+        frame.source_device = device_id_;
+        frame.source_port = kTextOut;
+        frame.metadata["streaming"] = "1";
+        frame.timestamp = std::chrono::steady_clock::now();
+        EmitFrame(kTextOut, std::move(frame));
+      });
 }
 
 std::string CoreDevice::GetDeviceId() const {

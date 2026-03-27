@@ -127,6 +127,13 @@ void Controller::OnResponse(ResponseCallback cb) {
   response_callbacks_.push_back(std::move(cb));
 }
 
+// Register callback for streaming token deltas.
+void Controller::OnStreamToken(StreamTokenCallback cb) {
+  std::lock_guard<std::mutex> lock(callbacks_mutex_);
+  assert(!loop_thread_.joinable() && "OnStreamToken must be called before Start()");
+  stream_token_callbacks_.push_back(std::move(cb));
+}
+
 // Validate + execute transition.
 bool Controller::TryTransition(Event event) {
   State current = state_.load();
@@ -250,7 +257,16 @@ void Controller::HandleThinking(const Observation& obs) {
     try {
       LOG_DEBUG("[{}] LLM submit (attempt {}/{})",
                 MODULE_NAME, attempt + 1, config_.max_retries + 1);
-      result = llm_->Submit(window);
+      if (config_.use_streaming) {
+        // Streaming path: fire token callbacks as chunks arrive.
+        result = llm_->SubmitStreaming(window, [this](const std::string& token) {
+          for (const auto& cb : stream_token_callbacks_) {
+            cb(token);
+          }
+        });
+      } else {
+        result = llm_->Submit(window);
+      }
       success = true;
       break;
     } catch (...) {

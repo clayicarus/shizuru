@@ -11,6 +11,7 @@ struct ControllerConfig {
   std::chrono::seconds wall_clock_timeout{300};      // 5 min session timeout
   int token_budget = 100000;                         // Max cumulative tokens
   int action_count_limit = 50;                       // Max IO actions per session
+  bool use_streaming = false;                        // Use SSE streaming for LLM responses
 };
 
 }  // namespace shizuru::core

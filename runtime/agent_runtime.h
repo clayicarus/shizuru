@@ -39,6 +39,7 @@ struct RuntimeConfig {
 // Final output emitted by AgentRuntime for a user turn.
 struct RuntimeOutput {
   std::string text;
+  bool is_partial = false;  // true for streaming token chunks, false for final response
 };
 
 // Top-level entry point that assembles all components and manages

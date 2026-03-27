@@ -80,6 +80,10 @@ class Controller {
   using ResponseCallback = std::function<void(const ActionCandidate& response)>;
   void OnResponse(ResponseCallback cb);
 
+  // Register callback for streaming token deltas (only fires when use_streaming=true).
+  using StreamTokenCallback = std::function<void(const std::string& token)>;
+  void OnStreamToken(StreamTokenCallback cb);
+
  private:
   static constexpr char MODULE_NAME[] = "Controller";
 
@@ -135,6 +139,7 @@ class Controller {
   std::vector<TransitionCallback> transition_callbacks_;
   std::vector<DiagnosticCallback> diagnostic_callbacks_;
   std::vector<ResponseCallback> response_callbacks_;
+  std::vector<StreamTokenCallback> stream_token_callbacks_;
 };
 
 }  // namespace shizuru::core

@@ -505,5 +505,180 @@ TEST(CoreDeviceTest, StoppedDeviceDiscardsFrames) {
       << "LLM was called after device was stopped";
 }
 
+// ---------------------------------------------------------------------------
+// Test: StreamingTokensEmittedWithMetadataFlag
+// With use_streaming=true, SubmitStreaming is called and each token delta
+// arrives on text_out with metadata["streaming"]="1".
+// The final response frame (from OnResponse) must NOT have that flag.
+// ---------------------------------------------------------------------------
+TEST(CoreDeviceTest, StreamingTokensEmittedWithMetadataFlag) {
+  auto llm = std::make_unique<core::testing::MockLlmClient>();
+  auto* llm_ptr = llm.get();
+
+  // SubmitStreaming fires three token callbacks then returns a kResponse.
+  llm_ptr->submit_fn = [](const core::ContextWindow&) -> core::LlmResult {
+    // submit_fn is called by both Submit and SubmitStreaming in the mock.
+    // We return kResponse so the controller routes to HandleResponding.
+    core::LlmResult r;
+    r.candidate.type = core::ActionType::kResponse;
+    r.candidate.response_text = "hello world";
+    r.prompt_tokens = 5;
+    r.completion_tokens = 3;
+    return r;
+  };
+
+  // Override SubmitStreaming directly via a subclass so we can fire on_token.
+  class StreamingMock : public core::testing::MockLlmClient {
+   public:
+    core::LlmResult SubmitStreaming(const core::ContextWindow& ctx,
+                                    core::StreamCallback on_token) override {
+      // Simulate three token chunks.
+      if (on_token) {
+        on_token("hel");
+        on_token("lo ");
+        on_token("world");
+      }
+      return submit_fn(ctx);
+    }
+  };
+
+  auto streaming_llm = std::make_unique<StreamingMock>();
+  streaming_llm->submit_fn = [](const core::ContextWindow&) -> core::LlmResult {
+    core::LlmResult r;
+    r.candidate.type = core::ActionType::kResponse;
+    r.candidate.response_text = "hello world";
+    r.prompt_tokens = 5;
+    r.completion_tokens = 3;
+    return r;
+  };
+
+  core::ControllerConfig ctrl_cfg;
+  ctrl_cfg.max_turns = 5;
+  ctrl_cfg.max_retries = 0;
+  ctrl_cfg.retry_base_delay = std::chrono::milliseconds(1);
+  ctrl_cfg.wall_clock_timeout = std::chrono::seconds(5);
+  ctrl_cfg.token_budget = 100000;
+  ctrl_cfg.action_count_limit = 10;
+  ctrl_cfg.use_streaming = true;  // ← enable streaming
+
+  core::ContextConfig ctx_cfg;
+  ctx_cfg.max_context_tokens = 100000;
+
+  auto device = std::make_unique<CoreDevice>(
+      "core_streaming", "test-session-streaming",
+      ctrl_cfg, ctx_cfg, core::PolicyConfig{},
+      std::move(streaming_llm),
+      std::make_unique<core::testing::MockMemoryStore>(),
+      std::make_unique<core::testing::MockAuditSink>());
+
+  std::mutex mu;
+  std::vector<io::DataFrame> text_out_frames;
+  device->SetOutputCallback([&](const std::string& /*dev*/,
+                                const std::string& port,
+                                io::DataFrame f) {
+    if (port == "text_out") {
+      std::lock_guard<std::mutex> lock(mu);
+      text_out_frames.push_back(std::move(f));
+    }
+  });
+
+  device->Start();
+
+  io::DataFrame in_frame;
+  in_frame.type = "text/plain";
+  const std::string msg = "hi";
+  in_frame.payload = std::vector<uint8_t>(msg.begin(), msg.end());
+  device->OnInput("text_in", std::move(in_frame));
+
+  // Wait for at least one streaming token + the final response frame.
+  bool got_all = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    // Expect 3 partial frames + 1 final frame.
+    return text_out_frames.size() >= 4;
+  }, 500);
+
+  device->Stop();
+
+  ASSERT_TRUE(got_all) << "Did not receive expected streaming frames in time";
+
+  std::lock_guard<std::mutex> lock(mu);
+
+  // Collect partial and final frames.
+  std::vector<std::string> partial_tokens;
+  int final_count = 0;
+  for (const auto& f : text_out_frames) {
+    const bool is_partial = f.metadata.count("streaming") &&
+                            f.metadata.at("streaming") == "1";
+    if (is_partial) {
+      partial_tokens.emplace_back(f.payload.begin(), f.payload.end());
+    } else {
+      ++final_count;
+    }
+  }
+
+  EXPECT_EQ(partial_tokens.size(), 3u) << "Expected 3 streaming token frames";
+  EXPECT_EQ(final_count, 1) << "Expected exactly 1 final (non-partial) frame";
+
+  // Verify token content.
+  EXPECT_EQ(partial_tokens[0], "hel");
+  EXPECT_EQ(partial_tokens[1], "lo ");
+  EXPECT_EQ(partial_tokens[2], "world");
+}
+
+// ---------------------------------------------------------------------------
+// Test: NonStreamingPathDoesNotSetMetadataFlag
+// With use_streaming=false (default), Submit is called and the response frame
+// on text_out must NOT have metadata["streaming"].
+// ---------------------------------------------------------------------------
+TEST(CoreDeviceTest, NonStreamingPathDoesNotSetMetadataFlag) {
+  core::testing::MockLlmClient* llm = nullptr;
+  auto device = MakeCoreDevice("core_no_stream", &llm);
+
+  llm->submit_fn = [](const core::ContextWindow&) -> core::LlmResult {
+    core::LlmResult r;
+    r.candidate.type = core::ActionType::kResponse;
+    r.candidate.response_text = "non-streaming response";
+    r.prompt_tokens = 5;
+    r.completion_tokens = 5;
+    return r;
+  };
+
+  std::mutex mu;
+  std::vector<io::DataFrame> text_out_frames;
+  device->SetOutputCallback([&](const std::string& /*dev*/,
+                                const std::string& port,
+                                io::DataFrame f) {
+    if (port == "text_out") {
+      std::lock_guard<std::mutex> lock(mu);
+      text_out_frames.push_back(std::move(f));
+    }
+  });
+
+  device->Start();
+
+  io::DataFrame in_frame;
+  in_frame.type = "text/plain";
+  const std::string msg = "hello";
+  in_frame.payload = std::vector<uint8_t>(msg.begin(), msg.end());
+  device->OnInput("text_in", std::move(in_frame));
+
+  bool got_response = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return !text_out_frames.empty();
+  });
+
+  device->Stop();
+
+  ASSERT_TRUE(got_response) << "No text_out frame received";
+
+  std::lock_guard<std::mutex> lock(mu);
+  for (const auto& f : text_out_frames) {
+    const bool has_streaming_flag = f.metadata.count("streaming") &&
+                                    f.metadata.at("streaming") == "1";
+    EXPECT_FALSE(has_streaming_flag)
+        << "Non-streaming path must not set metadata[\"streaming\"]";
+  }
+}
+
 }  // namespace
 }  // namespace shizuru::runtime
