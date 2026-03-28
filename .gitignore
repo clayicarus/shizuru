@@ -22,3 +22,21 @@ Thumbs.db
 # Temporary docs
 PR_DESCRIPTION.md
 STATUS.md
+
+# Flutter UI — generated and local artifacts
+ui/.flutter-plugins-dependencies
+ui/.dart_tool/
+ui/build/
+ui/.metadata
+ui/devtools_options.yaml
+ui/macos/Pods/
+ui/macos/Podfile.lock
+ui/macos/Flutter/ephemeral/
+ui/linux/flutter/ephemeral/
+ui/windows/flutter/ephemeral/
+ui/.idea/
+ui/**/*.iml
+ui/ui/
+ui/macos/Runner/Frameworks/*.dylib
+ui/macos/Runner/Frameworks/*.so
+ui/macos/Runner/Frameworks/*.dll
