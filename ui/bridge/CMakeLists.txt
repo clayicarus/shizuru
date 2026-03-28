@@ -8,6 +8,13 @@ if(APPLE)
   )
 endif()
 
+# On Windows, automatically export all symbols so Dart FFI can find them.
+if(WIN32)
+  set_target_properties(shizuru_bridge PROPERTIES
+    WINDOWS_EXPORT_ALL_SYMBOLS TRUE
+  )
+endif()
+
 target_link_libraries(shizuru_bridge PRIVATE
   shizuru_runtime
   shizuru_llm_openai
