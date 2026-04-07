@@ -52,6 +52,7 @@ target_link_libraries(voice_agent
   PRIVATE shizuru_tts_elevenlabs_device
   PRIVATE shizuru_audio
   PRIVATE shizuru_io_probe
+  PRIVATE shizuru_llm_openai
   PRIVATE shizuru_utils
 )
 target_include_directories(voice_agent

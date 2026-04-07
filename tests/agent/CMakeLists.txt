@@ -68,3 +68,17 @@ target_include_directories(policy_layer_test
 )
 add_test(NAME policy_layer_test COMMAND policy_layer_test)
 set_tests_properties(policy_layer_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=10")
+
+# Strategy tests (ObservationFilter, TtsSegmentStrategy, ResponseFilter)
+add_executable(strategy_test
+  strategy_test.cpp
+)
+target_link_libraries(strategy_test
+  PRIVATE shizuru_core
+  PRIVATE GTest::gtest_main
+)
+target_include_directories(strategy_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mocks
+)
+add_test(NAME strategy_test COMMAND strategy_test)

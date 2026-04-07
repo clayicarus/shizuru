@@ -61,6 +61,10 @@
 #include "runtime/route_table.h"
 #include "io/tool_registry.h"
 #include "llm/config.h"
+#include "strategies/llm_observation_filter.h"
+#include "strategies/tts_segment_strategy.h"
+#include "strategies/response_filter.h"
+#include "llm/openai/openai_client.h"
 
 using namespace shizuru;
 
@@ -183,6 +187,36 @@ int main(int argc, char* argv[]) {
       "for speech. Avoid markdown formatting.";
   rt_cfg.controller.max_turns          = 100;
   rt_cfg.controller.use_streaming      = true;  // Enable SSE streaming
+
+  // ── Strategy factories ────────────────────────────────────────────────────
+  // ObservationFilter: use a lightweight LLM to classify ASR transcripts.
+  // Reuses the same API endpoint but could use a cheaper/faster model.
+  rt_cfg.observation_filter_factory = [&]() {
+    services::OpenAiConfig filter_llm_cfg;
+    filter_llm_cfg.base_url        = base_url;
+    filter_llm_cfg.api_path        = "/compatible-mode/v1/chat/completions";
+    filter_llm_cfg.api_key         = openai_key;
+    filter_llm_cfg.model           = model;  // could use a lighter model
+    filter_llm_cfg.max_tokens      = 8;      // only need "yes" or "no"
+    filter_llm_cfg.temperature     = 0.0;
+    filter_llm_cfg.connect_timeout = std::chrono::seconds(5);
+    filter_llm_cfg.read_timeout    = std::chrono::seconds(10);
+    return std::make_unique<core::LlmObservationFilter>(
+        std::make_unique<services::OpenAiClient>(filter_llm_cfg));
+  };
+
+  // TtsSegmentStrategy: punctuation-based sentence segmentation for TTS.
+  rt_cfg.tts_segment_factory = []() {
+    core::PunctuationSegmentStrategy::Config seg_cfg;
+    seg_cfg.min_chars = 15;
+    seg_cfg.max_chars = 200;
+    return std::make_unique<core::PunctuationSegmentStrategy>(seg_cfg);
+  };
+
+  // ResponseFilter: strip <think> tags from LLM output.
+  rt_cfg.response_filter_factory = []() {
+    return std::make_unique<core::StripThinkingFilter>();
+  };
 
   services::ToolRegistry tools;  // no tools for this example
 
