@@ -4,6 +4,7 @@ add_library(shizuru_core STATIC
   context/context_strategy.cpp
   policy/policy_layer.cpp
   session/session.cpp
+  strategies/llm_observation_filter.cpp
 )
 
 target_include_directories(shizuru_core

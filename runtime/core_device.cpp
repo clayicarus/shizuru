@@ -16,7 +16,10 @@ CoreDevice::CoreDevice(std::string device_id,
                        core::PolicyConfig pol_config,
                        std::unique_ptr<core::LlmClient> llm,
                        std::unique_ptr<core::MemoryStore> memory,
-                       std::unique_ptr<core::AuditSink> audit)
+                       std::unique_ptr<core::AuditSink> audit,
+                       std::unique_ptr<core::ObservationFilter> observation_filter,
+                       std::unique_ptr<core::TtsSegmentStrategy> tts_segment,
+                       std::unique_ptr<core::ResponseFilter> response_filter)
     : device_id_(std::move(device_id)) {
   // EmitFrameCallback: called by Controller to emit action/tool_call frames.
   auto emit_frame = [this](const std::string& port, io::DataFrame frame) {
@@ -37,7 +40,10 @@ CoreDevice::CoreDevice(std::string device_id,
       std::move(emit_frame),
       std::move(cancel),
       std::move(memory),
-      std::move(audit));
+      std::move(audit),
+      std::move(observation_filter),
+      std::move(tts_segment),
+      std::move(response_filter));
 
   // OnTransition: emit cancel on control_out when transitioning to kListening
   // via kInterrupt or kResponseDelivered.

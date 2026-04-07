@@ -64,6 +64,24 @@
 - [x] `PcmDumpDevice` probes added to `voice_agent`: `capture.pcm`, `vad_dump.pcm`, `playout_dump.pcm`
 - [x] `MockLlmClient`: fixed mutex deadlock in `Cancel()` + added `WaitForCancel()` helper
 
+## Phase 5.5 — Controller Strategies (Done)
+
+- [x] Strategy interfaces: `ObservationFilter`, `TtsSegmentStrategy`, `ResponseFilter` in `core/strategies/`
+- [x] Default implementations: `AcceptAllFilter`, `PunctuationSegmentStrategy`, `PassthroughFilter`, `StripThinkingFilter`
+- [x] `LlmObservationFilter`: uses auxiliary LLM to classify ASR transcripts (yes/no)
+- [x] Controller integration: strategies injected via constructor, used in `RunLoop`, `HandleThinking` (streaming), `HandleResponding`, `HandleInterrupt`
+- [x] `RuntimeConfig`: strategy factory functions, called in `StartSession` to create per-session instances
+- [x] Injection chain: `RuntimeConfig` → `AgentRuntime::StartSession` → `CoreDevice` → `AgentSession` → `Controller`
+- [x] `voice_agent` example: wired with `LlmObservationFilter` + `PunctuationSegmentStrategy` + `StripThinkingFilter`
+- [x] Unit + integration tests: 17 tests covering all strategies (unit tests for `PunctuationSegmentStrategy` and `StripThinkingFilter`, integration tests for `ObservationFilter`, `TtsSegmentStrategy`, `ResponseFilter` with mock LLM)
+- [x] Fix: `SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG` so `LOG_DEBUG` calls survive compilation
+
+### TODO (deferred)
+
+- [ ] **Observation aggregation**: `ObservationFilter` interface currently returns `bool` (pass/reject). To support buffering partial ASR transcripts until the user finishes speaking, the interface needs to change to `std::optional<Observation> Filter(const Observation&)` — allowing the filter to accumulate and merge multiple observations before forwarding a single complete one to the Controller.
+- [ ] **Logger separation**: examples currently share the global `shizuru` logger with core/runtime/io. When extracting the agent SDK, the library should use its own internal logger; applications should configure their own logger independently.
+- [ ] **TTS streaming think-tag filtering**: `TtsSegmentStrategy` currently accumulates raw streaming tokens. If the LLM produces `<think>` blocks during streaming, they will be buffered and potentially sent to TTS. The strategy should strip thinking tags from the token stream before accumulation.
+
 ## Phase 6 — Audio Quality: 3A Processing
 
 On macOS, `VoiceProcessingIO` Audio Unit provides system-level AEC + AGC + NS, but PortAudio opens a plain `RemoteIO` unit and does not activate it. A dedicated CoreAudio backend (`io/audio/audio_device/core_audio/`) using `VoiceProcessingIO` would expose hardware 3A on macOS without any software implementation. On Android (Oboe) and iOS (CoreAudio with AVAudioSession), hardware 3A is similarly available via platform APIs.

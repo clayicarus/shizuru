@@ -19,3 +19,9 @@ target_include_directories(shizuru_utils
 target_link_libraries(shizuru_utils
   PUBLIC spdlog::spdlog
 )
+
+# Allow LOG_DEBUG / LOG_TRACE to survive compilation.
+# Runtime filtering is still controlled by InitLogger(config.level).
+target_compile_definitions(shizuru_utils
+  PUBLIC SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG
+)

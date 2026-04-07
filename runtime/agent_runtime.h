@@ -24,8 +24,20 @@
 #include "io/data_frame.h"
 #include "runtime/route_table.h"
 #include "runtime/core_device.h"
+#include "strategies/observation_filter.h"
+#include "strategies/response_filter.h"
+#include "strategies/tts_segment_strategy.h"
 
 namespace shizuru::runtime {
+
+// Strategy factory types — called once per session in StartSession().
+// Using std::function so callers can use lambdas, not just subclasses.
+using ObservationFilterFactory =
+    std::function<std::unique_ptr<core::ObservationFilter>()>;
+using TtsSegmentStrategyFactory =
+    std::function<std::unique_ptr<core::TtsSegmentStrategy>()>;
+using ResponseFilterFactory =
+    std::function<std::unique_ptr<core::ResponseFilter>()>;
 
 // Configuration bundle for creating an AgentRuntime.
 struct RuntimeConfig {
@@ -34,6 +46,13 @@ struct RuntimeConfig {
   core::PolicyConfig policy;
   services::OpenAiConfig llm;
   core::LoggerConfig logger;
+
+  // Optional strategy factories.  If set, StartSession() calls them to
+  // create strategy instances injected into the Controller.
+  // If null, defaults are used (AcceptAll, no TTS segmentation, Passthrough).
+  ObservationFilterFactory observation_filter_factory;
+  TtsSegmentStrategyFactory tts_segment_factory;
+  ResponseFilterFactory response_filter_factory;
 };
 
 // Final output emitted by AgentRuntime for a user turn.

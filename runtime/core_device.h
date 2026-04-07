@@ -16,6 +16,9 @@
 #include "io/io_device.h"
 #include "policy/config.h"
 #include "session/session.h"
+#include "strategies/observation_filter.h"
+#include "strategies/response_filter.h"
+#include "strategies/tts_segment_strategy.h"
 
 namespace shizuru::runtime {
 
@@ -30,7 +33,10 @@ class CoreDevice : public io::IoDevice {
              core::PolicyConfig pol_config,
              std::unique_ptr<core::LlmClient> llm,
              std::unique_ptr<core::MemoryStore> memory,
-             std::unique_ptr<core::AuditSink> audit);
+             std::unique_ptr<core::AuditSink> audit,
+             std::unique_ptr<core::ObservationFilter> observation_filter = nullptr,
+             std::unique_ptr<core::TtsSegmentStrategy> tts_segment = nullptr,
+             std::unique_ptr<core::ResponseFilter> response_filter = nullptr);
 
   // IoDevice interface
   std::string GetDeviceId() const override;

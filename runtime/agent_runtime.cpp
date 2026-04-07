@@ -115,7 +115,13 @@ std::string AgentRuntime::StartSession() {
   auto core = std::make_unique<CoreDevice>(
       "core", session_id,
       config_.controller, config_.context, config_.policy,
-      std::move(llm), std::move(memory), std::move(audit));
+      std::move(llm), std::move(memory), std::move(audit),
+      config_.observation_filter_factory
+          ? config_.observation_filter_factory() : nullptr,
+      config_.tts_segment_factory
+          ? config_.tts_segment_factory() : nullptr,
+      config_.response_filter_factory
+          ? config_.response_filter_factory() : nullptr);
 
   // Wire output callback before registering.
   core->SetOutputCallback(

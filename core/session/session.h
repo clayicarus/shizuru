@@ -14,6 +14,9 @@
 #include "interfaces/memory_store.h"
 #include "policy/config.h"
 #include "policy/policy_layer.h"
+#include "strategies/observation_filter.h"
+#include "strategies/response_filter.h"
+#include "strategies/tts_segment_strategy.h"
 
 namespace shizuru::core {
 
@@ -29,7 +32,10 @@ class AgentSession {
                Controller::EmitFrameCallback emit_frame,
                Controller::CancelCallback cancel,
                std::unique_ptr<MemoryStore> memory,
-               std::unique_ptr<AuditSink> audit);
+               std::unique_ptr<AuditSink> audit,
+               std::unique_ptr<ObservationFilter> observation_filter = nullptr,
+               std::unique_ptr<TtsSegmentStrategy> tts_segment = nullptr,
+               std::unique_ptr<ResponseFilter> response_filter = nullptr);
 
   ~AgentSession();
 

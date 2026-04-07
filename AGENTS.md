@@ -34,7 +34,8 @@ Platform-specific code is isolated behind abstract interfaces (e.g., audio backe
                │ dart:ffi
 ┌──────────────▼──────────────────────────┐
 │         C++ Core (all platforms)        │
-│  core/    controller, context, policy   │
+│  core/    controller, context, policy,  │
+│           strategies                    │
 │  services/ LLM, ASR, TTS, tools, memory │
 │  io/      IoDevice abstraction + audio  │
 │  runtime/ device bus, routing, session  │
@@ -84,6 +85,45 @@ flowchart TB
 5. Execute IO actions under permission and policy checks.
 6. Feed execution results back through IO.Observation.
 7. Repeat until stop condition is met, then return final response.
+
+### Core as the Sole Decision Center
+
+All semantic decisions — whether to respond, how to respond, when to send text to TTS — are made inside `core/` (Controller + strategies). IO devices do not make semantic judgments; they only handle data transport, format conversion, and physical device interaction.
+
+This means:
+- "Should this ASR transcript be processed?" → `ObservationFilter` (inside Controller)
+- "Is this streaming chunk ready for TTS?" → `TtsSegmentStrategy` (inside Controller)
+- "Should this response text be cleaned before output?" → `ResponseFilter` (inside Controller)
+- IO devices never call LLM or make content-level decisions.
+
+### Pluggable Strategies
+
+Business logic that would otherwise bloat the Controller is isolated behind strategy interfaces. Each strategy is injected via the Controller constructor (optional — defaults are used when null). Strategies may own their own dependencies (e.g., a lightweight LlmClient for classification).
+
+```
+core/strategies/
+├── observation_filter.h        — Should this observation be processed or ignored?
+│   ├── AcceptAllFilter           (default: process everything)
+│   └── LlmObservationFilter      (uses auxiliary LLM for yes/no classification)
+├── llm_observation_filter.h    — LLM-based implementation of ObservationFilter
+├── llm_observation_filter.cpp
+├── tts_segment_strategy.h      — When is a streaming chunk ready for TTS?
+│   └── PunctuationSegmentStrategy (default: flush at sentence-ending punctuation)
+└── response_filter.h           — Transform/filter the final response text
+    ├── PassthroughFilter         (default: no transformation)
+    └── StripThinkingFilter       (strips <think>...</think> blocks)
+```
+
+Injection chain: `RuntimeConfig` (strategy factories) → `AgentRuntime::StartSession` → `CoreDevice` → `AgentSession` → `Controller`.
+
+`RuntimeConfig` carries optional factory functions (`std::function<std::unique_ptr<Strategy>()>`) for each strategy. If a factory is set, `StartSession` calls it to create a strategy instance for the new session. If null, the Controller uses its built-in default.
+
+### Strategy Integration Points in Controller
+
+- `ObservationFilter::ShouldProcess` — called in `RunLoop` before transitioning from `kListening` to `kThinking`. Returns false → observation is silently dropped, Controller stays in `kListening`.
+- `TtsSegmentStrategy::Append/ReadyLength` — called inside the streaming callback in `HandleThinking`. When `ReadyLength() > 0`, Controller emits a `text/tts` DataFrame (with `metadata["tts_ready"]="1"`) via `emit_frame_`. Remaining buffer is flushed when streaming completes.
+- `ResponseFilter::Filter` — called in `HandleResponding` before emitting the response. If the filter returns an empty string, the response is suppressed entirely (no callbacks fired, Controller transitions to `kListening`).
+- `TtsSegmentStrategy::Reset` — called in `HandleInterrupt` to clear the TTS buffer on user interruption.
 
 ## Runtime IO Architecture (Implemented)
 

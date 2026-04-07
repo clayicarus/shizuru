@@ -12,7 +12,10 @@ AgentSession::AgentSession(const std::string& session_id,
                            Controller::EmitFrameCallback emit_frame,
                            Controller::CancelCallback cancel,
                            std::unique_ptr<MemoryStore> memory,
-                           std::unique_ptr<AuditSink> audit)
+                           std::unique_ptr<AuditSink> audit,
+                           std::unique_ptr<ObservationFilter> observation_filter,
+                           std::unique_ptr<TtsSegmentStrategy> tts_segment,
+                           std::unique_ptr<ResponseFilter> response_filter)
     : session_id_(session_id),
       memory_(std::move(memory)),
       audit_(std::move(audit)),
@@ -24,7 +27,10 @@ AgentSession::AgentSession(const std::string& session_id,
                   std::move(emit_frame),
                   std::move(cancel),
                   context_,
-                  policy_) {
+                  policy_,
+                  std::move(observation_filter),
+                  std::move(tts_segment),
+                  std::move(response_filter)) {
   context_.InitSession(session_id_);
   policy_.InitSession(session_id_);
 }

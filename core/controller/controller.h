@@ -18,6 +18,9 @@
 #include "interfaces/llm_client.h"
 #include "io/data_frame.h"
 #include "policy/policy_layer.h"
+#include "strategies/observation_filter.h"
+#include "strategies/response_filter.h"
+#include "strategies/tts_segment_strategy.h"
 
 namespace shizuru::core {
 
@@ -41,13 +44,21 @@ class Controller {
   // All dependencies injected via constructor.
   // session_id must match the key used to initialize ContextStrategy and
   // PolicyLayer (via InitSession), so all lookups resolve to the same slot.
+  //
+  // Strategy pointers are optional — if null, defaults are used:
+  //   observation_filter → AcceptAllFilter (process everything)
+  //   tts_segment        → nullptr (no TTS segmentation, streaming tokens only)
+  //   response_filter    → PassthroughFilter (no transformation)
   Controller(std::string session_id,
              ControllerConfig config,
              std::unique_ptr<LlmClient> llm,
              EmitFrameCallback emit_frame,
              CancelCallback cancel,
              ContextStrategy& context,
-             PolicyLayer& policy);
+             PolicyLayer& policy,
+             std::unique_ptr<ObservationFilter> observation_filter = nullptr,
+             std::unique_ptr<TtsSegmentStrategy> tts_segment = nullptr,
+             std::unique_ptr<ResponseFilter> response_filter = nullptr);
 
   ~Controller();
 
@@ -110,6 +121,11 @@ class Controller {
   CancelCallback cancel_;
   ContextStrategy& context_;
   PolicyLayer& policy_;
+
+  // Pluggable strategies (owned by Controller).
+  std::unique_ptr<ObservationFilter> observation_filter_;
+  std::unique_ptr<TtsSegmentStrategy> tts_segment_;
+  std::unique_ptr<ResponseFilter> response_filter_;
 
   // Pending tool call state (set in HandleActing, read in HandleActingResult)
   std::string pending_tool_call_id_;

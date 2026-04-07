@@ -60,14 +60,24 @@ Controller::Controller(std::string session_id,
                        EmitFrameCallback emit_frame,
                        CancelCallback cancel,
                        ContextStrategy& context,
-                       PolicyLayer& policy)
+                       PolicyLayer& policy,
+                       std::unique_ptr<ObservationFilter> observation_filter,
+                       std::unique_ptr<TtsSegmentStrategy> tts_segment,
+                       std::unique_ptr<ResponseFilter> response_filter)
     : session_id_(std::move(session_id)),
       config_(std::move(config)),
       llm_(std::move(llm)),
       emit_frame_(std::move(emit_frame)),
       cancel_(std::move(cancel)),
       context_(context),
-      policy_(policy) {}
+      policy_(policy),
+      observation_filter_(observation_filter
+                              ? std::move(observation_filter)
+                              : std::make_unique<AcceptAllFilter>()),
+      tts_segment_(std::move(tts_segment)),
+      response_filter_(response_filter
+                           ? std::move(response_filter)
+                           : std::make_unique<PassthroughFilter>()) {}
 
 Controller::~Controller() {
   if (loop_thread_.joinable()) {
@@ -205,6 +215,12 @@ void Controller::RunLoop() {
     // Normal flow: if in Listening and got user observation.
     if (current == State::kListening &&
         obs.type == ObservationType::kUserMessage) {
+      // Strategy: check if this observation should be processed.
+      if (!observation_filter_->ShouldProcess(obs)) {
+        LOG_INFO("[{}] Observation filtered out: \"{}\"",
+                 MODULE_NAME, obs.content);
+        continue;  // Stay in kListening.
+      }
       LOG_INFO("[{}] User message received: \"{}\"", MODULE_NAME, obs.content);
       TryTransition(Event::kUserObservation);
       // Drive the thinking→routing→acting/responding cycle.
@@ -259,11 +275,54 @@ void Controller::HandleThinking(const Observation& obs) {
                 MODULE_NAME, attempt + 1, config_.max_retries + 1);
       if (config_.use_streaming) {
         // Streaming path: fire token callbacks as chunks arrive.
+        // If a TTS segment strategy is configured, also buffer tokens
+        // and emit TTS-ready frames when the strategy signals readiness.
         result = llm_->SubmitStreaming(window, [this](const std::string& token) {
+          // Always fire raw token callbacks (for display / UI).
           for (const auto& cb : stream_token_callbacks_) {
             cb(token);
           }
+          // TTS segmentation: buffer and flush when ready.
+          if (tts_segment_) {
+            tts_segment_->Append(token);
+            size_t ready = tts_segment_->ReadyLength();
+            if (ready > 0) {
+              // Extract the ready portion and emit as TTS frame.
+              // We need to peek at the buffer content before consuming.
+              // Flush returns all content, so we use a temporary approach:
+              // consume ready chars by flushing and re-appending remainder.
+              std::string all = tts_segment_->Flush();
+              std::string tts_text = all.substr(0, ready);
+              std::string remainder = all.substr(ready);
+              if (!remainder.empty()) {
+                tts_segment_->Append(remainder);
+              }
+              if (!tts_text.empty() && emit_frame_) {
+                io::DataFrame frame;
+                frame.type = "text/tts";
+                frame.payload = std::vector<uint8_t>(
+                    tts_text.begin(), tts_text.end());
+                frame.metadata["tts_ready"] = "1";
+                frame.timestamp = std::chrono::steady_clock::now();
+                emit_frame_("text_out", std::move(frame));
+              }
+            }
+          }
         });
+        // Streaming complete — flush any remaining TTS buffer.
+        if (tts_segment_) {
+          std::string remaining = tts_segment_->Flush();
+          if (!remaining.empty() && emit_frame_) {
+            io::DataFrame frame;
+            frame.type = "text/tts";
+            frame.payload = std::vector<uint8_t>(
+                remaining.begin(), remaining.end());
+            frame.metadata["tts_ready"] = "1";
+            frame.metadata["tts_final"] = "1";
+            frame.timestamp = std::chrono::steady_clock::now();
+            emit_frame_("text_out", std::move(frame));
+          }
+        }
       } else {
         result = llm_->Submit(window);
       }
@@ -424,6 +483,16 @@ void Controller::HandleActingResult(const Observation& obs) {
 
 // Deliver response, check stop conditions.
 void Controller::HandleResponding(ActionCandidate ac) {
+  // Strategy: filter/transform the response text before output.
+  ac.response_text = response_filter_->Filter(ac.response_text);
+
+  // If the filter suppressed the response entirely, skip output.
+  if (ac.response_text.empty()) {
+    LOG_INFO("[{}] Response suppressed by filter", MODULE_NAME);
+    TryTransition(Event::kResponseDelivered);
+    return;
+  }
+
   LOG_INFO("[{}] Responding: \"{}\"", MODULE_NAME, ac.response_text);
 
   // Notify response callbacks before final state transition.
@@ -486,6 +555,11 @@ void Controller::HandleInterrupt() {
   LOG_WARN("[{}] Interrupt received in state {}", MODULE_NAME, StateName(state_.load()));
   llm_->Cancel();
   if (cancel_) cancel_();
+
+  // Reset TTS segmentation buffer on interrupt.
+  if (tts_segment_) {
+    tts_segment_->Reset();
+  }
 
   // Record partial results as MemoryEntry.
   MemoryEntry interrupt_entry;
