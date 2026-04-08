@@ -145,6 +145,8 @@ void BaiduAsrDevice::Transcribe(std::vector<uint8_t> audio) {
   const std::string transcript = client_->Transcribe(audio_str, "audio/pcm");
   if (transcript.empty()) { return; }
 
+  LOG_INFO("BaiduAsrDevice: ASR result: \"{}\"", transcript);
+
   DataFrame frame;
   frame.type          = "text/plain";
   frame.payload.assign(transcript.begin(), transcript.end());

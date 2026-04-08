@@ -163,6 +163,11 @@ class PaPlayer : public AudioPlayer {
     // Record the first moment the callback actually consumes real audio data.
     if (read > 0 && !self->first_callback_time_.has_value()) {
       self->first_callback_time_ = Clock::now();
+      auto latency = self->PlayoutLatency();
+      if (latency.has_value()) {
+        LOG_INFO("PaPlayer: first audio playout, buffer latency={}ms",
+                 latency->count());
+      }
     }
 
     if (read < frame_count) {

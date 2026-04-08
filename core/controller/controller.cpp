@@ -216,7 +216,12 @@ void Controller::RunLoop() {
     if (current == State::kListening &&
         obs.type == ObservationType::kUserMessage) {
       // Strategy: check if this observation should be processed.
-      if (!observation_filter_->ShouldProcess(obs)) {
+      auto filter_start = std::chrono::steady_clock::now();
+      bool accepted = observation_filter_->ShouldProcess(obs);
+      auto filter_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - filter_start).count();
+      LOG_INFO("[{}] ObservationFilter took {}ms", MODULE_NAME, filter_ms);
+      if (!accepted) {
         LOG_INFO("[{}] Observation filtered out: \"{}\"",
                  MODULE_NAME, obs.content);
         continue;  // Stay in kListening.
@@ -263,6 +268,7 @@ void Controller::HandleThinking(const Observation& obs) {
 
   // Build context window.
   auto window = context_.BuildContext(session_id_, obs);
+  first_token_logged_ = false;  // Reset for this turn's latency measurement.
   LOG_DEBUG("[{}] Context built: {} messages, ~{} tokens",
             MODULE_NAME, window.messages.size(), window.estimated_tokens);
 
@@ -273,11 +279,17 @@ void Controller::HandleThinking(const Observation& obs) {
     try {
       LOG_DEBUG("[{}] LLM submit (attempt {}/{})",
                 MODULE_NAME, attempt + 1, config_.max_retries + 1);
+      LOG_INFO("[{}] LLM submit started", MODULE_NAME);
       if (config_.use_streaming) {
         // Streaming path: fire token callbacks as chunks arrive.
         // If a TTS segment strategy is configured, also buffer tokens
         // and emit TTS-ready frames when the strategy signals readiness.
         result = llm_->SubmitStreaming(window, [this](const std::string& token) {
+          // Log the first streaming token for latency measurement.
+          if (!first_token_logged_) {
+            LOG_INFO("[{}] LLM first token received", MODULE_NAME);
+            first_token_logged_ = true;
+          }
           // Always fire raw token callbacks (for display / UI).
           for (const auto& cb : stream_token_callbacks_) {
             cb(token);
@@ -298,6 +310,8 @@ void Controller::HandleThinking(const Observation& obs) {
                 tts_segment_->Append(remainder);
               }
               if (!tts_text.empty() && emit_frame_) {
+                LOG_INFO("[{}] TTS segment ready: \"{}\" (len={})",
+                         MODULE_NAME, tts_text, tts_text.size());
                 io::DataFrame frame;
                 frame.type = "text/plain";
                 frame.payload = std::vector<uint8_t>(
@@ -313,6 +327,8 @@ void Controller::HandleThinking(const Observation& obs) {
         if (tts_segment_) {
           std::string remaining = tts_segment_->Flush();
           if (!remaining.empty() && emit_frame_) {
+            LOG_INFO("[{}] TTS segment final flush: \"{}\" (len={})",
+                     MODULE_NAME, remaining, remaining.size());
             io::DataFrame frame;
             frame.type = "text/plain";
             frame.payload = std::vector<uint8_t>(

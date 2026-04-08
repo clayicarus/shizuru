@@ -144,6 +144,7 @@ class Controller {
   int total_prompt_tokens_ = 0;
   int total_completion_tokens_ = 0;
   int action_count_ = 0;
+  bool first_token_logged_ = false;
   std::chrono::steady_clock::time_point session_start_;
 
   // Loop thread

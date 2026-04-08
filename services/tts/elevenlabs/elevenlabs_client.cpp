@@ -82,11 +82,17 @@ void ElevenLabsClient::Synthesize(const TtsRequest& request,
   req.set_header("Content-Type", "application/json");
 
   size_t total_bytes = 0;
+  bool first_chunk_logged = false;
   req.content_receiver =
       [&](const char* data, size_t len,
           uint64_t /*offset*/, uint64_t /*total_length*/) -> bool {
         if (cancel_requested_.load()) { return false; }
         if (len > 0 && on_audio) {
+          if (!first_chunk_logged) {
+            LOG_INFO("[{}] TTS first audio chunk: {} bytes (voice={})",
+                     MODULE_NAME, len, voice_id);
+            first_chunk_logged = true;
+          }
           on_audio(data, len);
           total_bytes += len;
         }
