@@ -287,7 +287,7 @@ TEST(TtsSegmentIntegrationTest, StreamingTokensEmitTtsFrames) {
   Controller::EmitFrameCallback emit = [&](const std::string& port,
                                            io::DataFrame frame) {
     std::lock_guard<std::mutex> lock(mu);
-    if (frame.type == "text/tts") {
+    if (frame.metadata.count("tts_ready")) {
       tts_frames.push_back(std::move(frame));
     }
   };
