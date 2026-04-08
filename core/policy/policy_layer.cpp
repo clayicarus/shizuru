@@ -78,8 +78,10 @@ PolicyResult PolicyLayer::EvaluateRules(const std::string& session_id,
             });
 
   for (const auto& rule : rules) {
-    // Match action_pattern against action.action_name (exact match).
-    if (rule.action_pattern != action.action_name) {
+    // Match action_pattern against action.action_name.
+    // "*" matches any action; otherwise exact match.
+    if (rule.action_pattern != "*" &&
+        rule.action_pattern != action.action_name) {
       continue;
     }
 

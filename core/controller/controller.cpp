@@ -383,23 +383,52 @@ void Controller::HandleThinking(const Observation& obs) {
 void Controller::HandleRouting(ActionCandidate ac) {
   switch (ac.type) {
     case ActionType::kToolCall: {
-      // Check policy permission.
-      LOG_INFO("[{}] Routing: tool_call=\"{}\" args={}",
-               MODULE_NAME, ac.action_name, ac.arguments);
-      auto permission = policy_.CheckPermission(session_id_, ac);
-      if (permission.outcome == PolicyOutcome::kAllow) {
-        LOG_DEBUG("[{}] Policy: ALLOW tool=\"{}\"", MODULE_NAME, ac.action_name);
+      // Legacy compatibility: if tool_calls is empty but action_name is set,
+      // create a single ToolCall entry from the legacy fields.
+      if (ac.tool_calls.empty() && !ac.action_name.empty()) {
+        ToolCall tc;
+        tc.id = ac.response_text.empty() ? ac.action_name : ac.response_text;
+        tc.name = ac.action_name;
+        tc.arguments = ac.arguments;
+        tc.required_capability = ac.required_capability;
+        ac.tool_calls.push_back(std::move(tc));
+      }
+
+      // Check policy permission for each tool call.
+      LOG_INFO("[{}] Routing: {} tool call(s)",
+               MODULE_NAME, ac.tool_calls.size());
+
+      bool all_allowed = true;
+      std::string denied_reason;
+      for (const auto& tc : ac.tool_calls) {
+        // Build a temporary ActionCandidate for policy check.
+        ActionCandidate single;
+        single.type = ActionType::kToolCall;
+        single.action_name = tc.name;
+        single.arguments = tc.arguments;
+        single.required_capability = tc.required_capability;
+
+        auto permission = policy_.CheckPermission(session_id_, single);
+        if (permission.outcome != PolicyOutcome::kAllow) {
+          LOG_WARN("[{}] Policy: DENY tool=\"{}\" reason=\"{}\"",
+                   MODULE_NAME, tc.name, permission.reason);
+          all_allowed = false;
+          denied_reason = permission.reason;
+          break;
+        }
+        LOG_DEBUG("[{}] Policy: ALLOW tool=\"{}\"", MODULE_NAME, tc.name);
+      }
+
+      if (all_allowed) {
         TryTransition(Event::kRouteToAction);
         HandleActing(std::move(ac));
       } else {
-        LOG_WARN("[{}] Policy: DENY tool=\"{}\" reason=\"{}\"",
-                 MODULE_NAME, ac.action_name, permission.reason);
         // Denied — record denial as observation and re-enter thinking.
         MemoryEntry denial_entry;
         denial_entry.type = MemoryEntryType::kToolResult;
         denial_entry.role = "system";
         denial_entry.content =
-            "Action denied: " + permission.reason;
+            "Action denied: " + denied_reason;
         denial_entry.timestamp = std::chrono::steady_clock::now();
         context_.RecordTurn(session_id_, denial_entry);
 
@@ -408,7 +437,7 @@ void Controller::HandleRouting(ActionCandidate ac) {
         // Create observation from denial and re-enter thinking.
         Observation denial_obs;
         denial_obs.type = ObservationType::kSystemEvent;
-        denial_obs.content = "Action denied: " + permission.reason;
+        denial_obs.content = "Action denied: " + denied_reason;
         denial_obs.source = "policy";
         denial_obs.timestamp = std::chrono::steady_clock::now();
         HandleThinking(denial_obs);
@@ -429,66 +458,120 @@ void Controller::HandleRouting(ActionCandidate ac) {
   }
 }
 
-// Emit action/tool_call frame non-blocking; store pending state for HandleActingResult.
+// Emit action/tool_call frames non-blocking; store pending state for HandleActingResult.
+// Supports parallel tool calls: emits one frame per tool call, waits for all results.
 void Controller::HandleActing(ActionCandidate ac) {
-  action_count_++;
-  LOG_INFO("[{}] Acting: tool=\"{}\" args={}",
-           MODULE_NAME, ac.action_name, ac.arguments);
+  pending_action_ = ac;
+  pending_tool_calls_ = ac.tool_calls;
+  pending_results_.clear();
 
-  // Record the assistant's tool call decision in memory.
-  const std::string& tc_id =
-      ac.response_text.empty() ? ac.action_name : ac.response_text;
-  std::string tc_json =
-      "[{\"id\":\"" + tc_id + "\",\"type\":\"function\","
-      "\"function\":{\"name\":\"" + ac.action_name + "\","
-      "\"arguments\":" + ac.arguments + "}}]";
+  // Build the tool_calls JSON array for memory recording.
+  std::string tc_json = "[";
+  for (size_t i = 0; i < ac.tool_calls.size(); ++i) {
+    const auto& tc = ac.tool_calls[i];
+    if (i > 0) tc_json += ",";
+    tc_json += R"({"id":")" + tc.id + R"(","type":"function",)";
+    tc_json += R"("function":{"name":")" + tc.name + R"(",)";
+    tc_json += R"("arguments":)" + tc.arguments + R"(}})";
+  }
+  tc_json += "]";
 
+  // Record the assistant's tool call decision in memory (single entry for all calls).
   MemoryEntry call_entry;
   call_entry.type = MemoryEntryType::kToolCall;
   call_entry.role = "assistant";
   call_entry.content = "";
-  call_entry.tool_call_id = tc_id;
+  call_entry.tool_call_id = ac.tool_calls.empty() ? ac.action_name : ac.tool_calls[0].id;
   call_entry.tool_calls_json = tc_json;
   call_entry.timestamp = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, call_entry);
 
-  // Store pending state so HandleActingResult can reference it.
-  pending_tool_call_id_ = tc_id;
-  pending_action_ = ac;
+  // Emit one action frame per tool call.
+  for (const auto& tc : ac.tool_calls) {
+    action_count_++;
+    LOG_INFO("[{}] Acting: tool=\"{}\" id=\"{}\" args={}",
+             MODULE_NAME, tc.name, tc.id, tc.arguments);
 
-  // Serialize ActionCandidate to "<name>:<args>" payload and emit non-blocking.
-  const std::string payload_str = ac.action_name + ":" + ac.arguments;
-  io::DataFrame frame;
-  frame.type = "action/tool_call";
-  frame.payload = std::vector<uint8_t>(payload_str.begin(), payload_str.end());
-  frame.timestamp = std::chrono::steady_clock::now();
+    const std::string payload_str = tc.name + ":" + tc.arguments;
+    io::DataFrame frame;
+    frame.type = "action/tool_call";
+    frame.payload = std::vector<uint8_t>(payload_str.begin(), payload_str.end());
+    frame.metadata["tool_call_id"] = tc.id;
+    frame.timestamp = std::chrono::steady_clock::now();
 
-  if (emit_frame_) {
-    emit_frame_("action_out", std::move(frame));
+    if (emit_frame_) {
+      emit_frame_("action_out", std::move(frame));
+    }
   }
 
   // Return immediately — RunLoop re-enters queue_cv_.wait loop.
-  // HandleActingResult will be called when kToolResult observation arrives.
+  // HandleActingResult will be called for each kToolResult observation.
 }
 
 // Process tool result received while in kActing state.
+// Collects results for parallel tool calls; re-enters thinking only when all are in.
 void Controller::HandleActingResult(const Observation& obs) {
+  // Try to extract tool_call_id from the result JSON.
+  std::string tool_call_id;
+  auto id_pos = obs.content.find(R"("tool_call_id":")");
+  if (id_pos != std::string::npos) {
+    auto val_start = id_pos + 16;
+    auto val_end = obs.content.find('"', val_start);
+    if (val_end != std::string::npos) {
+      tool_call_id = obs.content.substr(val_start, val_end - val_start);
+    }
+  }
+
+  // If no tool_call_id in result, match by order (fallback for simple dispatchers).
+  if (tool_call_id.empty()) {
+    for (const auto& tc : pending_tool_calls_) {
+      if (pending_results_.find(tc.id) == pending_results_.end()) {
+        tool_call_id = tc.id;
+        break;
+      }
+    }
+  }
+
+  pending_results_[tool_call_id] = obs.content;
+
   const bool success = obs.content.find(R"("success":true)") != std::string::npos;
 
+  // Record this tool result in memory.
   MemoryEntry result_entry;
   result_entry.type        = MemoryEntryType::kToolResult;
   result_entry.role        = "tool";
   result_entry.content     = obs.content;
-  result_entry.tool_call_id = pending_tool_call_id_;
+  result_entry.tool_call_id = tool_call_id;
   result_entry.timestamp   = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, result_entry);
 
+  LOG_INFO("[{}] Tool result received: id=\"{}\" success={} ({}/{})",
+           MODULE_NAME, tool_call_id, success,
+           pending_results_.size(), pending_tool_calls_.size());
+
+  // Check if all results are in.
+  if (pending_results_.size() < pending_tool_calls_.size()) {
+    return;  // Still waiting for more results.
+  }
+
+  // All results collected — audit and transition.
+  bool all_success = true;
+  for (const auto& [id, result_json] : pending_results_) {
+    if (result_json.find(R"("success":true)") == std::string::npos) {
+      all_success = false;
+    }
+  }
+
   PolicyResult audit_result;
-  audit_result.outcome = success ? PolicyOutcome::kAllow : PolicyOutcome::kDeny;
-  audit_result.reason  = success ? "tool succeeded" : "tool failed";
+  audit_result.outcome = all_success ? PolicyOutcome::kAllow : PolicyOutcome::kDeny;
+  audit_result.reason  = all_success ? "all tools succeeded" : "one or more tools failed";
   policy_.AuditAction(session_id_, pending_action_, audit_result);
 
-  TryTransition(success ? Event::kActionComplete : Event::kActionFailed);
+  TryTransition(all_success ? Event::kActionComplete : Event::kActionFailed);
+
+  // Clear pending state.
+  pending_tool_calls_.clear();
+  pending_results_.clear();
 
   Observation continuation;
   continuation.type      = ObservationType::kContinuation;

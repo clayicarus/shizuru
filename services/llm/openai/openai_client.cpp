@@ -165,20 +165,29 @@ core::LlmResult OpenAiClient::SubmitStreaming(
   if (!stream_done) {
     if (!accumulated_tool_calls.empty() && accumulated_tool_calls.is_array() &&
         !accumulated_tool_calls[0].empty()) {
-      auto& tc = accumulated_tool_calls[0];
       result.candidate.type = core::ActionType::kToolCall;
-      if (tc.contains("id")) {
-        result.candidate.response_text = tc["id"].get<std::string>();
+
+      for (const auto& tc : accumulated_tool_calls) {
+        if (tc.empty()) continue;
+        core::ToolCall call;
+        if (tc.contains("id")) {
+          call.id = tc["id"].get<std::string>();
+        }
+        if (tc.contains("function")) {
+          if (tc["function"].contains("name")) {
+            call.name = tc["function"]["name"].get<std::string>();
+          }
+          if (tc["function"].contains("arguments")) {
+            call.arguments = tc["function"]["arguments"].get<std::string>();
+          }
+        }
+        result.candidate.tool_calls.push_back(std::move(call));
       }
-      if (tc.contains("function")) {
-        if (tc["function"].contains("name")) {
-          result.candidate.action_name =
-              tc["function"]["name"].get<std::string>();
-        }
-        if (tc["function"].contains("arguments")) {
-          result.candidate.arguments =
-              tc["function"]["arguments"].get<std::string>();
-        }
+
+      if (!result.candidate.tool_calls.empty()) {
+        result.candidate.action_name = result.candidate.tool_calls[0].name;
+        result.candidate.arguments = result.candidate.tool_calls[0].arguments;
+        result.candidate.response_text = result.candidate.tool_calls[0].id;
       }
     } else if (!accumulated_content.empty()) {
       result.candidate.type = core::ActionType::kResponse;

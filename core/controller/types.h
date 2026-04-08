@@ -56,13 +56,25 @@ struct Observation {
   std::chrono::steady_clock::time_point timestamp;
 };
 
+// A single tool call proposed by the LLM.
+struct ToolCall {
+  std::string id;                   // Tool call ID for pairing with results
+  std::string name;                 // Tool name
+  std::string arguments;            // Serialized arguments (JSON string)
+  std::string required_capability;  // Capability needed to execute
+};
+
 // An action proposed by the LLM.
 struct ActionCandidate {
   ActionType type;
-  std::string action_name;          // Tool name (for kToolCall)
-  std::string arguments;            // Serialized arguments (JSON string)
+  std::string action_name;          // Tool name (for single kToolCall, legacy)
+  std::string arguments;            // Serialized arguments (for single kToolCall, legacy)
   std::string response_text;        // Response content (for kResponse)
   std::string required_capability;  // Capability needed to execute
+
+  // Parallel tool calls — populated when LLM returns multiple tool_calls.
+  // For single tool call, this has one entry and action_name/arguments mirror it.
+  std::vector<ToolCall> tool_calls;
 };
 
 // Human-readable name helpers — used by logging and audit formatting.

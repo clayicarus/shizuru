@@ -50,14 +50,22 @@ core::ActionCandidate ParseCandidate(const nlohmann::json& choice) {
 
   // Check for tool_calls first (function calling).
   if (message.contains("tool_calls") && !message["tool_calls"].empty()) {
-    auto& tc = message["tool_calls"][0];
     ac.type = core::ActionType::kToolCall;
-    ac.action_name = tc.at("function").at("name").get<std::string>();
-    ac.arguments = tc.at("function").at("arguments").get<std::string>();
-    if (tc.contains("id")) {
-      // Store tool_call id in response_text for pairing with tool results.
-      ac.response_text = tc["id"].get<std::string>();
+
+    for (const auto& tc : message["tool_calls"]) {
+      core::ToolCall call;
+      if (tc.contains("id")) {
+        call.id = tc["id"].get<std::string>();
+      }
+      call.name = tc.at("function").at("name").get<std::string>();
+      call.arguments = tc.at("function").at("arguments").get<std::string>();
+      ac.tool_calls.push_back(std::move(call));
     }
+
+    // Legacy fields mirror the first tool call.
+    ac.action_name = ac.tool_calls[0].name;
+    ac.arguments = ac.tool_calls[0].arguments;
+    ac.response_text = ac.tool_calls[0].id;
     return ac;
   }
 
@@ -205,20 +213,30 @@ bool ParseStreamChunk(const std::string& data_line,
     if (!accumulated_tool_calls.empty() &&
         accumulated_tool_calls.is_array() &&
         !accumulated_tool_calls[0].empty()) {
-      auto& tc = accumulated_tool_calls[0];
       result.candidate.type = core::ActionType::kToolCall;
-      if (tc.contains("function")) {
-        if (tc["function"].contains("name")) {
-          result.candidate.action_name =
-              tc["function"]["name"].get<std::string>();
+
+      for (const auto& tc : accumulated_tool_calls) {
+        if (tc.empty()) continue;
+        core::ToolCall call;
+        if (tc.contains("id")) {
+          call.id = tc["id"].get<std::string>();
         }
-        if (tc["function"].contains("arguments")) {
-          result.candidate.arguments =
-              tc["function"]["arguments"].get<std::string>();
+        if (tc.contains("function")) {
+          if (tc["function"].contains("name")) {
+            call.name = tc["function"]["name"].get<std::string>();
+          }
+          if (tc["function"].contains("arguments")) {
+            call.arguments = tc["function"]["arguments"].get<std::string>();
+          }
         }
+        result.candidate.tool_calls.push_back(std::move(call));
       }
-      if (tc.contains("id")) {
-        result.candidate.response_text = tc["id"].get<std::string>();
+
+      // Legacy fields mirror the first tool call.
+      if (!result.candidate.tool_calls.empty()) {
+        result.candidate.action_name = result.candidate.tool_calls[0].name;
+        result.candidate.arguments = result.candidate.tool_calls[0].arguments;
+        result.candidate.response_text = result.candidate.tool_calls[0].id;
       }
     } else if (!accumulated_content.empty()) {
       result.candidate.type = core::ActionType::kResponse;

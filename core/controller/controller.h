@@ -127,9 +127,12 @@ class Controller {
   std::unique_ptr<TtsSegmentStrategy> tts_segment_;
   std::unique_ptr<ResponseFilter> response_filter_;
 
-  // Pending tool call state (set in HandleActing, read in HandleActingResult)
-  std::string pending_tool_call_id_;
+  // Pending tool call state (set in HandleActing, read in HandleActingResult).
+  // Supports parallel tool calls: pending_tool_calls_ tracks all outstanding
+  // calls, pending_results_ collects results as they arrive.
   ActionCandidate pending_action_;
+  std::vector<ToolCall> pending_tool_calls_;
+  std::unordered_map<std::string, std::string> pending_results_;  // id → result JSON
 
   // State (accessed from loop thread; read via atomic for external queries)
   std::atomic<State> state_{State::kIdle};

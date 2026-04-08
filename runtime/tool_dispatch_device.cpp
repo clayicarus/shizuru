@@ -89,6 +89,13 @@ void ToolDispatchDevice::Dispatch(io::DataFrame frame) {
   const std::string arguments =
       (colon_pos == std::string::npos) ? "" : payload.substr(colon_pos + 1);
 
+  // Extract tool_call_id from frame metadata (set by Controller for parallel calls).
+  std::string tool_call_id;
+  auto it = frame.metadata.find("tool_call_id");
+  if (it != frame.metadata.end()) {
+    tool_call_id = it->second;
+  }
+
   std::string result_json;
 
   try {
@@ -98,7 +105,6 @@ void ToolDispatchDevice::Dispatch(io::DataFrame frame) {
     } else {
       const services::ToolResult result = (*fn)(arguments);
       if (result.success) {
-        // Escape output minimally — replace " with \" for embedding in JSON.
         std::string escaped;
         escaped.reserve(result.output.size());
         for (char c : result.output) {
@@ -129,6 +135,13 @@ void ToolDispatchDevice::Dispatch(io::DataFrame frame) {
     result_json = R"({"success":false,"error":")" + escaped + R"("})";
   } catch (...) {
     result_json = R"({"success":false,"error":"unknown exception"})";
+  }
+
+  // Inject tool_call_id into the result JSON for pairing in Controller.
+  if (!tool_call_id.empty()) {
+    // Insert before the closing brace.
+    result_json.pop_back();  // remove '}'
+    result_json += R"(,"tool_call_id":")" + tool_call_id + R"("})";
   }
 
   io::DataFrame result_frame;

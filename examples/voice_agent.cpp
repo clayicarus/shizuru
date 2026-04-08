@@ -42,6 +42,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unistd.h>
 
 #include <spdlog/spdlog.h>
 #include "async_logger.h"
@@ -217,7 +218,138 @@ int main(int argc, char* argv[]) {
     return std::make_unique<core::StripThinkingFilter>();
   };
 
-  services::ToolRegistry tools;  // no tools for this example
+  services::ToolRegistry tools;
+
+  // ── Builtin tools ─────────────────────────────────────────────────────────
+  tools.Register("get_current_time",
+                 [](const std::string& /*args*/) -> services::ToolResult {
+                   auto now = std::chrono::system_clock::now();
+                   auto t = std::chrono::system_clock::to_time_t(now);
+                   char buf[64];
+                   std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S",
+                                 std::localtime(&t));
+                   return {true, buf, ""};
+                 });
+
+  tools.Register("get_system_info",
+                 [](const std::string& /*args*/) -> services::ToolResult {
+                   char hostname[256] = {};
+                   gethostname(hostname, sizeof(hostname));
+#if defined(__APPLE__)
+                   const char* os = "macOS";
+#elif defined(__linux__)
+                   const char* os = "Linux";
+#elif defined(_WIN32)
+                   const char* os = "Windows";
+#else
+                   const char* os = "Unknown";
+#endif
+                   std::string info = std::string(R"({"os":")") + os +
+                                      R"(","hostname":")" + hostname + R"("})";
+                   return {true, info, ""};
+                 });
+
+  tools.Register("calculate",
+                 [](const std::string& args) -> services::ToolResult {
+                   // Simple eval: parse "expression" field, support +,-,*,/
+                   // For safety, only handle a op b format.
+                   auto expr_pos = args.find(R"("expression":")");
+                   if (expr_pos == std::string::npos) {
+                     return {false, "", "Missing 'expression' parameter"};
+                   }
+                   auto val_start = expr_pos + 15;
+                   auto val_end = args.find('"', val_start);
+                   if (val_end == std::string::npos) {
+                     return {false, "", "Malformed expression"};
+                   }
+                   std::string expr = args.substr(val_start, val_end - val_start);
+
+                   // Parse: number op number
+                   double a = 0, b = 0;
+                   char op = 0;
+                   if (std::sscanf(expr.c_str(), "%lf %c %lf", &a, &op, &b) != 3) {
+                     return {false, "", "Cannot parse expression: " + expr};
+                   }
+                   double result = 0;
+                   switch (op) {
+                     case '+': result = a + b; break;
+                     case '-': result = a - b; break;
+                     case '*': result = a * b; break;
+                     case '/':
+                       if (b == 0) return {false, "", "Division by zero"};
+                       result = a / b;
+                       break;
+                     default:
+                       return {false, "", std::string("Unknown operator: ") + op};
+                   }
+                   char buf[64];
+                   std::snprintf(buf, sizeof(buf), "%.6g", result);
+                   return {true, buf, ""};
+                 });
+
+  tools.Register("set_reminder",
+                 [](const std::string& args) -> services::ToolResult {
+                   // Parse message and minutes fields.
+                   auto msg_pos = args.find(R"("message":")");
+                   auto min_pos = args.find(R"("minutes":)");
+                   std::string message = "reminder";
+                   int minutes = 0;
+                   if (msg_pos != std::string::npos) {
+                     auto s = msg_pos + 11;
+                     auto e = args.find('"', s);
+                     if (e != std::string::npos) message = args.substr(s, e - s);
+                   }
+                   if (min_pos != std::string::npos) {
+                     std::sscanf(args.c_str() + min_pos + 10, "%d", &minutes);
+                   }
+                   std::string result = R"({"status":"set","message":")" +
+                                        message + R"(","minutes":)" +
+                                        std::to_string(minutes) + "}";
+                   return {true, result, ""};
+                 });
+
+  // ── Tool definitions for LLM (function calling schema) ────────────────────
+  {
+    services::ToolDefinition time_tool;
+    time_tool.name = "get_current_time";
+    time_tool.description = "Get the current date and time";
+    time_tool.required_capability = "builtin";
+    rt_cfg.llm.tools.push_back(std::move(time_tool));
+
+    services::ToolDefinition sys_tool;
+    sys_tool.name = "get_system_info";
+    sys_tool.description = "Get system information (OS, hostname)";
+    sys_tool.required_capability = "builtin";
+    rt_cfg.llm.tools.push_back(std::move(sys_tool));
+
+    services::ToolDefinition calc_tool;
+    calc_tool.name = "calculate";
+    calc_tool.description = "Evaluate a simple math expression (a op b)";
+    calc_tool.parameters = {
+        {"expression", "string", "Math expression like '2 + 3' or '10 / 4'", true}};
+    calc_tool.required_capability = "builtin";
+    rt_cfg.llm.tools.push_back(std::move(calc_tool));
+
+    services::ToolDefinition reminder_tool;
+    reminder_tool.name = "set_reminder";
+    reminder_tool.description = "Set a reminder with a message and delay in minutes";
+    reminder_tool.parameters = {
+        {"message", "string", "Reminder message", true},
+        {"minutes", "integer", "Minutes from now", true}};
+    reminder_tool.required_capability = "builtin";
+    rt_cfg.llm.tools.push_back(std::move(reminder_tool));
+  }
+
+  // ── Policy: allow all builtin tools ───────────────────────────────────────
+  rt_cfg.policy.default_capabilities = {"builtin"};
+  {
+    core::PolicyRule allow_builtin;
+    allow_builtin.priority = 0;
+    allow_builtin.action_pattern = "*";
+    allow_builtin.required_capability = "builtin";
+    allow_builtin.outcome = core::PolicyOutcome::kAllow;
+    rt_cfg.policy.initial_rules = {allow_builtin};
+  }
 
   runtime::AgentRuntime runtime(rt_cfg, tools);
 
