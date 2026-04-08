@@ -150,6 +150,13 @@ std::string AgentRuntime::StartSession() {
                           PortAddress{"app_output", "text_in"},
                           RouteOptions{.requires_control_plane = false});
 
+    // TTS segment route: core emits text/tts frames on tts_out when
+    // TtsSegmentStrategy flushes a sentence-sized chunk during streaming.
+    // Routed directly to the TTS device's text_in port (DMA path).
+    route_table_.AddRoute(PortAddress{"core", "tts_out"},
+                          PortAddress{"elevenlabs_tts", "text_in"},
+                          RouteOptions{.requires_control_plane = false});
+
     // Tool call async round-trip routes (Requirements 4.2, 4.3).
     route_table_.AddRoute(PortAddress{"core", "action_out"},
                           PortAddress{"tool_dispatch", "action_in"},

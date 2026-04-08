@@ -168,7 +168,6 @@ int main(int argc, char* argv[]) {
   auto tts = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
 
   // Keep raw pointers before moving ownership into the runtime.
-  io::ElevenLabsTtsDevice*  tts_ptr = tts.get();
 
   // VadEventDevice: emits vad/event frames on vad_out (routed to core:vad_in).
   auto asr_flush = std::make_unique<io::VadEventDevice>();
@@ -262,28 +261,17 @@ int main(int argc, char* argv[]) {
   runtime.AddRoute({"playout_dump",   io::PcmDumpDevice::kPassOut},
                    {"audio_playout",  "audio_in"}, kDma);
 
-  // ── Output callback: LLM response → TTS ──────────────────────────────────
-  // Streaming tokens are printed in real-time; only the final complete response
-  // is fed into TTS to avoid fragmented audio synthesis.
-  runtime.OnOutput([tts_ptr](const runtime::RuntimeOutput& output) {
+  // ── Output callback: display only ──────────────────────────────────────────
+  // TTS is now driven by the route core:tts_out → elevenlabs_tts:text_in.
+  // This callback only handles console display of streaming tokens and final text.
+  runtime.OnOutput([](const runtime::RuntimeOutput& output) {
     if (output.is_partial) {
-      // Print streaming token without newline for real-time display.
       std::printf("%s", output.text.c_str());
       std::fflush(stdout);
       return;
     }
-
-    // Final response: newline + feed into TTS.
     std::printf("\n[agent] %s\n", output.text.c_str());
     std::fflush(stdout);
-
-    io::DataFrame frame;
-    frame.type    = "text/plain";
-    frame.payload = std::vector<uint8_t>(output.text.begin(), output.text.end());
-    frame.source_device = "app_output";
-    frame.source_port   = "text_out";
-    frame.timestamp     = std::chrono::steady_clock::now();
-    tts_ptr->OnInput("text_in", std::move(frame));
   });
 
   // ── Start ─────────────────────────────────────────────────────────────────

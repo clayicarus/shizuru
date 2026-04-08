@@ -299,12 +299,12 @@ void Controller::HandleThinking(const Observation& obs) {
               }
               if (!tts_text.empty() && emit_frame_) {
                 io::DataFrame frame;
-                frame.type = "text/tts";
+                frame.type = "text/plain";
                 frame.payload = std::vector<uint8_t>(
                     tts_text.begin(), tts_text.end());
                 frame.metadata["tts_ready"] = "1";
                 frame.timestamp = std::chrono::steady_clock::now();
-                emit_frame_("text_out", std::move(frame));
+                emit_frame_("tts_out", std::move(frame));
               }
             }
           }
@@ -314,13 +314,13 @@ void Controller::HandleThinking(const Observation& obs) {
           std::string remaining = tts_segment_->Flush();
           if (!remaining.empty() && emit_frame_) {
             io::DataFrame frame;
-            frame.type = "text/tts";
+            frame.type = "text/plain";
             frame.payload = std::vector<uint8_t>(
                 remaining.begin(), remaining.end());
             frame.metadata["tts_ready"] = "1";
             frame.metadata["tts_final"] = "1";
             frame.timestamp = std::chrono::steady_clock::now();
-            emit_frame_("text_out", std::move(frame));
+            emit_frame_("tts_out", std::move(frame));
           }
         }
       } else {

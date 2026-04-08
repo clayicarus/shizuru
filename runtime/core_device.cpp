@@ -96,6 +96,7 @@ std::vector<io::PortDescriptor> CoreDevice::GetPortDescriptors() const {
       {kToolResultIn, io::PortDirection::kInput,  "action/tool_result"},
       {kVadIn,        io::PortDirection::kInput,  "vad/event"},
       {kTextOut,      io::PortDirection::kOutput, "text/plain"},
+      {kTtsOut,       io::PortDirection::kOutput, "text/plain"},
       {kActionOut,    io::PortDirection::kOutput, "action/tool_call"},
       {kControlOut,   io::PortDirection::kOutput, "control/command"},
   };

@@ -79,6 +79,7 @@
 ### TODO (deferred)
 
 - [ ] **Observation aggregation**: `ObservationFilter` interface currently returns `bool` (pass/reject). To support buffering partial ASR transcripts until the user finishes speaking, the interface needs to change to `std::optional<Observation> Filter(const Observation&)` — allowing the filter to accumulate and merge multiple observations before forwarding a single complete one to the Controller.
+- [ ] **Observation filter as independent session**: Consider promoting `ObservationFilter` from a synchronous in-Controller hook to an independent agent session with its own Controller, context, and LLM. This would allow context-aware filtering (e.g., "嗯" after a question is meaningful, "嗯" in silence is noise), avoid blocking the main Controller loop, and support stateful observation aggregation. The two sessions would need a coordination protocol for observation handoff and lifecycle management.
 - [ ] **Logger separation**: examples currently share the global `shizuru` logger with core/runtime/io. When extracting the agent SDK, the library should use its own internal logger; applications should configure their own logger independently.
 - [ ] **TTS streaming think-tag filtering**: `TtsSegmentStrategy` currently accumulates raw streaming tokens. If the LLM produces `<think>` blocks during streaming, they will be buffered and potentially sent to TTS. The strategy should strip thinking tags from the token stream before accumulation.
 

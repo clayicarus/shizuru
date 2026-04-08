@@ -55,6 +55,7 @@ class CoreDevice : public io::IoDevice {
   static constexpr char kToolResultIn[] = "tool_result_in";
   static constexpr char kVadIn[] = "vad_in";
   static constexpr char kTextOut[] = "text_out";
+  static constexpr char kTtsOut[] = "tts_out";
   static constexpr char kActionOut[] = "action_out";
   static constexpr char kControlOut[] = "control_out";
 
