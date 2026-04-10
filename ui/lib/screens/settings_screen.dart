@@ -100,6 +100,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         conv.onOutputChunk(text, isPartial);
       });
 
+      // Register transcript callback so voice input appears in chat.
+      agent.setTranscriptCallback((text) {
+        conv.addUserMessage(text);
+      });
+
       await agent.initialize(config);
       setState(() => _saving = false);
       if (mounted) Navigator.of(context).pop();

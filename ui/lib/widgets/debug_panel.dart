@@ -3,33 +3,8 @@ import 'package:provider/provider.dart';
 import '../bridge/agent_state.dart';
 import '../providers/agent_provider.dart';
 
-class _TransitionEntry {
-  final DateTime time;
-  final AgentState from;
-  final AgentState to;
-  _TransitionEntry(this.time, this.from, this.to);
-}
-
-class DebugPanel extends StatefulWidget {
+class DebugPanel extends StatelessWidget {
   const DebugPanel({super.key});
-
-  @override
-  State<DebugPanel> createState() => _DebugPanelState();
-}
-
-class _DebugPanelState extends State<DebugPanel> {
-  final List<_TransitionEntry> _transitions = [];
-  AgentState? _lastState;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final current = context.watch<AgentProvider>().state;
-    if (_lastState != null && _lastState != current) {
-      _transitions.add(_TransitionEntry(DateTime.now(), _lastState!, current));
-    }
-    _lastState = current;
-  }
 
   String _fmt(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:'
@@ -39,7 +14,8 @@ class _DebugPanelState extends State<DebugPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AgentProvider>().state;
+    final agent = context.watch<AgentProvider>();
+    final log = agent.activityLog;
 
     return Drawer(
       child: SafeArea(
@@ -50,51 +26,32 @@ class _DebugPanelState extends State<DebugPanel> {
               padding: const EdgeInsets.fromLTRB(16, 12, 8, 0),
               child: Row(
                 children: [
-                  const Text('Debug Panel',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const Text('Activity Log',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 16)),
                   const Spacer(),
-                  TextButton(
-                    onPressed: () => setState(() => _transitions.clear()),
-                    child: const Text('Clear'),
-                  ),
+                  Text(agent.state.displayName,
+                      style: Theme.of(context).textTheme.labelMedium),
                 ],
               ),
             ),
             const Divider(),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Text('State: ${state.displayName}',
-                  style: const TextStyle(fontWeight: FontWeight.w500)),
-            ),
-            const Divider(),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Text('Transitions',
-                  style: TextStyle(fontWeight: FontWeight.w500)),
-            ),
             Expanded(
               child: ListView.builder(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                itemCount: _transitions.length,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                itemCount: log.length,
                 itemBuilder: (ctx, i) {
-                  final e = _transitions[_transitions.length - 1 - i];
-                  return Text(
-                    '${_fmt(e.time)}  ${e.from.displayName} → ${e.to.displayName}',
-                    style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                  final e = log[log.length - 1 - i];
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 1),
+                    child: Text(
+                      '${_fmt(e.time)}  ${e.message}',
+                      style: const TextStyle(
+                          fontSize: 11, fontFamily: 'monospace'),
+                    ),
                   );
                 },
               ),
-            ),
-            const Divider(),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
-              child: Text('Tool Calls: (none)',
-                  style: TextStyle(fontSize: 12, color: Colors.grey)),
-            ),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: Text('Tokens: prompt: —   completion: —',
-                  style: TextStyle(fontSize: 12, color: Colors.grey)),
             ),
           ],
         ),

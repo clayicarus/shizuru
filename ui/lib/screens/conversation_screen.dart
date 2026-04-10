@@ -45,7 +45,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
     return Scaffold(
       key: _scaffoldKey,
       appBar: AppBar(
-        title: StateIndicator(state: agent.state),
+        title: StateIndicator(state: agent.state, activity: agent.activity),
         actions: [
           IconButton(
             icon: const Icon(Icons.bug_report_outlined),

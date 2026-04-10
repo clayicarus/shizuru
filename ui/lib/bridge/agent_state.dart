@@ -13,11 +13,11 @@ extension AgentStateExtension on AgentState {
   String get displayName {
     switch (this) {
       case AgentState.idle:       return 'Idle';
-      case AgentState.listening:  return 'Listening';
-      case AgentState.thinking:   return 'Thinking';
-      case AgentState.routing:    return 'Routing';
-      case AgentState.acting:     return 'Acting';
-      case AgentState.responding: return 'Responding';
+      case AgentState.listening:  return 'Listening...';
+      case AgentState.thinking:   return 'Thinking...';
+      case AgentState.routing:    return 'Planning...';
+      case AgentState.acting:     return 'Using tool...';
+      case AgentState.responding: return 'Responding...';
       case AgentState.error:      return 'Error';
       case AgentState.terminated: return 'Terminated';
     }

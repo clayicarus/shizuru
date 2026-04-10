@@ -3,7 +3,8 @@ import '../bridge/agent_state.dart';
 
 class StateIndicator extends StatefulWidget {
   final AgentState state;
-  const StateIndicator({super.key, required this.state});
+  final String activity;
+  const StateIndicator({super.key, required this.state, this.activity = ''});
 
   @override
   State<StateIndicator> createState() => _StateIndicatorState();
@@ -94,7 +95,10 @@ class _StateIndicatorState extends State<StateIndicator>
       children: [
         dot,
         const SizedBox(width: 6),
-        Text(label, style: Theme.of(context).textTheme.labelMedium),
+        Text(
+          widget.activity.isNotEmpty ? widget.activity : label,
+          style: Theme.of(context).textTheme.labelMedium,
+        ),
       ],
     );
   }

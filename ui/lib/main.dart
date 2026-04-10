@@ -87,6 +87,11 @@ class _AppStartupState extends State<_AppStartup> {
           conv.onOutputChunk(text, isPartial);
         });
 
+        // Register transcript callback so voice input appears in chat.
+        agent.setTranscriptCallback((text) {
+          conv.addUserMessage(text);
+        });
+
         await agent.initialize(config);
       }
     }

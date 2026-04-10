@@ -82,6 +82,8 @@
 - [ ] **Observation filter as independent session**: Consider promoting `ObservationFilter` from a synchronous in-Controller hook to an independent agent session with its own Controller, context, and LLM. This would allow context-aware filtering (e.g., "嗯" after a question is meaningful, "嗯" in silence is noise), avoid blocking the main Controller loop, and support stateful observation aggregation. The two sessions would need a coordination protocol for observation handoff and lifecycle management.
 - [ ] **Logger separation**: examples currently share the global `shizuru` logger with core/runtime/io. When extracting the agent SDK, the library should use its own internal logger; applications should configure their own logger independently.
 - [ ] **TTS streaming think-tag filtering**: `TtsSegmentStrategy` currently accumulates raw streaming tokens. If the LLM produces `<think>` blocks during streaming, they will be buffered and potentially sent to TTS. The strategy should strip thinking tags from the token stream before accumulation.
+- [ ] **Markdown stripping in ResponseFilter**: LLM sometimes outputs markdown formatting (e.g., `**bold**`, `# heading`) despite system prompt instructions. Add a markdown-cleaning step to `ResponseFilter` for voice output scenarios.
+- [ ] **Tool call state notification**: When LLM returns tool_calls (not content), streaming produces no tokens and TTS is silent. Expose a callback or state event so the UI/voice layer can provide feedback (e.g., "正在查询...") during tool execution.
 
 ## Phase 6 — Audio Quality: 3A Processing
 
