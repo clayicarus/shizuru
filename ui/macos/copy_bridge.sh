@@ -25,6 +25,13 @@ mkdir -p "${DEST}"
 if [ -f "${DYLIB_SRC}" ]; then
   cp "${DYLIB_SRC}" "${DEST}/libshizuru_bridge.dylib"
   echo "Copied libshizuru_bridge.dylib to ${DEST}"
+
+  # Also copy to the Flutter build output if it exists.
+  FLUTTER_APP="${WORKSPACE_ROOT}/ui/build/macos/Build/Products/Debug/ui.app/Contents/Frameworks"
+  if [ -d "${FLUTTER_APP}" ]; then
+    cp "${DYLIB_SRC}" "${FLUTTER_APP}/libshizuru_bridge.dylib"
+    echo "Copied libshizuru_bridge.dylib to ${FLUTTER_APP}"
+  fi
 else
   echo "Warning: ${DYLIB_SRC} not found. Build the C++ bridge first with cmake."
   echo "  cd ${WORKSPACE_ROOT} && cmake -B build && cmake --build build --target shizuru_bridge"

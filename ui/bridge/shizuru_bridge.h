@@ -27,8 +27,14 @@ typedef void (*ShizuruOutputCallback)(const char* text, int32_t is_partial,
 //   6=Error, 7=Terminated
 typedef void (*ShizuruStateCallback)(int32_t state, void* user_data);
 
+// Called when ASR produces a transcript from voice input.
+typedef void (*ShizuruTranscriptCallback)(const char* text, void* user_data);
+
 // Called at ~20ms intervals with the current microphone RMS level.
 typedef void (*ShizuruAudioLevelCallback)(float rms, void* user_data);
+
+// Called for diagnostic/activity events from the agent core.
+typedef void (*ShizuruDiagnosticCallback)(const char* message, void* user_data);
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -83,6 +89,17 @@ int32_t shizuru_stop_capture(ShizuruHandle handle);
 void shizuru_set_audio_level_callback(ShizuruHandle handle,
                                       ShizuruAudioLevelCallback cb,
                                       void* user_data);
+
+// Register transcript callback. Fired when ASR produces text from voice input.
+void shizuru_set_transcript_callback(ShizuruHandle handle,
+                                     ShizuruTranscriptCallback cb,
+                                     void* user_data);
+
+// Register diagnostic callback. Fired for activity events (tool calls,
+// filter decisions, aggregation, etc.) from the agent core.
+void shizuru_set_diagnostic_callback(ShizuruHandle handle,
+                                     ShizuruDiagnosticCallback cb,
+                                     void* user_data);
 
 // Free a string allocated by the bridge (e.g. from output callbacks).
 // Must be called by Dart after copying the string content.

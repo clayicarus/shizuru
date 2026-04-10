@@ -12,6 +12,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -44,6 +45,12 @@
 
 // Core types
 #include "core/controller/types.h"
+#include "core/policy/types.h"
+#include "core/strategies/llm_observation_filter.h"
+#include "core/strategies/llm_observation_aggregator.h"
+#include "core/strategies/tts_segment_strategy.h"
+#include "core/strategies/response_filter.h"
+#include "services/llm/openai/openai_client.h"
 #include "async_logger.h"
 
 using namespace shizuru;
@@ -112,6 +119,55 @@ class AudioLevelProbe : public io::IoDevice {
   void* user_data_ = nullptr;
 };
 
+// TranscriptProbe — taps ASR text_out to fire a callback with the transcript.
+class TranscriptProbe : public io::IoDevice {
+ public:
+  explicit TranscriptProbe(std::string device_id = "transcript_probe")
+      : device_id_(std::move(device_id)) {}
+
+  void SetTranscriptCallback(ShizuruTranscriptCallback cb, void* user_data) {
+    std::lock_guard<std::mutex> lock(cb_mutex_);
+    cb_ = cb;
+    user_data_ = user_data;
+  }
+
+  std::string GetDeviceId() const override { return device_id_; }
+
+  std::vector<io::PortDescriptor> GetPortDescriptors() const override {
+    return {{kTextIn, io::PortDirection::kInput, "text/plain"}};
+  }
+
+  void OnInput(const std::string& /*port_name*/, io::DataFrame frame) override {
+    if (frame.payload.empty()) return;
+
+    ShizuruTranscriptCallback cb = nullptr;
+    void* ud = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(cb_mutex_);
+      cb = cb_;
+      ud = user_data_;
+    }
+    if (cb) {
+      std::string text(frame.payload.begin(), frame.payload.end());
+      auto* heap = static_cast<char*>(std::malloc(text.size() + 1));
+      std::memcpy(heap, text.c_str(), text.size() + 1);
+      cb(heap, ud);
+    }
+  }
+
+  void SetOutputCallback(io::OutputCallback /*cb*/) override {}
+  void Start() override {}
+  void Stop() override {}
+
+  static constexpr char kTextIn[] = "text_in";
+
+ private:
+  std::string device_id_;
+  std::mutex cb_mutex_;
+  ShizuruTranscriptCallback cb_ = nullptr;
+  void* user_data_ = nullptr;
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -124,8 +180,8 @@ struct ShizuruContext {
 
   // Non-owning pointers into devices owned by runtime.
   io::AudioCaptureDevice* capture = nullptr;
-  io::ElevenLabsTtsDevice* tts = nullptr;
   AudioLevelProbe* level_probe = nullptr;
+  TranscriptProbe* transcript_probe = nullptr;
 
   std::atomic<bool> capture_running{false};
 
@@ -136,6 +192,10 @@ struct ShizuruContext {
   void* state_user_data = nullptr;
   ShizuruAudioLevelCallback audio_level_cb = nullptr;
   void* audio_level_user_data = nullptr;
+  ShizuruTranscriptCallback transcript_cb = nullptr;
+  void* transcript_user_data = nullptr;
+  ShizuruDiagnosticCallback diagnostic_cb = nullptr;
+  void* diagnostic_user_data = nullptr;
 
   std::mutex cb_mutex;
 
@@ -248,9 +308,182 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   rt_cfg.controller.max_turns     = max_turns;
   rt_cfg.controller.use_streaming = true;
 
+  // ── Strategy factories ───────────────────────────────────────────────────
+  // Note: capture by value — these lambdas outlive shizuru_create().
+  rt_cfg.observation_aggregator_factory = [=]() {
+    services::OpenAiConfig agg_llm_cfg;
+    agg_llm_cfg.base_url        = llm_base_url;
+    agg_llm_cfg.api_path        = llm_api_path;
+    agg_llm_cfg.api_key         = llm_api_key;
+    agg_llm_cfg.model           = llm_model;
+    agg_llm_cfg.max_tokens      = 8;
+    agg_llm_cfg.temperature     = 0.0;
+    agg_llm_cfg.connect_timeout = std::chrono::seconds(5);
+    agg_llm_cfg.read_timeout    = std::chrono::seconds(10);
+
+    core::LlmAggregatorConfig agg_cfg;
+    agg_cfg.aggregation_timeout = std::chrono::milliseconds(5000);
+    agg_cfg.llm_timeout         = std::chrono::milliseconds(2000);
+
+    return std::make_unique<core::LlmObservationAggregator>(
+        std::make_unique<services::OpenAiClient>(agg_llm_cfg),
+        std::move(agg_cfg));
+  };
+
+  rt_cfg.observation_filter_factory = [=]() {
+    services::OpenAiConfig filter_llm_cfg;
+    filter_llm_cfg.base_url        = llm_base_url;
+    filter_llm_cfg.api_path        = llm_api_path;
+    filter_llm_cfg.api_key         = llm_api_key;
+    filter_llm_cfg.model           = llm_model;
+    filter_llm_cfg.max_tokens      = 8;
+    filter_llm_cfg.temperature     = 0.0;
+    filter_llm_cfg.connect_timeout = std::chrono::seconds(5);
+    filter_llm_cfg.read_timeout    = std::chrono::seconds(10);
+    return std::make_unique<core::LlmObservationFilter>(
+        std::make_unique<services::OpenAiClient>(filter_llm_cfg));
+  };
+
+  rt_cfg.tts_segment_factory = []() {
+    core::PunctuationSegmentStrategy::Config seg_cfg;
+    seg_cfg.min_chars = 15;
+    seg_cfg.max_chars = 200;
+    return std::make_unique<core::PunctuationSegmentStrategy>(seg_cfg);
+  };
+
+  rt_cfg.response_filter_factory = []() {
+    return std::make_unique<core::StripThinkingFilter>();
+  };
+
+  // ── Builtin tools ────────────────────────────────────────────────────────
+  {
+    services::ToolDefinition time_tool;
+    time_tool.name = "get_current_time";
+    time_tool.description = "Get the current date and time";
+    time_tool.required_capability = "builtin";
+    rt_cfg.llm.tools.push_back(std::move(time_tool));
+
+    services::ToolDefinition sys_tool;
+    sys_tool.name = "get_system_info";
+    sys_tool.description = "Get system information (OS, hostname)";
+    sys_tool.required_capability = "builtin";
+    rt_cfg.llm.tools.push_back(std::move(sys_tool));
+
+    services::ToolDefinition calc_tool;
+    calc_tool.name = "calculate";
+    calc_tool.description = "Evaluate a simple math expression (a op b)";
+    calc_tool.parameters = {
+        {"expression", "string", "Math expression like '2 + 3' or '10 / 4'", true}};
+    calc_tool.required_capability = "builtin";
+    rt_cfg.llm.tools.push_back(std::move(calc_tool));
+
+    services::ToolDefinition reminder_tool;
+    reminder_tool.name = "set_reminder";
+    reminder_tool.description = "Set a reminder with a message and delay in minutes";
+    reminder_tool.parameters = {
+        {"message", "string", "Reminder message", true},
+        {"minutes", "integer", "Minutes from now", true}};
+    reminder_tool.required_capability = "builtin";
+    rt_cfg.llm.tools.push_back(std::move(reminder_tool));
+  }
+
+  // ── Policy: allow all builtin tools ──────────────────────────────────────
+  rt_cfg.policy.default_capabilities = {"builtin"};
+  {
+    core::PolicyRule allow_builtin;
+    allow_builtin.priority = 0;
+    allow_builtin.action_pattern = "*";
+    allow_builtin.required_capability = "builtin";
+    allow_builtin.outcome = core::PolicyOutcome::kAllow;
+    rt_cfg.policy.initial_rules = {allow_builtin};
+  }
+
   // ── Allocate context ─────────────────────────────────────────────────────
   auto ctx = std::make_unique<ShizuruContext>();
   ctx->tools = std::make_unique<services::ToolRegistry>();
+
+  // Register builtin tool functions.
+  ctx->tools->Register("get_current_time",
+                       [](const std::string& /*args*/) -> services::ToolResult {
+                         auto now = std::chrono::system_clock::now();
+                         auto t = std::chrono::system_clock::to_time_t(now);
+                         char buf[64];
+                         std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S",
+                                       std::localtime(&t));
+                         return {true, buf, ""};
+                       });
+
+  ctx->tools->Register("get_system_info",
+                       [](const std::string& /*args*/) -> services::ToolResult {
+                         char hostname[256] = {};
+                         gethostname(hostname, sizeof(hostname));
+#if defined(__APPLE__)
+                         const char* os = "macOS";
+#elif defined(__linux__)
+                         const char* os = "Linux";
+#elif defined(_WIN32)
+                         const char* os = "Windows";
+#else
+                         const char* os = "Unknown";
+#endif
+                         std::string info = std::string(R"({"os":")") + os +
+                                            R"(","hostname":")" + hostname + R"("})";
+                         return {true, info, ""};
+                       });
+
+  ctx->tools->Register("calculate",
+                       [](const std::string& args) -> services::ToolResult {
+                         auto expr_pos = args.find(R"("expression":")");
+                         if (expr_pos == std::string::npos) {
+                           return {false, "", "Missing 'expression' parameter"};
+                         }
+                         auto val_start = expr_pos + 15;
+                         auto val_end = args.find('"', val_start);
+                         if (val_end == std::string::npos) {
+                           return {false, "", "Malformed expression"};
+                         }
+                         std::string expr = args.substr(val_start, val_end - val_start);
+                         double a = 0, b = 0;
+                         char op = 0;
+                         if (std::sscanf(expr.c_str(), "%lf %c %lf", &a, &op, &b) != 3) {
+                           return {false, "", "Cannot parse expression: " + expr};
+                         }
+                         double result = 0;
+                         switch (op) {
+                           case '+': result = a + b; break;
+                           case '-': result = a - b; break;
+                           case '*': result = a * b; break;
+                           case '/':
+                             if (b == 0) return {false, "", "Division by zero"};
+                             result = a / b;
+                             break;
+                           default:
+                             return {false, "", std::string("Unknown operator: ") + op};
+                         }
+                         char buf[64];
+                         std::snprintf(buf, sizeof(buf), "%.6g", result);
+                         return {true, buf, ""};
+                       });
+
+  ctx->tools->Register("set_reminder",
+                       [](const std::string& args) -> services::ToolResult {
+                         auto msg_pos = args.find(R"("message":")");
+                         auto min_pos = args.find(R"("minutes":)");
+                         std::string message = "reminder";
+                         int minutes = 0;
+                         if (msg_pos != std::string::npos) {
+                           auto s = msg_pos + 11;
+                           auto e = args.find('"', s);
+                           if (e != std::string::npos) message = args.substr(s, e - s);
+                         }
+                         if (min_pos != std::string::npos) {
+                           std::sscanf(args.c_str() + min_pos + 10, "%d", &minutes);
+                         }
+                         std::string result = R"({"status":"set","message":")" +
+                                              message + R"(","minutes":)" +
+                                              std::to_string(minutes) + "}";
+                         return {true, result, ""};
+                       });
 
   try {
     ctx->runtime = std::make_unique<runtime::AgentRuntime>(rt_cfg, *ctx->tools);
@@ -284,11 +517,12 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   auto playout_dev      = std::make_unique<io::AudioPlayoutDevice>(
       std::make_unique<io::PaPlayer>(play_cfg));
   auto level_probe_dev  = std::make_unique<AudioLevelProbe>();
+  auto transcript_probe_dev = std::make_unique<TranscriptProbe>();
 
   // Keep non-owning raw pointers before moving into runtime.
-  ctx->capture     = capture_dev.get();
-  ctx->tts         = tts_dev.get();
-  ctx->level_probe = level_probe_dev.get();
+  ctx->capture          = capture_dev.get();
+  ctx->level_probe      = level_probe_dev.get();
+  ctx->transcript_probe = transcript_probe_dev.get();
 
   // ── Register devices ─────────────────────────────────────────────────────
   ctx->runtime->RegisterDevice(std::move(capture_dev));
@@ -301,6 +535,7 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   ctx->runtime->RegisterDevice(std::move(playout_dump_dev));
   ctx->runtime->RegisterDevice(std::move(playout_dev));
   ctx->runtime->RegisterDevice(std::move(level_probe_dev));
+  ctx->runtime->RegisterDevice(std::move(transcript_probe_dev));
 
   // ── DMA routes (mirrors voice_agent.cpp) ─────────────────────────────────
   constexpr runtime::RouteOptions kDma{.requires_control_plane = false};
@@ -335,23 +570,14 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   ctx->runtime->AddRoute({"audio_capture",    "audio_out"},
                          {"audio_level_probe", AudioLevelProbe::kAudioIn}, kDma);
 
-  // ── OnOutput callback: LLM response → TTS + Dart ─────────────────────────
-  io::ElevenLabsTtsDevice* tts_ptr = ctx->tts;
+  // asr text_out → transcript probe (parallel tap for Dart UI)
+  ctx->runtime->AddRoute({"baidu_asr",        "text_out"},
+                         {"transcript_probe",  TranscriptProbe::kTextIn}, kDma);
+
+  // ── OnOutput callback: display only (TTS is route-driven) ──────────────
   ShizuruContext* raw_ctx = ctx.get();
 
-  ctx->runtime->OnOutput([raw_ctx, tts_ptr](const runtime::RuntimeOutput& output) {
-    // Feed final text into TTS.
-    if (!output.is_partial) {
-      io::DataFrame frame;
-      frame.type    = "text/plain";
-      frame.payload = std::vector<uint8_t>(output.text.begin(), output.text.end());
-      frame.source_device = "app_output";
-      frame.source_port   = "text_out";
-      frame.timestamp     = std::chrono::steady_clock::now();
-      tts_ptr->OnInput("text_in", std::move(frame));
-    }
-
-    // Fire output_cb for both partial and final.
+  ctx->runtime->OnOutput([raw_ctx](const runtime::RuntimeOutput& output) {
     // Accumulate partial tokens so Dart always receives valid UTF-8
     // (SSE chunk boundaries may split multi-byte characters).
     ShizuruOutputCallback cb = nullptr;
@@ -387,6 +613,22 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
     // shizuru_free_string after toDartString().
     if (cb && heap_str) {
       cb(heap_str, is_partial_flag, ud);
+    }
+  });
+
+  // Wire diagnostic callback: forward Controller events to Dart.
+  ctx->runtime->OnDiagnostic([raw_ctx](const std::string& message) {
+    ShizuruDiagnosticCallback cb = nullptr;
+    void* ud = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(raw_ctx->cb_mutex);
+      cb = raw_ctx->diagnostic_cb;
+      ud = raw_ctx->diagnostic_user_data;
+    }
+    if (cb) {
+      auto* heap = static_cast<char*>(std::malloc(message.size() + 1));
+      std::memcpy(heap, message.c_str(), message.size() + 1);
+      cb(heap, ud);
     }
   });
 
@@ -557,6 +799,31 @@ void shizuru_set_audio_level_callback(ShizuruHandle handle,
   if (ctx->level_probe) {
     ctx->level_probe->SetLevelCallback(cb, user_data);
   }
+}
+
+void shizuru_set_transcript_callback(ShizuruHandle handle,
+                                     ShizuruTranscriptCallback cb,
+                                     void* user_data) {
+  if (!handle) return;
+  auto* ctx = static_cast<ShizuruContext*>(handle);
+  {
+    std::lock_guard<std::mutex> lock(ctx->cb_mutex);
+    ctx->transcript_cb        = cb;
+    ctx->transcript_user_data = user_data;
+  }
+  if (ctx->transcript_probe) {
+    ctx->transcript_probe->SetTranscriptCallback(cb, user_data);
+  }
+}
+
+void shizuru_set_diagnostic_callback(ShizuruHandle handle,
+                                     ShizuruDiagnosticCallback cb,
+                                     void* user_data) {
+  if (!handle) return;
+  auto* ctx = static_cast<ShizuruContext*>(handle);
+  std::lock_guard<std::mutex> lock(ctx->cb_mutex);
+  ctx->diagnostic_cb        = cb;
+  ctx->diagnostic_user_data = user_data;
 }
 
 // ---------------------------------------------------------------------------
