@@ -18,6 +18,7 @@
 #include "interfaces/llm_client.h"
 #include "io/data_frame.h"
 #include "policy/policy_layer.h"
+#include "strategies/observation_aggregator.h"
 #include "strategies/observation_filter.h"
 #include "strategies/response_filter.h"
 #include "strategies/tts_segment_strategy.h"
@@ -46,9 +47,10 @@ class Controller {
   // PolicyLayer (via InitSession), so all lookups resolve to the same slot.
   //
   // Strategy pointers are optional — if null, defaults are used:
-  //   observation_filter → AcceptAllFilter (process everything)
-  //   tts_segment        → nullptr (no TTS segmentation, streaming tokens only)
-  //   response_filter    → PassthroughFilter (no transformation)
+  //   observation_aggregator → PassthroughAggregator (no buffering)
+  //   observation_filter     → AcceptAllFilter (process everything)
+  //   tts_segment            → nullptr (no TTS segmentation)
+  //   response_filter        → PassthroughFilter (no transformation)
   Controller(std::string session_id,
              ControllerConfig config,
              std::unique_ptr<LlmClient> llm,
@@ -56,6 +58,7 @@ class Controller {
              CancelCallback cancel,
              ContextStrategy& context,
              PolicyLayer& policy,
+             std::unique_ptr<ObservationAggregator> observation_aggregator = nullptr,
              std::unique_ptr<ObservationFilter> observation_filter = nullptr,
              std::unique_ptr<TtsSegmentStrategy> tts_segment = nullptr,
              std::unique_ptr<ResponseFilter> response_filter = nullptr);
@@ -123,6 +126,7 @@ class Controller {
   PolicyLayer& policy_;
 
   // Pluggable strategies (owned by Controller).
+  std::unique_ptr<ObservationAggregator> observation_aggregator_;
   std::unique_ptr<ObservationFilter> observation_filter_;
   std::unique_ptr<TtsSegmentStrategy> tts_segment_;
   std::unique_ptr<ResponseFilter> response_filter_;
@@ -133,6 +137,7 @@ class Controller {
   ActionCandidate pending_action_;
   std::vector<ToolCall> pending_tool_calls_;
   std::unordered_map<std::string, std::string> pending_results_;  // id → result JSON
+  std::chrono::steady_clock::time_point tool_call_start_;         // for timeout
 
   // State (accessed from loop thread; read via atomic for external queries)
   std::atomic<State> state_{State::kIdle};

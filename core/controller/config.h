@@ -12,6 +12,7 @@ struct ControllerConfig {
   int token_budget = 100000;                         // Max cumulative tokens
   int action_count_limit = 50;                       // Max IO actions per session
   bool use_streaming = false;                        // Use SSE streaming for LLM responses
+  std::chrono::seconds tool_call_timeout{30};        // Max wait time for tool results
 };
 
 }  // namespace shizuru::core

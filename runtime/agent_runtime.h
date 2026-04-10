@@ -32,6 +32,8 @@ namespace shizuru::runtime {
 
 // Strategy factory types — called once per session in StartSession().
 // Using std::function so callers can use lambdas, not just subclasses.
+using ObservationAggregatorFactory =
+    std::function<std::unique_ptr<core::ObservationAggregator>()>;
 using ObservationFilterFactory =
     std::function<std::unique_ptr<core::ObservationFilter>()>;
 using TtsSegmentStrategyFactory =
@@ -50,6 +52,7 @@ struct RuntimeConfig {
   // Optional strategy factories.  If set, StartSession() calls them to
   // create strategy instances injected into the Controller.
   // If null, defaults are used (AcceptAll, no TTS segmentation, Passthrough).
+  ObservationAggregatorFactory observation_aggregator_factory;
   ObservationFilterFactory observation_filter_factory;
   TtsSegmentStrategyFactory tts_segment_factory;
   ResponseFilterFactory response_filter_factory;
@@ -67,6 +70,7 @@ struct RuntimeOutput {
 class AgentRuntime {
  public:
   using OutputCallback = std::function<void(const RuntimeOutput& output)>;
+  using DiagnosticCallback = std::function<void(const std::string& message)>;
 
   AgentRuntime(RuntimeConfig config, services::ToolRegistry& tools);
   ~AgentRuntime();
@@ -92,6 +96,9 @@ class AgentRuntime {
 
   // Register callback for final text outputs.
   void OnOutput(OutputCallback cb);
+
+  // Register callback for diagnostic/activity events.
+  void OnDiagnostic(DiagnosticCallback cb);
 
   // Shut down the active session.
   void Shutdown();
@@ -124,6 +131,8 @@ class AgentRuntime {
   mutable std::shared_mutex devices_mutex_;  // protects devices_ and route_table_
   mutable std::mutex output_cb_mutex_;
   OutputCallback output_cb_;
+  mutable std::mutex diagnostic_cb_mutex_;
+  DiagnosticCallback diagnostic_cb_;
 };
 
 }  // namespace shizuru::runtime

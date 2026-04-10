@@ -208,6 +208,7 @@ TEST(ObservationFilterIntegrationTest, FilteredObservationStaysInListening) {
 
   Controller ctrl("s1", DefaultConfig(), std::move(llm),
                   nullptr, nullptr, context, policy,
+                  nullptr,  // observation_aggregator
                   std::move(filter));
 
   ctrl.Start();
@@ -299,6 +300,7 @@ TEST(TtsSegmentIntegrationTest, StreamingTokensEmitTtsFrames) {
 
   Controller ctrl("s1", cfg, std::move(streaming_llm),
                   std::move(emit), nullptr, context, policy,
+                  nullptr,  // observation_aggregator
                   nullptr,  // observation_filter
                   std::move(tts_strat),
                   nullptr);  // response_filter
@@ -371,6 +373,7 @@ TEST(ResponseFilterIntegrationTest, ThinkingTagsStrippedFromResponse) {
 
   Controller ctrl("s1", DefaultConfig(), std::move(llm),
                   nullptr, nullptr, context, policy,
+                  nullptr,  // observation_aggregator
                   nullptr,  // observation_filter
                   nullptr,  // tts_segment
                   std::make_unique<StripThinkingFilter>());
@@ -427,7 +430,7 @@ TEST(ResponseFilterIntegrationTest, EmptyResponseSuppressed) {
 
   Controller ctrl("s1", DefaultConfig(), std::move(llm),
                   nullptr, nullptr, context, policy,
-                  nullptr, nullptr,
+                  nullptr, nullptr, nullptr,
                   std::make_unique<StripThinkingFilter>());
 
   ctrl.OnResponse([&](const ActionCandidate& ac) {

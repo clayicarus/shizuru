@@ -116,6 +116,8 @@ std::string AgentRuntime::StartSession() {
       "core", session_id,
       config_.controller, config_.context, config_.policy,
       std::move(llm), std::move(memory), std::move(audit),
+      config_.observation_aggregator_factory
+          ? config_.observation_aggregator_factory() : nullptr,
       config_.observation_filter_factory
           ? config_.observation_filter_factory() : nullptr,
       config_.tts_segment_factory
@@ -135,6 +137,30 @@ std::string AgentRuntime::StartSession() {
       [this](const std::string& device_id, const std::string& port_name,
              io::DataFrame frame) {
         DispatchFrame(device_id, port_name, std::move(frame));
+      });
+
+  // Wire Controller diagnostic + transition callbacks to AgentRuntime's
+  // diagnostic callback so Dart can display activity events.
+  core->Session().GetController().OnDiagnostic(
+      [this](const std::string& msg) {
+        DiagnosticCallback cb;
+        {
+          std::lock_guard<std::mutex> lock(diagnostic_cb_mutex_);
+          cb = diagnostic_cb_;
+        }
+        if (cb) { cb(msg); }
+      });
+  core->Session().GetController().OnTransition(
+      [this](core::State from, core::State to, core::Event event) {
+        DiagnosticCallback cb;
+        {
+          std::lock_guard<std::mutex> lock(diagnostic_cb_mutex_);
+          cb = diagnostic_cb_;
+        }
+        if (cb) {
+          cb(std::string(core::StateName(from)) + " → " +
+             core::StateName(to) + " [" + core::EventName(event) + "]");
+        }
       });
 
   {
@@ -218,6 +244,11 @@ void AgentRuntime::SendMessage(const std::string& content) {
 void AgentRuntime::OnOutput(OutputCallback cb) {
   std::lock_guard<std::mutex> lock(output_cb_mutex_);
   output_cb_ = std::move(cb);
+}
+
+void AgentRuntime::OnDiagnostic(DiagnosticCallback cb) {
+  std::lock_guard<std::mutex> lock(diagnostic_cb_mutex_);
+  diagnostic_cb_ = std::move(cb);
 }
 
 void AgentRuntime::Shutdown() {

@@ -61,6 +61,7 @@ Controller::Controller(std::string session_id,
                        CancelCallback cancel,
                        ContextStrategy& context,
                        PolicyLayer& policy,
+                       std::unique_ptr<ObservationAggregator> observation_aggregator,
                        std::unique_ptr<ObservationFilter> observation_filter,
                        std::unique_ptr<TtsSegmentStrategy> tts_segment,
                        std::unique_ptr<ResponseFilter> response_filter)
@@ -71,6 +72,9 @@ Controller::Controller(std::string session_id,
       cancel_(std::move(cancel)),
       context_(context),
       policy_(policy),
+      observation_aggregator_(observation_aggregator
+                                  ? std::move(observation_aggregator)
+                                  : std::make_unique<PassthroughAggregator>()),
       observation_filter_(observation_filter
                               ? std::move(observation_filter)
                               : std::make_unique<AcceptAllFilter>()),
@@ -185,10 +189,71 @@ void Controller::RunLoop() {
     Observation obs;
     {
       std::unique_lock<std::mutex> lock(queue_mutex_);
-      queue_cv_.wait(lock, [&] {
+      // Use timed wait when aggregator has pending content or tool calls pending.
+      auto wait_duration = observation_aggregator_->HasPending()
+                               ? std::chrono::milliseconds(500)
+                               : std::chrono::milliseconds(60000);
+
+      if (state_.load() == State::kActing && !pending_tool_calls_.empty()) {
+        auto remaining = config_.tool_call_timeout -
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - tool_call_start_);
+        if (remaining.count() <= 0) {
+          LOG_ERROR("[{}] Tool call timeout ({} pending results)",
+                    MODULE_NAME,
+                    pending_tool_calls_.size() - pending_results_.size());
+          for (const auto& tc : pending_tool_calls_) {
+            if (pending_results_.find(tc.id) == pending_results_.end()) {
+              pending_results_[tc.id] =
+                  R"({"success":false,"error":"tool call timeout"})";
+            }
+          }
+          TryTransition(Event::kActionFailed);
+          pending_tool_calls_.clear();
+          pending_results_.clear();
+          Observation cont;
+          cont.type = ObservationType::kContinuation;
+          cont.source = "controller";
+          cont.timestamp = std::chrono::steady_clock::now();
+          lock.unlock();
+          HandleThinking(cont);
+          continue;
+        }
+        wait_duration = std::min(wait_duration,
+            std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
+      }
+
+      queue_cv_.wait_for(lock, wait_duration, [&] {
         return !observation_queue_.empty() || shutdown_requested_.load();
       });
       if (shutdown_requested_.load()) break;
+
+      // Check aggregator timeout (force-flush buffered content).
+      if (observation_queue_.empty() && state_.load() == State::kListening) {
+        auto timeout_obs = observation_aggregator_->CheckTimeout();
+        if (timeout_obs.has_value()) {
+          // Timeout flush — run through filter only, skip aggregator.
+          bool accepted = observation_filter_->ShouldProcess(*timeout_obs);
+          if (accepted) {
+            LOG_INFO("[{}] User message received (timeout): \"{}\"",
+                     MODULE_NAME, timeout_obs->content);
+            TryTransition(Event::kUserObservation);
+            lock.unlock();
+            try {
+              HandleThinking(*timeout_obs);
+            } catch (const std::exception& e) {
+              EmitDiagnostic("Unhandled exception: " + std::string(e.what()));
+              TryTransition(Event::kLlmFailure);
+            }
+          } else {
+            LOG_INFO("[{}] Timeout content filtered out: \"{}\"",
+                     MODULE_NAME, timeout_obs->content);
+          }
+          continue;
+        }
+      }
+
+      if (observation_queue_.empty()) continue;
       obs = std::move(observation_queue_.front());
       observation_queue_.pop_front();
     }
@@ -215,22 +280,34 @@ void Controller::RunLoop() {
     // Normal flow: if in Listening and got user observation.
     if (current == State::kListening &&
         obs.type == ObservationType::kUserMessage) {
-      // Strategy: check if this observation should be processed.
+      // Stage 1: Aggregation (endpointing).
+      auto aggregated = observation_aggregator_->Feed(obs);
+      if (!aggregated.has_value()) {
+        LOG_INFO("[{}] Observation buffered by aggregator: \"{}\"",
+                 MODULE_NAME, obs.content);
+        EmitDiagnostic("Waiting for more input: \"" + obs.content + "\"");
+        continue;  // Stay in kListening, wait for more fragments.
+      }
+
+      // Stage 2: Relevance filter.
       auto filter_start = std::chrono::steady_clock::now();
-      bool accepted = observation_filter_->ShouldProcess(obs);
+      bool accepted = observation_filter_->ShouldProcess(*aggregated);
       auto filter_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - filter_start).count();
       LOG_INFO("[{}] ObservationFilter took {}ms", MODULE_NAME, filter_ms);
       if (!accepted) {
         LOG_INFO("[{}] Observation filtered out: \"{}\"",
-                 MODULE_NAME, obs.content);
+                 MODULE_NAME, aggregated->content);
+        EmitDiagnostic("Filtered out: \"" + aggregated->content + "\"");
         continue;  // Stay in kListening.
       }
-      LOG_INFO("[{}] User message received: \"{}\"", MODULE_NAME, obs.content);
+
+      LOG_INFO("[{}] User message received: \"{}\"",
+               MODULE_NAME, aggregated->content);
       TryTransition(Event::kUserObservation);
       // Drive the thinking→routing→acting/responding cycle.
       try {
-        HandleThinking(obs);
+        HandleThinking(*aggregated);
       } catch (const std::exception& e) {
         EmitDiagnostic("Unhandled exception: " + std::string(e.what()));
         TryTransition(Event::kLlmFailure);
@@ -464,6 +541,7 @@ void Controller::HandleActing(ActionCandidate ac) {
   pending_action_ = ac;
   pending_tool_calls_ = ac.tool_calls;
   pending_results_.clear();
+  tool_call_start_ = std::chrono::steady_clock::now();
 
   // Build the tool_calls JSON array for memory recording.
   std::string tc_json = "[";
@@ -491,6 +569,7 @@ void Controller::HandleActing(ActionCandidate ac) {
     action_count_++;
     LOG_INFO("[{}] Acting: tool=\"{}\" id=\"{}\" args={}",
              MODULE_NAME, tc.name, tc.id, tc.arguments);
+    EmitDiagnostic("Tool call: " + tc.name);
 
     const std::string payload_str = tc.name + ":" + tc.arguments;
     io::DataFrame frame;
@@ -659,6 +738,9 @@ void Controller::HandleInterrupt() {
   if (tts_segment_) {
     tts_segment_->Reset();
   }
+
+  // Reset observation aggregator buffer on interrupt.
+  observation_aggregator_->Reset();
 
   // Record partial results as MemoryEntry.
   MemoryEntry interrupt_entry;

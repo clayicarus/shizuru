@@ -5,6 +5,7 @@ add_library(shizuru_core STATIC
   policy/policy_layer.cpp
   session/session.cpp
   strategies/llm_observation_filter.cpp
+  strategies/llm_observation_aggregator.cpp
 )
 
 target_include_directories(shizuru_core

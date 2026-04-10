@@ -16,6 +16,7 @@
 #include "io/io_device.h"
 #include "policy/config.h"
 #include "session/session.h"
+#include "strategies/observation_aggregator.h"
 #include "strategies/observation_filter.h"
 #include "strategies/response_filter.h"
 #include "strategies/tts_segment_strategy.h"
@@ -34,6 +35,7 @@ class CoreDevice : public io::IoDevice {
              std::unique_ptr<core::LlmClient> llm,
              std::unique_ptr<core::MemoryStore> memory,
              std::unique_ptr<core::AuditSink> audit,
+             std::unique_ptr<core::ObservationAggregator> observation_aggregator = nullptr,
              std::unique_ptr<core::ObservationFilter> observation_filter = nullptr,
              std::unique_ptr<core::TtsSegmentStrategy> tts_segment = nullptr,
              std::unique_ptr<core::ResponseFilter> response_filter = nullptr);

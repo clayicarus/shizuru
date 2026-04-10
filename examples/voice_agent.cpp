@@ -63,6 +63,7 @@
 #include "io/tool_registry.h"
 #include "llm/config.h"
 #include "strategies/llm_observation_filter.h"
+#include "strategies/llm_observation_aggregator.h"
 #include "strategies/tts_segment_strategy.h"
 #include "strategies/response_filter.h"
 #include "llm/openai/openai_client.h"
@@ -189,15 +190,37 @@ int main(int argc, char* argv[]) {
   rt_cfg.controller.use_streaming      = true;  // Enable SSE streaming
 
   // ── Strategy factories ────────────────────────────────────────────────────
-  // ObservationFilter: use a lightweight LLM to classify ASR transcripts.
-  // Reuses the same API endpoint but could use a cheaper/faster model.
-  rt_cfg.observation_filter_factory = [&]() {
+  // ObservationAggregator: LLM-based endpointing — buffers ASR fragments
+  // until the user finishes speaking.
+  rt_cfg.observation_aggregator_factory = [=]() {
+    services::OpenAiConfig agg_llm_cfg;
+    agg_llm_cfg.base_url        = base_url;
+    agg_llm_cfg.api_path        = "/compatible-mode/v1/chat/completions";
+    agg_llm_cfg.api_key         = openai_key;
+    agg_llm_cfg.model           = model;
+    agg_llm_cfg.max_tokens      = 8;
+    agg_llm_cfg.temperature     = 0.0;
+    agg_llm_cfg.connect_timeout = std::chrono::seconds(5);
+    agg_llm_cfg.read_timeout    = std::chrono::seconds(10);
+
+    core::LlmAggregatorConfig agg_cfg;
+    agg_cfg.aggregation_timeout = std::chrono::milliseconds(5000);
+    agg_cfg.llm_timeout         = std::chrono::milliseconds(2000);
+
+    return std::make_unique<core::LlmObservationAggregator>(
+        std::make_unique<services::OpenAiClient>(agg_llm_cfg),
+        std::move(agg_cfg));
+  };
+
+  // ObservationFilter: LLM-based relevance check — decides if the complete
+  // observation is worth sending to the main LLM.
+  rt_cfg.observation_filter_factory = [=]() {
     services::OpenAiConfig filter_llm_cfg;
     filter_llm_cfg.base_url        = base_url;
     filter_llm_cfg.api_path        = "/compatible-mode/v1/chat/completions";
     filter_llm_cfg.api_key         = openai_key;
-    filter_llm_cfg.model           = model;  // could use a lighter model
-    filter_llm_cfg.max_tokens      = 8;      // only need "yes" or "no"
+    filter_llm_cfg.model           = model;
+    filter_llm_cfg.max_tokens      = 8;
     filter_llm_cfg.temperature     = 0.0;
     filter_llm_cfg.connect_timeout = std::chrono::seconds(5);
     filter_llm_cfg.read_timeout    = std::chrono::seconds(10);
