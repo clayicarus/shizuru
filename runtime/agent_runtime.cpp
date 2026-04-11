@@ -80,6 +80,13 @@ void AgentRuntime::RemoveRoute(const PortAddress& source,
   route_table_.RemoveRoute(source, destination);
 }
 
+bool AgentRuntime::SetRouteEnabled(const PortAddress& source,
+                                    const PortAddress& destination,
+                                    bool enabled) {
+  std::unique_lock<std::shared_mutex> lock(devices_mutex_);
+  return route_table_.SetRouteEnabled(source, destination, enabled);
+}
+
 // ---------------------------------------------------------------------------
 // Backward-compatible public API
 // ---------------------------------------------------------------------------
@@ -215,6 +222,9 @@ std::string AgentRuntime::StartSession() {
     order = registration_order_;
   }
   for (const auto& id : order) {
+    // Skip audio devices — they require explicit user action and may need
+    // runtime permissions (e.g., Android RECORD_AUDIO) or audio routing setup.
+    if (id == "audio_capture" || id == "audio_playout") continue;
     std::shared_lock<std::shared_mutex> lock(devices_mutex_);
     auto it = devices_.find(id);
     if (it != devices_.end()) { it->second->Start(); }

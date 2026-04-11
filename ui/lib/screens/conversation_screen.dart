@@ -94,6 +94,20 @@ class _ConversationScreenState extends State<ConversationScreen> {
                       ? () => agent.toggleCapture()
                       : null,
                 ),
+                IconButton(
+                  icon: Icon(
+                    agent.playoutActive
+                        ? Icons.volume_up
+                        : Icons.volume_off,
+                    color: agent.playoutActive ? Colors.blue : null,
+                  ),
+                  tooltip: agent.playoutActive
+                      ? 'Stop speaker'
+                      : 'Start speaker',
+                  onPressed: agent.isInitialized
+                      ? () => agent.togglePlayout()
+                      : null,
+                ),
                 Expanded(
                   child: TextField(
                     controller: _inputController,

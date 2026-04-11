@@ -87,6 +87,11 @@ class AgentRuntime {
                 RouteOptions options = {});
   void RemoveRoute(const PortAddress& source, const PortAddress& destination);
 
+  // Enable or disable a route without removing it. Disabled routes exist
+  // but DispatchFrame skips them. Returns true if the route was found.
+  bool SetRouteEnabled(const PortAddress& source, const PortAddress& destination,
+                       bool enabled);
+
   // Backward-compatible public API
   // Create and start a new session. Returns the session ID.
   std::string StartSession();

@@ -105,6 +105,20 @@ void shizuru_set_diagnostic_callback(ShizuruHandle handle,
 // Must be called by Dart after copying the string content.
 void shizuru_free_string(char* str);
 
+// Start audio playout. No-op if already running. Returns 0 on success.
+int32_t shizuru_start_playout(ShizuruHandle handle);
+
+// Stop audio playout. No-op if already stopped. Returns 0 on success.
+int32_t shizuru_stop_playout(ShizuruHandle handle);
+
+// Enable or disable the voice input pathway (capture → VAD → ASR → core).
+// First call with enable=1 also starts the audio devices on the pathway.
+int32_t shizuru_set_voice_input(ShizuruHandle handle, int32_t enable);
+
+// Enable or disable the voice output pathway (core → TTS → playout).
+// First call with enable=1 also starts the audio devices on the pathway.
+int32_t shizuru_set_voice_output(ShizuruHandle handle, int32_t enable);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

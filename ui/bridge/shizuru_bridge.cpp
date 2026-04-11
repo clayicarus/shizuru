@@ -34,8 +34,13 @@
 #include "io/data_frame.h"
 
 // Audio backends
+#ifdef __ANDROID__
+#include "io/audio/audio_device/oboe/oboe_recorder.h"
+#include "io/audio/audio_device/oboe/oboe_player.h"
+#else
 #include "io/audio/audio_device/port_audio/pa_recorder.h"
 #include "io/audio/audio_device/port_audio/pa_player.h"
+#endif
 
 // Service configs
 #include "services/llm/config.h"
@@ -180,10 +185,12 @@ struct ShizuruContext {
 
   // Non-owning pointers into devices owned by runtime.
   io::AudioCaptureDevice* capture = nullptr;
+  io::AudioPlayoutDevice* playout = nullptr;
   AudioLevelProbe* level_probe = nullptr;
   TranscriptProbe* transcript_probe = nullptr;
 
   std::atomic<bool> capture_running{false};
+  std::atomic<bool> playout_running{false};
 
   // Callbacks
   ShizuruOutputCallback output_cb = nullptr;
@@ -298,6 +305,9 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
 
   // ── Build RuntimeConfig ──────────────────────────────────────────────────
   runtime::RuntimeConfig rt_cfg;
+#ifdef __ANDROID__
+  rt_cfg.logger.log_file = "";  // Disable file logging on Android (read-only filesystem)
+#endif
   rt_cfg.llm.base_url  = llm_base_url;
   rt_cfg.llm.api_path  = llm_api_path;
   rt_cfg.llm.api_key   = llm_api_key;
@@ -498,8 +508,13 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   // main isolate). The token will be fetched lazily on first ASR request.
   auto token_mgr = std::make_shared<services::BaiduTokenManager>(baidu_cfg);
 
+#ifdef __ANDROID__
+  auto capture_dev = std::make_unique<io::AudioCaptureDevice>(
+      std::make_unique<io::OboeRecorder>(rec_cfg));
+#else
   auto capture_dev = std::make_unique<io::AudioCaptureDevice>(
       std::make_unique<io::PaRecorder>(rec_cfg));
+#endif
   auto capture_dump_dev = std::make_unique<io::PcmDumpDevice>("capture");
   auto vad_dev = [&] {
     io::EnergyVadConfig vad_cfg;
@@ -514,13 +529,19 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   auto asr_dev          = std::make_unique<io::BaiduAsrDevice>(baidu_cfg, token_mgr);
   auto tts_dev          = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
   auto playout_dump_dev = std::make_unique<io::PcmDumpDevice>("playout_dump");
+#ifdef __ANDROID__
+  auto playout_dev      = std::make_unique<io::AudioPlayoutDevice>(
+      std::make_unique<io::OboePlayer>(play_cfg));
+#else
   auto playout_dev      = std::make_unique<io::AudioPlayoutDevice>(
       std::make_unique<io::PaPlayer>(play_cfg));
+#endif
   auto level_probe_dev  = std::make_unique<AudioLevelProbe>();
   auto transcript_probe_dev = std::make_unique<TranscriptProbe>();
 
   // Keep non-owning raw pointers before moving into runtime.
   ctx->capture          = capture_dev.get();
+  ctx->playout          = playout_dev.get();
   ctx->level_probe      = level_probe_dev.get();
   ctx->transcript_probe = transcript_probe_dev.get();
 
@@ -649,13 +670,21 @@ int32_t shizuru_start(ShizuruHandle handle) {
   ctx->state_poll_thread = std::thread([ctx] {
     try {
       ctx->runtime->StartSession();
-      // Capture is started by StartSession() along with all other devices.
-      // Stop it immediately — the UI mic button controls capture explicitly.
-      ctx->capture->Stop();
-      ctx->capture_running.store(false);
-    } catch (const std::exception&) {
-      // Fire error state so Dart knows something went wrong.
+      // Disable voice input/output pathways by default.
+      // Users enable them via shizuru_set_voice_input / shizuru_set_voice_output.
+      ctx->runtime->SetRouteEnabled(
+          {"audio_capture", "audio_out"}, {"capture", "pass_in"}, false);
+      ctx->runtime->SetRouteEnabled(
+          {"core", "tts_out"}, {"elevenlabs_tts", "text_in"}, false);
+    } catch (const std::exception& e) {
+      // Fire error state + diagnostic message so Dart knows what went wrong.
       std::lock_guard<std::mutex> lock(ctx->cb_mutex);
+      if (ctx->diagnostic_cb) {
+        std::string msg = std::string("StartSession error: ") + e.what();
+        auto* heap = static_cast<char*>(std::malloc(msg.size() + 1));
+        std::memcpy(heap, msg.c_str(), msg.size() + 1);
+        ctx->diagnostic_cb(heap, ctx->diagnostic_user_data);
+      }
       if (ctx->state_cb) {
         ctx->state_cb(static_cast<int32_t>(core::State::kError),
                       ctx->state_user_data);
@@ -761,8 +790,15 @@ int32_t shizuru_start_capture(ShizuruHandle handle) {
 
   try {
     ctx->capture->Start();
-  } catch (const std::exception&) {
+  } catch (const std::exception& e) {
     ctx->capture_running.store(false);
+    std::lock_guard<std::mutex> lock(ctx->cb_mutex);
+    if (ctx->diagnostic_cb) {
+      std::string msg = std::string("Capture start error: ") + e.what();
+      auto* heap = static_cast<char*>(std::malloc(msg.size() + 1));
+      std::memcpy(heap, msg.c_str(), msg.size() + 1);
+      ctx->diagnostic_cb(heap, ctx->diagnostic_user_data);
+    }
     return -2;
   }
   return 0;
@@ -824,6 +860,77 @@ void shizuru_set_diagnostic_callback(ShizuruHandle handle,
   std::lock_guard<std::mutex> lock(ctx->cb_mutex);
   ctx->diagnostic_cb        = cb;
   ctx->diagnostic_user_data = user_data;
+}
+
+// ---------------------------------------------------------------------------
+// Pathway control
+// ---------------------------------------------------------------------------
+
+int32_t shizuru_set_voice_input(ShizuruHandle handle, int32_t enable) {
+  if (!handle) return -1;
+  auto* ctx = static_cast<ShizuruContext*>(handle);
+
+  // Enable/disable the entry-point route of the voice input chain.
+  ctx->runtime->SetRouteEnabled(
+      {"audio_capture", "audio_out"}, {"capture", "pass_in"}, enable != 0);
+  return 0;
+}
+
+int32_t shizuru_set_voice_output(ShizuruHandle handle, int32_t enable) {
+  if (!handle) return -1;
+  auto* ctx = static_cast<ShizuruContext*>(handle);
+
+  // Enable/disable the entry-point route of the voice output chain.
+  ctx->runtime->SetRouteEnabled(
+      {"core", "tts_out"}, {"elevenlabs_tts", "text_in"}, enable != 0);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Playout control
+// ---------------------------------------------------------------------------
+
+int32_t shizuru_start_playout(ShizuruHandle handle) {
+  if (!handle) return -1;
+  auto* ctx = static_cast<ShizuruContext*>(handle);
+
+  bool expected = false;
+  if (!ctx->playout_running.compare_exchange_strong(expected, true)) {
+    return 0;  // already running
+  }
+
+  try {
+    ctx->playout->Start();
+  } catch (const std::exception& e) {
+    ctx->playout_running.store(false);
+    std::lock_guard<std::mutex> lock(ctx->cb_mutex);
+    if (ctx->diagnostic_cb) {
+      std::string msg = std::string("Playout start error: ") + e.what();
+      auto* heap = static_cast<char*>(std::malloc(msg.size() + 1));
+      std::memcpy(heap, msg.c_str(), msg.size() + 1);
+      ctx->diagnostic_cb(heap, ctx->diagnostic_user_data);
+    }
+    return -2;
+  }
+  return 0;
+}
+
+int32_t shizuru_stop_playout(ShizuruHandle handle) {
+  if (!handle) return -1;
+  auto* ctx = static_cast<ShizuruContext*>(handle);
+
+  bool expected = true;
+  if (!ctx->playout_running.compare_exchange_strong(expected, false)) {
+    return 0;  // already stopped
+  }
+
+  try {
+    ctx->playout->Stop();
+  } catch (const std::exception& e) {
+    ctx->playout_running.store(true);
+    return -2;
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

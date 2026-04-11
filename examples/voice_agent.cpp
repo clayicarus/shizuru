@@ -147,6 +147,7 @@ int main(int argc, char* argv[]) {
   // ── Voice devices (owned by AgentRuntime via RegisterDevice) ─────────────
   auto capture = std::make_unique<io::AudioCaptureDevice>(
       std::make_unique<io::PaRecorder>(rec_cfg));
+  auto* capture_ptr = capture.get();
   auto capture_dump  = std::make_unique<io::PcmDumpDevice>("capture");
   auto vad_dump      = std::make_unique<io::PcmDumpDevice>("vad_dump");
   auto playout_dump  = std::make_unique<io::PcmDumpDevice>("playout_dump");
@@ -431,6 +432,9 @@ int main(int argc, char* argv[]) {
 
   // ── Start ─────────────────────────────────────────────────────────────────
   runtime.StartSession();
+
+  // Start audio capture explicitly (not auto-started by StartSession).
+  capture_ptr->Start();
 
   std::printf("=== Voice Agent (VAD + Baidu ASR + %s LLM + ElevenLabs TTS) ===\n",
               model.c_str());

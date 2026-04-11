@@ -36,6 +36,25 @@ class DebugPanel extends StatelessWidget {
               ),
             ),
             const Divider(),
+            // Device controls
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Row(
+                children: [
+                  const Text('Audio: ',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  TextButton(
+                    onPressed: () => agent.startAllAudio(),
+                    child: const Text('Start', style: TextStyle(fontSize: 11)),
+                  ),
+                  TextButton(
+                    onPressed: () => agent.stopAllAudio(),
+                    child: const Text('Stop', style: TextStyle(fontSize: 11)),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(),
             Expanded(
               child: ListView.builder(
                 padding: const EdgeInsets.symmetric(horizontal: 12),

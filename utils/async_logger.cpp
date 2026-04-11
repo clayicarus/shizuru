@@ -3,6 +3,9 @@
 #include <spdlog/async.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#ifdef __ANDROID__
+#include <spdlog/sinks/android_sink.h>
+#endif
 
 namespace shizuru::core {
 
@@ -22,8 +25,13 @@ void InitLogger(const LoggerConfig& config) {
   std::vector<spdlog::sink_ptr> sinks;
 
   if (config.enable_console) {
+#ifdef __ANDROID__
+    sinks.push_back(
+        std::make_shared<spdlog::sinks::android_sink_mt>("shizuru"));
+#else
     sinks.push_back(
         std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+#endif
   }
 
   if (!config.log_file.empty()) {

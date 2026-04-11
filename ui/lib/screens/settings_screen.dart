@@ -105,9 +105,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
         conv.addUserMessage(text);
       });
 
-      await agent.initialize(config);
-      setState(() => _saving = false);
-      if (mounted) Navigator.of(context).pop();
+      try {
+        await agent.initialize(config);
+        setState(() => _saving = false);
+        if (mounted) Navigator.of(context).pop();
+      } catch (e) {
+        setState(() => _saving = false);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Init failed: $e')),
+          );
+        }
+      }
     }
   }
 

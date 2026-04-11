@@ -26,6 +26,7 @@ struct PortAddressHash {
 
 struct RouteOptions {
   bool requires_control_plane = true;  // false = DMA path
+  bool enabled = true;                 // false = route exists but data is not dispatched
 };
 
 struct Route {
@@ -60,12 +61,32 @@ class RouteTable {
     if (destinations.empty()) { routes_.erase(it); }
   }
 
-  // Returns all destinations for a given source port (empty if none).
+  // Returns all enabled destinations for a given source port (empty if none).
   [[nodiscard]] std::vector<std::pair<PortAddress, RouteOptions>> Lookup(
       const PortAddress& source) const {
     auto it = routes_.find(source);
     if (it == routes_.end()) { return {}; }
-    return it->second;
+    std::vector<std::pair<PortAddress, RouteOptions>> result;
+    for (const auto& entry : it->second) {
+      if (entry.second.enabled) {
+        result.push_back(entry);
+      }
+    }
+    return result;
+  }
+
+  // Enable or disable a specific route. Returns true if the route was found.
+  bool SetRouteEnabled(const PortAddress& source, const PortAddress& destination,
+                       bool enabled) {
+    auto it = routes_.find(source);
+    if (it == routes_.end()) { return false; }
+    for (auto& [dest, opts] : it->second) {
+      if (dest == destination) {
+        opts.enabled = enabled;
+        return true;
+      }
+    }
+    return false;
   }
 
   // Returns all routes as a flat vector.

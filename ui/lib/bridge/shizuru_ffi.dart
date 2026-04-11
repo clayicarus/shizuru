@@ -23,6 +23,10 @@ typedef _SetStateCallbackNative = Void Function(
     Pointer userData);
 typedef _StartCaptureNative = Int32 Function(Pointer handle);
 typedef _StopCaptureNative = Int32 Function(Pointer handle);
+typedef _StartPlayoutNative = Int32 Function(Pointer handle);
+typedef _StopPlayoutNative = Int32 Function(Pointer handle);
+typedef _SetVoiceInputNative = Int32 Function(Pointer handle, Int32 enable);
+typedef _SetVoiceOutputNative = Int32 Function(Pointer handle, Int32 enable);
 typedef _SetAudioLevelCallbackNative = Void Function(
     Pointer handle, Pointer<NativeFunction<_AudioLevelCallbackNative>> cb,
     Pointer userData);
@@ -61,6 +65,10 @@ typedef _SetStateCallbackDart = void Function(
     Pointer userData);
 typedef _StartCaptureDart = int Function(Pointer handle);
 typedef _StopCaptureDart = int Function(Pointer handle);
+typedef _StartPlayoutDart = int Function(Pointer handle);
+typedef _StopPlayoutDart = int Function(Pointer handle);
+typedef _SetVoiceInputDart = int Function(Pointer handle, int enable);
+typedef _SetVoiceOutputDart = int Function(Pointer handle, int enable);
 typedef _SetAudioLevelCallbackDart = void Function(
     Pointer handle, Pointer<NativeFunction<_AudioLevelCallbackNative>> cb,
     Pointer userData);
@@ -88,6 +96,10 @@ class ShizuruBridge {
   late final _SetStateCallbackDart _setStateCallback;
   late final _StartCaptureDart _startCapture;
   late final _StopCaptureDart _stopCapture;
+  late final _StartPlayoutDart _startPlayout;
+  late final _StopPlayoutDart _stopPlayout;
+  late final _SetVoiceInputDart _setVoiceInput;
+  late final _SetVoiceOutputDart _setVoiceOutput;
   late final _SetAudioLevelCallbackDart _setAudioLevelCallback;
   late final _SetTranscriptCallbackDart _setTranscriptCallback;
   late final _SetDiagnosticCallbackDart _setDiagnosticCallback;
@@ -106,7 +118,7 @@ class ShizuruBridge {
   static DynamicLibrary _load() {
     if (Platform.isMacOS) {
       return DynamicLibrary.open('libshizuru_bridge.dylib');
-    } else if (Platform.isLinux) {
+    } else if (Platform.isLinux || Platform.isAndroid) {
       return DynamicLibrary.open('libshizuru_bridge.so');
     } else if (Platform.isWindows) {
       return DynamicLibrary.open('shizuru_bridge.dll');
@@ -152,6 +164,14 @@ class ShizuruBridge {
         'shizuru_start_capture');
     _stopCapture = _lib.lookupFunction<_StopCaptureNative, _StopCaptureDart>(
         'shizuru_stop_capture');
+    _startPlayout = _lib.lookupFunction<_StartPlayoutNative, _StartPlayoutDart>(
+        'shizuru_start_playout');
+    _stopPlayout = _lib.lookupFunction<_StopPlayoutNative, _StopPlayoutDart>(
+        'shizuru_stop_playout');
+    _setVoiceInput = _lib.lookupFunction<_SetVoiceInputNative, _SetVoiceInputDart>(
+        'shizuru_set_voice_input');
+    _setVoiceOutput = _lib.lookupFunction<_SetVoiceOutputNative, _SetVoiceOutputDart>(
+        'shizuru_set_voice_output');
     _setAudioLevelCallback = _lib.lookupFunction<_SetAudioLevelCallbackNative,
         _SetAudioLevelCallbackDart>('shizuru_set_audio_level_callback');
     _setTranscriptCallback = _lib.lookupFunction<_SetTranscriptCallbackNative,
@@ -214,6 +234,10 @@ class ShizuruBridge {
 
   int startCapture() => _startCapture(_handle);
   int stopCapture() => _stopCapture(_handle);
+  int startPlayout() => _startPlayout(_handle);
+  int stopPlayout() => _stopPlayout(_handle);
+  int setVoiceInput(bool enable) => _setVoiceInput(_handle, enable ? 1 : 0);
+  int setVoiceOutput(bool enable) => _setVoiceOutput(_handle, enable ? 1 : 0);
 
   void onAudioLevel(void Function(double rms) callback) {
     _audioLevelCallable?.close();

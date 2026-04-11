@@ -32,6 +32,7 @@ void AudioPlayoutDevice::OnInput(const std::string& port_name,
   }
   if (port_name != kAudioIn) { return; }
   if (frame.payload.empty()) { return; }
+  if (!player_->IsPlaying()) { return; }  // Discard when playout is stopped.
 
   int    sample_rate   = 16000;
   size_t channel_count = 1;

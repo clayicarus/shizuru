@@ -84,6 +84,8 @@
 - [ ] **TTS streaming think-tag filtering**: `TtsSegmentStrategy` currently accumulates raw streaming tokens. If the LLM produces `<think>` blocks during streaming, they will be buffered and potentially sent to TTS. The strategy should strip thinking tags from the token stream before accumulation.
 - [ ] **Markdown stripping in ResponseFilter**: LLM sometimes outputs markdown formatting (e.g., `**bold**`, `# heading`) despite system prompt instructions. Add a markdown-cleaning step to `ResponseFilter` for voice output scenarios.
 - [ ] **Tool call state notification**: When LLM returns tool_calls (not content), streaming produces no tokens and TTS is silent. Expose a callback or state event so the UI/voice layer can provide feedback (e.g., "正在查询...") during tool execution.
+- [ ] **Android SSL: replace BoringSSL hack with proper CA certificates**: Currently Android uses BoringSSL via FetchContent with a custom `FindOpenSSL.cmake` shim that tricks httplib into thinking OpenSSL is installed. SSL certificate verification is disabled (`enable_server_certificate_verification(false)`) because BoringSSL doesn't have access to the Android system CA store. For production: either (a) load Android system CA certs at runtime via JNI and pass to BoringSSL, (b) bundle a CA cert file (e.g., Mozilla's `cacert.pem`) and set `cli.set_ca_cert_path()`, or (c) replace httplib with a library that uses Android's native `HttpsURLConnection` or `conscrypt` for TLS.
+- [ ] **Android SSL: clean up CMake BoringSSL integration**: The current `services/CMakeLists.txt` writes a fake `FindOpenSSL.cmake` at configure time to satisfy httplib's `find_package(OpenSSL)`. This is fragile. Better approaches: (a) fork httplib to accept BoringSSL targets directly, (b) use a CMake overlay/wrapper that properly exports BoringSSL as OpenSSL-compatible targets, or (c) switch to a different HTTP client library that natively supports BoringSSL (e.g., curl with BoringSSL backend).
 
 ## Phase 6 — Audio Quality: 3A Processing
 
@@ -101,7 +103,9 @@ For Linux and Windows (PortAudio only), software 3A remains necessary.
 
 ## Phase 7 — Platform Audio Backends
 
-- [ ] Android: Oboe backend (`io/audio/audio_device/oboe/`) with hardware 3A enabled
+- [x] Android: Oboe backend (`io/audio/audio_device/oboe/`) — OboeRecorder + OboePlayer
+- [ ] Android: audio routing control (speakerphone, earpiece, headset) should be encapsulated in the Oboe audio device layer via JNI, not in the Flutter UI. Currently speakerphone is toggled from Dart via MethodChannel as a workaround.
+- [ ] **Device Group abstraction**: Introduce a device group concept in AgentRuntime to manage logical chains of devices (e.g., "voice_input" = capture + vad + asr, "voice_output" = tts + playout_dump + playout). StartGroup/StopGroup controls all devices in the chain. Needs reference counting for devices shared across groups — a device should only Stop when all groups referencing it have stopped. Currently managed ad-hoc in the bridge layer.
 - [ ] iOS: CoreAudio backend (`io/audio/audio_device/core_audio/`) with hardware 3A via AVAudioSession
 - [ ] Windows: WASAPI backend (`io/audio/audio_device/wasapi/`)
 
@@ -122,3 +126,10 @@ For Linux and Windows (PortAudio only), software 3A remains necessary.
 - [ ] CI: GitHub Actions on macOS, Linux, Windows
 - [ ] VAD: upgrade to WebRTC VAD or Silero for production accuracy
 - [ ] Control plane: interrupt and reroute commands from controller to voice devices
+
+## Future Exploration
+
+- [ ] **Android audio focus management**: Implement `AudioManager.OnAudioFocusChangeListener` and Oboe's `onErrorAfterClose` callback to automatically detect stream disconnection and recover. Currently requires manual restart via debug panel.
+- [ ] **Replace httplib with libcurl**: curl natively supports BoringSSL, Android system CA certificates, and HTTP/2. Would eliminate the fake `FindOpenSSL.cmake` hack and SSL certificate verification workaround on Android.
+- [ ] **VAD: evaluate open-source models**: Consider replacing energy-based VAD with model-based alternatives (Silero VAD, WebRTC VAD, or similar) for better accuracy in noisy environments and cross-language support.
+- [ ] **On-device LLM inference** (low priority): Explore running lightweight models locally (e.g., via llama.cpp, MLC-LLM, or MediaPipe) for latency-sensitive tasks like observation filtering or TTS segmentation, reducing API dependency and network latency.
