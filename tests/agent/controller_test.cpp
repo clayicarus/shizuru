@@ -86,7 +86,7 @@ class ControllerTest : public ::testing::Test {
     cfg.max_turns = 20;
     cfg.max_retries = 3;
     cfg.retry_base_delay = std::chrono::milliseconds(1);
-    cfg.wall_clock_timeout = std::chrono::seconds(5);
+    cfg.turn_timeout = std::chrono::seconds(5);
     cfg.token_budget = 100000;
     cfg.action_count_limit = 50;
     return cfg;
@@ -477,18 +477,18 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
 }
 
 // ---------------------------------------------------------------------------
-// Wall-clock timeout — LLM sleeps past the timeout so HandleResponding fires it
+// Turn timeout — LLM sleeps past the timeout so HandleResponding fires it
 // ---------------------------------------------------------------------------
-TEST_F(ControllerTest, WallClockTimeout) {
+TEST_F(ControllerTest, TurnTimeout) {
   ControllerConfig cfg = DefaultConfig();
-  cfg.wall_clock_timeout = std::chrono::seconds(1);
+  cfg.turn_timeout = std::chrono::seconds(1);
   cfg.max_turns = 1000;
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
 
   auto ctrl = MakeController(cfg);
 
-  // LLM sleeps 1.1s — longer than wall_clock_timeout — so the wall-clock
+  // LLM sleeps 1.1s — longer than turn_timeout — so the turn-timeout
   // check in HandleResponding fires after the first response is delivered.
   llm_raw_->submit_fn = [](const ContextWindow&) -> LlmResult {
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
@@ -522,7 +522,81 @@ TEST_F(ControllerTest, WallClockTimeout) {
   }, 2000);
 
   ctrl->Shutdown();
-  EXPECT_TRUE(found_stop) << "kStopConditionMet never fired after wall-clock timeout";
+  EXPECT_TRUE(found_stop) << "kStopConditionMet never fired after turn timeout";
+}
+
+// ---------------------------------------------------------------------------
+// Idle can be reawakened by a new user message after StopConditionMet.
+// ---------------------------------------------------------------------------
+TEST_F(ControllerTest, IdleStateCanWakeOnNewUserObservation) {
+  ControllerConfig cfg = DefaultConfig();
+  cfg.max_turns = 1;
+  cfg.token_budget = 1000000;
+  cfg.action_count_limit = 1000;
+  cfg.turn_timeout = std::chrono::seconds(30);
+
+  auto llm = std::make_unique<testing::MockLlmClient>();
+  auto* llm_ptr = llm.get();
+
+  std::atomic<int> llm_call_count{0};
+  llm_ptr->submit_fn = [&](const ContextWindow&) -> LlmResult {
+    const int call = llm_call_count.fetch_add(1);
+    LlmResult r;
+    r.candidate.type = ActionType::kResponse;
+    r.candidate.response_text = call == 0 ? "first" : "second";
+    r.prompt_tokens = 1;
+    r.completion_tokens = 1;
+    return r;
+  };
+
+  Controller ctrl("test-session", cfg, std::move(llm), nullptr, nullptr,
+                  *context_, *policy_);
+
+  std::mutex mu;
+  std::vector<std::tuple<State, State, Event>> transitions;
+  std::vector<std::string> responses;
+  ctrl.OnTransition([&](State from, State to, Event event) {
+    std::lock_guard<std::mutex> lock(mu);
+    transitions.push_back({from, to, event});
+  });
+  ctrl.OnResponse([&](const ActionCandidate& ac) {
+    std::lock_guard<std::mutex> lock(mu);
+    responses.push_back(ac.response_text);
+  });
+
+  ctrl.Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  ctrl.EnqueueObservation(MakeUserObs("first"));
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kIdle; }));
+
+  ctrl.EnqueueObservation(MakeUserObs("second"));
+  ASSERT_TRUE(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return responses.size() >= 2;
+  }));
+
+  ctrl.Shutdown();
+
+  std::lock_guard<std::mutex> lock(mu);
+  ASSERT_EQ(responses.size(), 2u);
+  EXPECT_EQ(responses[0], "first");
+  EXPECT_EQ(responses[1], "second");
+
+  bool found_idle_restart = false;
+  int user_observation_count = 0;
+  for (const auto& [from, to, ev] : transitions) {
+    if (from == State::kIdle && to == State::kListening &&
+        ev == Event::kStart) {
+      found_idle_restart = true;
+    }
+    if (from == State::kListening && to == State::kThinking &&
+        ev == Event::kUserObservation) {
+      ++user_observation_count;
+    }
+  }
+  EXPECT_TRUE(found_idle_restart);
+  EXPECT_GE(user_observation_count, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -547,11 +621,16 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
   auto* llm_ptr = llm.get();
 
   std::atomic<int> llm_call_count{0};
+  std::atomic<bool> first_call_entered{false};
   llm_ptr->submit_fn = [&](const ContextWindow&) -> LlmResult {
     int c = llm_call_count.fetch_add(1);
     LlmResult r;
     if (c == 0) {
-      r.candidate.type = ActionType::kContinue;
+      // Signal that we've entered the LLM call, then block until cancelled.
+      first_call_entered.store(true);
+      llm_ptr->WaitForCancel(2000);
+      r.candidate.type = ActionType::kResponse;
+      r.candidate.response_text = "cancelled";
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "done";
@@ -575,10 +654,11 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
 
   ctrl.EnqueueObservation(MakeUserObs("first"));
 
-  // Wait for first LLM call (kContinue) to complete — controller re-enters Thinking.
-  ASSERT_TRUE(WaitFor([&] { return llm_call_count.load() >= 1; }));
+  // Wait for the first LLM call to start (loop thread is now blocked in submit).
+  ASSERT_TRUE(WaitFor([&] { return first_call_entered.load(); }));
 
-  ctrl.EnqueueObservation(MakeUserObs("interrupt!"));
+  // Call Interrupt() which sets interrupt_requested_ and calls Cancel().
+  ctrl.Interrupt();
 
   // Wait for interrupt diagnostic.
   ASSERT_TRUE(WaitFor([&] {
@@ -592,7 +672,7 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
 
   ctrl.Shutdown();
 
-  EXPECT_GE(llm_ptr->cancel_count, 1);
+  EXPECT_EQ(llm_call_count.load(), 1);
 
   bool found_interrupt = false;
   {
@@ -606,11 +686,18 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
 
   auto entries = memory2.GetAll("test-session");
   bool found_memory = false;
+  bool found_empty_user_message = false;
   for (const auto& e : entries) {
     if (e.content.find("interrupted") != std::string::npos ||
-        e.content.find("Interrupt") != std::string::npos) { found_memory = true; break; }
+        e.content.find("Interrupt") != std::string::npos) {
+      found_memory = true;
+    }
+    if (e.role == "user" && e.content.empty()) {
+      found_empty_user_message = true;
+    }
   }
   EXPECT_TRUE(found_memory);
+  EXPECT_FALSE(found_empty_user_message);
 }
 
 // ---------------------------------------------------------------------------

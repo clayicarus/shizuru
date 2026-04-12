@@ -80,3 +80,37 @@ target_include_directories(strategy_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mocks
 )
 add_test(NAME strategy_test COMMAND strategy_test)
+
+# Controller bug condition exploration tests (Bug 1 + Bug 2)
+add_executable(controller_bug_condition_test
+  controller_bug_condition_test.cpp
+)
+target_link_libraries(controller_bug_condition_test
+  PRIVATE shizuru_core
+  PRIVATE GTest::gtest_main
+  PRIVATE rapidcheck_gtest
+)
+target_include_directories(controller_bug_condition_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mocks
+)
+add_test(NAME controller_bug_condition_test COMMAND controller_bug_condition_test)
+set_tests_properties(controller_bug_condition_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=5")
+
+# Controller preservation tests (must pass on unfixed code)
+add_executable(controller_preservation_test
+  controller_preservation_test.cpp
+)
+target_link_libraries(controller_preservation_test
+  PRIVATE shizuru_runtime
+  PRIVATE GTest::gtest_main
+  PRIVATE rapidcheck_gtest
+)
+target_include_directories(controller_preservation_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mocks
+  PRIVATE ${CMAKE_SOURCE_DIR}
+  PRIVATE ${CMAKE_SOURCE_DIR}/tests/runtime
+)
+add_test(NAME controller_preservation_test COMMAND controller_preservation_test)
+set_tests_properties(controller_preservation_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=5")

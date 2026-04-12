@@ -101,6 +101,8 @@ void Controller::EnqueueObservation(Observation obs) {
 // Start the reasoning loop on its own thread.
 void Controller::Start() {
   session_start_ = std::chrono::steady_clock::now();
+  last_activity_ = session_start_;
+  conversation_active_ = false;
   TryTransition(Event::kStart);
   loop_thread_ = std::thread(&Controller::RunLoop, this);
 }
@@ -164,6 +166,11 @@ bool Controller::TryTransition(Event event) {
   State old_state = current;
   State new_state = it->second;
   state_.store(new_state);
+
+  if (event == Event::kStopConditionMet && new_state == State::kIdle) {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    observation_queue_.clear();
+  }
 
   // Fire on-exit callbacks for old_state, then on-enter callbacks for new_state.
   for (const auto& cb : transition_callbacks_) {
@@ -237,6 +244,9 @@ void Controller::RunLoop() {
           if (accepted) {
             LOG_INFO("[{}] User message received (timeout): \"{}\"",
                      MODULE_NAME, timeout_obs->content);
+            session_start_ = std::chrono::steady_clock::now();
+            last_activity_ = session_start_;
+            conversation_active_ = true;
             TryTransition(Event::kUserObservation);
             lock.unlock();
             try {
@@ -258,9 +268,20 @@ void Controller::RunLoop() {
       observation_queue_.pop_front();
     }
 
-    // Check for interrupt: if we're in Thinking/Routing/Acting and get a user
-    // observation, handle the interrupt and re-enqueue the observation.
+    // Internal interrupt event: cancel the in-flight turn without creating
+    // a synthetic user message or re-entering the loop with empty content.
     State current = state_.load();
+    if (obs.type == ObservationType::kInterruption) {
+      if (current == State::kThinking || current == State::kRouting ||
+          current == State::kActing) {
+        HandleInterrupt();
+      }
+      continue;
+    }
+
+    // Check for barge-in: if we're in Thinking/Routing/Acting and receive a
+    // real user observation, interrupt the current turn and reprocess the
+    // actual observation after transitioning back to Listening.
     if (obs.type == ObservationType::kUserMessage &&
         (current == State::kThinking || current == State::kRouting ||
          current == State::kActing)) {
@@ -277,9 +298,27 @@ void Controller::RunLoop() {
       continue;
     }
 
-    // Normal flow: if in Listening and got user observation.
-    if (current == State::kListening &&
+    // Normal flow: if in Listening/Idle and got user observation.
+    if ((current == State::kListening || current == State::kIdle) &&
         obs.type == ObservationType::kUserMessage) {
+      const auto now = std::chrono::steady_clock::now();
+      const bool reset_window =
+          current == State::kIdle ||
+          !conversation_active_ ||
+          (now - last_activity_ >= config_.conversation_idle_timeout);
+
+      if (reset_window) {
+        ResetBudgetWindow();
+        conversation_active_ = true;
+      }
+      last_activity_ = now;
+
+      if (current == State::kIdle) {
+        if (!TryTransition(Event::kStart)) {
+          continue;
+        }
+      }
+
       // Stage 1: Aggregation (endpointing).
       auto aggregated = observation_aggregator_->Feed(obs);
       if (!aggregated.has_value()) {
@@ -304,6 +343,9 @@ void Controller::RunLoop() {
 
       LOG_INFO("[{}] User message received: \"{}\"",
                MODULE_NAME, aggregated->content);
+      session_start_ = std::chrono::steady_clock::now();
+      last_activity_ = session_start_;
+      conversation_active_ = true;
       TryTransition(Event::kUserObservation);
       // Drive the thinking→routing→acting/responding cycle.
       try {
@@ -343,6 +385,13 @@ void Controller::HandleThinking(const Observation& obs) {
     return;
   }
 
+  // An interrupt may land after we enter kThinking but before the LLM call
+  // starts. Bail out here so the queued interruption can be processed on the
+  // next RunLoop iteration without issuing a stale request.
+  if (interrupt_requested_.load()) {
+    return;
+  }
+
   // Build context window.
   auto window = context_.BuildContext(session_id_, obs);
   first_token_logged_ = false;  // Reset for this turn's latency measurement.
@@ -362,6 +411,8 @@ void Controller::HandleThinking(const Observation& obs) {
         // If a TTS segment strategy is configured, also buffer tokens
         // and emit TTS-ready frames when the strategy signals readiness.
         result = llm_->SubmitStreaming(window, [this](const std::string& token) {
+          // Bail early if interrupt was requested.
+          if (interrupt_requested_.load()) { return; }
           // Log the first streaming token for latency measurement.
           if (!first_token_logged_) {
             LOG_INFO("[{}] LLM first token received", MODULE_NAME);
@@ -416,12 +467,25 @@ void Controller::HandleThinking(const Observation& obs) {
             emit_frame_("tts_out", std::move(frame));
           }
         }
+        // Check if interrupt was requested during streaming — don't route partial result.
+        if (interrupt_requested_.load()) {
+          return;
+        }
       } else {
         result = llm_->Submit(window);
+        // Check if interrupt was requested during submit — don't route partial result.
+        if (interrupt_requested_.load()) {
+          return;
+        }
       }
       success = true;
       break;
     } catch (...) {
+      // If the exception was caused by an interrupt cancellation, bail out
+      // immediately — RunLoop will pick up the enqueued interrupt observation.
+      if (interrupt_requested_.load()) {
+        return;
+      }
       if (attempt == config_.max_retries) {
         LOG_ERROR("[{}] LLM submit failed after {} attempts",
                   MODULE_NAME, config_.max_retries + 1);
@@ -530,7 +594,13 @@ void Controller::HandleRouting(ActionCandidate ac) {
     case ActionType::kContinue:
       LOG_DEBUG("[{}] Routing: continue (no action, no response)", MODULE_NAME);
       TryTransition(Event::kRouteToContinue);
-      // Will re-enter thinking on next loop iteration.
+      {
+        Observation continuation;
+        continuation.type      = ObservationType::kContinuation;
+        continuation.source    = "controller";
+        continuation.timestamp = std::chrono::steady_clock::now();
+        HandleThinking(continuation);
+      }
       break;
   }
 }
@@ -623,6 +693,8 @@ void Controller::HandleActingResult(const Observation& obs) {
   result_entry.tool_call_id = tool_call_id;
   result_entry.timestamp   = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, result_entry);
+  last_activity_ = result_entry.timestamp;
+  conversation_active_ = true;
 
   LOG_INFO("[{}] Tool result received: id=\"{}\" success={} ({}/{})",
            MODULE_NAME, tool_call_id, success,
@@ -685,13 +757,15 @@ void Controller::HandleResponding(ActionCandidate ac) {
   response_entry.content = ac.response_text;
   response_entry.timestamp = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, response_entry);
+  last_activity_ = response_entry.timestamp;
+  conversation_active_ = true;
 
   // Check stop conditions.
   if (turn_count_ >= config_.max_turns ||
       total_prompt_tokens_ + total_completion_tokens_ >= config_.token_budget ||
       action_count_ >= config_.action_count_limit ||
       std::chrono::steady_clock::now() - session_start_ >=
-          config_.wall_clock_timeout) {
+          config_.turn_timeout) {
     LOG_INFO("[{}] Stop condition met: turns={}, tokens={}, actions={}",
              MODULE_NAME, turn_count_,
              total_prompt_tokens_ + total_completion_tokens_,
@@ -721,15 +795,33 @@ bool Controller::CheckBudget() {
     return true;
   }
   if (std::chrono::steady_clock::now() - session_start_ >=
-      config_.wall_clock_timeout) {
-    EmitDiagnostic("Budget exceeded: wall-clock timeout");
+      config_.turn_timeout) {
+    EmitDiagnostic("Budget exceeded: turn timeout");
     return true;
   }
   return false;
 }
 
+void Controller::ResetBudgetWindow() {
+  turn_count_ = 0;
+  total_prompt_tokens_ = 0;
+  total_completion_tokens_ = 0;
+  action_count_ = 0;
+  first_token_logged_ = false;
+  session_start_ = std::chrono::steady_clock::now();
+  interrupt_requested_.store(false);
+  pending_action_ = ActionCandidate{};
+  pending_tool_calls_.clear();
+  pending_results_.clear();
+  observation_aggregator_->Reset();
+  if (tts_segment_) {
+    tts_segment_->Reset();
+  }
+}
+
 // Cancel in-progress work and transition to Listening.
 void Controller::HandleInterrupt() {
+  interrupt_requested_.store(false);
   LOG_WARN("[{}] Interrupt received in state {}", MODULE_NAME, StateName(state_.load()));
   llm_->Cancel();
   if (cancel_) cancel_();
@@ -749,6 +841,8 @@ void Controller::HandleInterrupt() {
   interrupt_entry.content = "Turn interrupted";
   interrupt_entry.timestamp = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, interrupt_entry);
+  last_activity_ = interrupt_entry.timestamp;
+  conversation_active_ = true;
 
   TryTransition(Event::kInterrupt);  // → Listening
 
@@ -756,16 +850,19 @@ void Controller::HandleInterrupt() {
                  std::to_string(static_cast<int>(state_.load())));
 }
 
-// Public thread-safe interrupt — enqueues a synthetic kUserMessage so RunLoop
-// picks it up and calls HandleInterrupt() on the loop thread.
+// Public thread-safe interrupt — requests immediate LLM cancellation and
+// enqueues an internal interruption event so RunLoop performs the state
+// transition on the loop thread.
 void Controller::Interrupt() {
   State current = state_.load();
   if (current != State::kThinking && current != State::kRouting &&
       current != State::kActing) {
     return;  // Not in an interruptible state — no-op.
   }
+  interrupt_requested_.store(true);
+  llm_->Cancel();
   Observation obs;
-  obs.type      = ObservationType::kUserMessage;
+  obs.type      = ObservationType::kInterruption;
   obs.content   = "";
   obs.source    = "interrupt";
   obs.timestamp = std::chrono::steady_clock::now();

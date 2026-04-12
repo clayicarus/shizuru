@@ -51,7 +51,7 @@ std::unique_ptr<CoreDevice> MakeCoreDevice(
   ctrl_cfg.max_turns = 5;
   ctrl_cfg.max_retries = 0;
   ctrl_cfg.retry_base_delay = std::chrono::milliseconds(1);
-  ctrl_cfg.wall_clock_timeout = std::chrono::seconds(5);
+  ctrl_cfg.turn_timeout = std::chrono::seconds(5);
   ctrl_cfg.token_budget = 100000;
   ctrl_cfg.action_count_limit = 10;
 

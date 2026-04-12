@@ -111,6 +111,7 @@ class Controller {
   void HandleActingResult(const Observation& obs); // Process tool result
   void HandleResponding(ActionCandidate ac); // Deliver response
   bool CheckBudget();                        // Enforce guardrails
+  void ResetBudgetWindow();                  // Re-arm counters after Idle
   void HandleInterrupt();                    // Cancel in-progress work
   void EmitDiagnostic(const std::string& message); // Notify diagnostic callbacks
 
@@ -154,10 +155,13 @@ class Controller {
   int action_count_ = 0;
   bool first_token_logged_ = false;
   std::chrono::steady_clock::time_point session_start_;
+  std::chrono::steady_clock::time_point last_activity_;
+  bool conversation_active_ = false;
 
   // Loop thread
   std::thread loop_thread_;
   std::atomic<bool> shutdown_requested_{false};
+  std::atomic<bool> interrupt_requested_{false};
 
   // Callbacks (must be registered before Start())
   std::mutex callbacks_mutex_;

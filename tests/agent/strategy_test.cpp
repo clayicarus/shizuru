@@ -55,7 +55,7 @@ ControllerConfig DefaultConfig() {
   cfg.max_turns = 20;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.wall_clock_timeout = std::chrono::seconds(5);
+  cfg.turn_timeout = std::chrono::seconds(5);
   cfg.token_budget = 100000;
   cfg.action_count_limit = 50;
   return cfg;

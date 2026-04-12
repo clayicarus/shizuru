@@ -75,7 +75,7 @@ rc::Gen<ControllerConfig> genControllerConfig() {
       rc::gen::set(&ControllerConfig::max_retries, rc::gen::inRange(0, 5)),
       rc::gen::set(&ControllerConfig::retry_base_delay,
                    rc::gen::just(std::chrono::milliseconds(1))),
-      rc::gen::set(&ControllerConfig::wall_clock_timeout,
+      rc::gen::set(&ControllerConfig::turn_timeout,
                    rc::gen::just(std::chrono::seconds(5))),
       rc::gen::set(&ControllerConfig::token_budget,
                    rc::gen::inRange(1000, 100000)),
@@ -277,7 +277,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_action_routing_by_type, (void)) {
   cfg.max_turns = 5;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.wall_clock_timeout = std::chrono::seconds(5);
+  cfg.turn_timeout = std::chrono::seconds(5);
   cfg.token_budget = 100000;
   cfg.action_count_limit = 100;
 
@@ -410,7 +410,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_observation_fifo, (void)) {
   ControllerConfig cfg;
   cfg.max_turns = 100;
   cfg.max_retries = 0;
-  cfg.wall_clock_timeout = std::chrono::seconds(5);
+  cfg.turn_timeout = std::chrono::seconds(5);
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
   TestHarness h(cfg);
@@ -470,7 +470,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_turn_count_stop, (void)) {
   cfg.max_turns = max_turns;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.wall_clock_timeout = std::chrono::seconds(10);
+  cfg.turn_timeout = std::chrono::seconds(10);
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
 
@@ -553,7 +553,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_llm_retry_backoff, (void)) {
   cfg.max_turns = 10;
   cfg.max_retries = max_retries;
   cfg.retry_base_delay = std::chrono::milliseconds(5);
-  cfg.wall_clock_timeout = std::chrono::seconds(10);
+  cfg.turn_timeout = std::chrono::seconds(10);
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
   TestHarness h(cfg);
@@ -617,7 +617,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_io_failure_feeds_thinking, (void)) {
   cfg.max_turns = 10;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.wall_clock_timeout = std::chrono::seconds(5);
+  cfg.turn_timeout = std::chrono::seconds(5);
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
 
@@ -745,7 +745,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_budget_guardrails, (void)) {
   cfg.max_turns = 1000;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.wall_clock_timeout = std::chrono::seconds(10);
+  cfg.turn_timeout = std::chrono::seconds(10);
   cfg.token_budget = token_budget;
   cfg.action_count_limit = 1000;
 
@@ -827,7 +827,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
   cfg.max_turns = 100;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.wall_clock_timeout = std::chrono::seconds(10);
+  cfg.turn_timeout = std::chrono::seconds(10);
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
 
@@ -846,11 +846,16 @@ RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
   auto* llm_ptr = llm.get();
 
   std::atomic<int> llm_call_count{0};
+  std::atomic<bool> first_call_entered{false};
   llm_ptr->submit_fn = [&](const ContextWindow&) -> LlmResult {
     int c = llm_call_count.fetch_add(1);
     LlmResult r;
     if (c == 0) {
-      r.candidate.type = ActionType::kContinue;
+      // Signal that we've entered the LLM call, then block until cancelled.
+      first_call_entered.store(true);
+      llm_ptr->WaitForCancel(2000);
+      r.candidate.type = ActionType::kResponse;
+      r.candidate.response_text = "cancelled";
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "done";
@@ -880,15 +885,11 @@ RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
   obs1.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs1));
 
-  // Wait for first LLM call (kContinue) before sending interrupt.
-  RC_ASSERT(WaitFor([&] { return llm_call_count.load() >= 1; }));
+  // Wait for the first LLM call to start (loop thread is now blocked in submit).
+  RC_ASSERT(WaitFor([&] { return first_call_entered.load(); }));
 
-  Observation obs2;
-  obs2.type = ObservationType::kUserMessage;
-  obs2.content = "interrupt!";
-  obs2.source = "user";
-  obs2.timestamp = std::chrono::steady_clock::now();
-  ctrl.EnqueueObservation(std::move(obs2));
+  // Call Interrupt() which sets interrupt_requested_ and calls Cancel().
+  ctrl.Interrupt();
 
   // Wait for interrupt diagnostic.
   RC_ASSERT(WaitFor([&] {
@@ -921,14 +922,18 @@ RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
 
   auto entries = memory_store.GetAll("test-session");
   bool found_interrupt_memory = false;
+  bool found_empty_user_message = false;
   for (const auto& e : entries) {
     if (e.content.find("interrupted") != std::string::npos ||
         e.content.find("Interrupt") != std::string::npos) {
       found_interrupt_memory = true;
-      break;
+    }
+    if (e.role == "user" && e.content.empty()) {
+      found_empty_user_message = true;
     }
   }
   RC_ASSERT(found_interrupt_memory);
+  RC_ASSERT(!found_empty_user_message);
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,7 +1022,7 @@ RC_GTEST_PROP(ControllerPropTest,
   cfg.max_turns = 10;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.wall_clock_timeout = std::chrono::seconds(5);
+  cfg.turn_timeout = std::chrono::seconds(5);
   cfg.token_budget = 100000;
   cfg.action_count_limit = 100;
 
@@ -1157,7 +1162,7 @@ RC_GTEST_PROP(ControllerPropTest,
   cfg.max_turns = 10;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.wall_clock_timeout = std::chrono::seconds(5);
+  cfg.turn_timeout = std::chrono::seconds(5);
   cfg.token_budget = 100000;
   cfg.action_count_limit = 100;
 
@@ -1270,7 +1275,7 @@ RC_GTEST_PROP(ControllerPropTest,
   cfg.max_turns = 10;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.wall_clock_timeout = std::chrono::seconds(5);
+  cfg.turn_timeout = std::chrono::seconds(5);
   cfg.token_budget = 100000;
   cfg.action_count_limit = 100;
 
