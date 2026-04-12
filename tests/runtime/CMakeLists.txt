@@ -4,7 +4,6 @@ include(FetchContent)
 FetchContent_Declare(
   googletest
   URL      https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
@@ -14,7 +13,6 @@ set(RC_ENABLE_GTEST ON CACHE BOOL "Build RapidCheck Google Test integration" FOR
 FetchContent_Declare(
   rapidcheck
   URL      https://github.com/emil-e/rapidcheck/archive/refs/heads/master.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(rapidcheck)
 
@@ -50,6 +48,14 @@ target_include_directories(core_device_test
 )
 add_test(NAME core_device_test COMMAND core_device_test)
 set_tests_properties(core_device_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=10")
+
+# httplib is used only for the mock HTTP server in tests, not as a production dependency.
+FetchContent_Declare(
+  httplib
+  URL      https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.1.tar.gz
+)
+set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(httplib)
 
 # AgentRuntime tests (unit + property)
 add_executable(agent_runtime_test

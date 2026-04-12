@@ -4,7 +4,6 @@ include(FetchContent)
 FetchContent_Declare(
   googletest
   URL      https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
@@ -30,6 +29,14 @@ target_link_libraries(tool_dispatcher_test
 add_test(NAME tool_dispatcher_test COMMAND tool_dispatcher_test)
 
 # OpenAI client tests (uses httplib::Server as mock)
+# httplib is used only for the mock HTTP server, not as a production dependency.
+FetchContent_Declare(
+  httplib
+  URL      https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.1.tar.gz
+)
+set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(httplib)
+
 add_executable(openai_client_test
   openai_client_test.cpp
 )
@@ -48,7 +55,6 @@ set(RC_ENABLE_GTEST ON CACHE BOOL "Build RapidCheck Google Test integration" FOR
 FetchContent_Declare(
   rapidcheck
   URL      https://github.com/emil-e/rapidcheck/archive/refs/heads/master.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(rapidcheck)
 

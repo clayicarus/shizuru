@@ -4,7 +4,6 @@ include(FetchContent)
 FetchContent_Declare(
   googletest
   URL      https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
@@ -14,7 +13,6 @@ set(RC_ENABLE_GTEST ON CACHE BOOL "Build RapidCheck Google Test integration" FOR
 FetchContent_Declare(
   rapidcheck
   URL      https://github.com/emil-e/rapidcheck/archive/refs/heads/master.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(rapidcheck)
 

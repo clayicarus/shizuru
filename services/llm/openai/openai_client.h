@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <memory>
 #include <mutex>
 #include <string>
 
@@ -11,7 +10,7 @@
 namespace shizuru::services {
 
 // OpenAI compatible LLM client implementing core::LlmClient.
-// Uses HTTP + SSE streaming via cpp-httplib.
+// Uses HTTP + SSE streaming via libcurl.
 class OpenAiClient : public core::LlmClient {
  public:
   explicit OpenAiClient(OpenAiConfig config);
@@ -33,7 +32,7 @@ class OpenAiClient : public core::LlmClient {
   // Build the Authorization header value.
   std::string AuthHeader() const;
 
-  // Parse host and port from base_url for httplib.
+  // Return the base URL (scheme + host).
   std::string SchemeHost() const;
 
   OpenAiConfig config_;

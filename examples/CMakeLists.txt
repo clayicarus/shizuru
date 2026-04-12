@@ -1,3 +1,13 @@
+include(FetchContent)
+
+# httplib is used only for the mock HTTP server in tool_call example.
+FetchContent_Declare(
+  httplib
+  URL      https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.1.tar.gz
+)
+set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(httplib)
+
 # Audio loopback example (requires PortAudio hardware)
 add_executable(audio_loopback audio_loopback.cpp)
 target_link_libraries(audio_loopback PRIVATE shizuru_audio)

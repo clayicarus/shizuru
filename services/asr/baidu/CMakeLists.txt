@@ -11,5 +11,5 @@ target_link_libraries(shizuru_asr_baidu
   PUBLIC  shizuru_baidu_utils
   PUBLIC  nlohmann_json::nlohmann_json
   PRIVATE shizuru_utils
-  PRIVATE httplib::httplib
+  PRIVATE CURL::libcurl
 )

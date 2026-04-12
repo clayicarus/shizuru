@@ -10,5 +10,5 @@ target_include_directories(shizuru_tts_baidu
 target_link_libraries(shizuru_tts_baidu
   PUBLIC  shizuru_baidu_utils
   PRIVATE shizuru_utils
-  PRIVATE httplib::httplib
+  PRIVATE CURL::libcurl
 )

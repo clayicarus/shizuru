@@ -262,27 +262,45 @@ void AgentRuntime::OnDiagnostic(DiagnosticCallback cb) {
 }
 
 void AgentRuntime::Shutdown() {
-  std::unique_lock<std::shared_mutex> lock(devices_mutex_);
-  if (devices_.empty()) { return; }
-
-  // Stop devices in reverse registration order (Requirement 8.6).
-  for (auto it = registration_order_.rbegin();
-       it != registration_order_.rend(); ++it) {
-    auto dev_it = devices_.find(*it);
-    if (dev_it != devices_.end()) {
-      try {
-        dev_it->second->Stop();
-      } catch (const std::exception& e) {
-        LOG_ERROR("[{}] Error stopping device {}: {}", MODULE_NAME, *it,
-                  e.what());
+  // Collect devices to stop while holding the lock, then release the lock
+  // before calling Stop().  This avoids deadlock: device callbacks (e.g.
+  // PortAudio) may call DispatchFrame which acquires a shared (read) lock
+  // on devices_mutex_.  If we held a unique (write) lock while calling
+  // Stop(), the callback thread would block on the read lock, and Stop()
+  // would block waiting for the callback thread — classic deadlock.
+  std::vector<std::pair<std::string, io::IoDevice*>> to_stop;
+  {
+    std::unique_lock<std::shared_mutex> lock(devices_mutex_);
+    if (devices_.empty()) { return; }
+    // Collect in reverse registration order (Requirement 8.6).
+    for (auto it = registration_order_.rbegin();
+         it != registration_order_.rend(); ++it) {
+      auto dev_it = devices_.find(*it);
+      if (dev_it != devices_.end()) {
+        to_stop.push_back({dev_it->first, dev_it->second.get()});
       }
     }
   }
 
-  devices_.clear();
-  registration_order_.clear();
-  route_table_ = RouteTable{};
-  core_device_ = nullptr;
+  // Stop devices without holding the lock.
+  for (const auto& entry : to_stop) {
+    try {
+      entry.second->Stop();
+    } catch (const std::exception& e) {
+      LOG_ERROR("[{}] Error stopping device {}: {}", MODULE_NAME, entry.first,
+                e.what());
+    }
+  }
+  to_stop.clear();
+
+  // Re-acquire the lock to clean up state.
+  {
+    std::unique_lock<std::shared_mutex> lock(devices_mutex_);
+    devices_.clear();
+    registration_order_.clear();
+    route_table_ = RouteTable{};
+    core_device_ = nullptr;
+  }
 
   LOG_INFO("[{}] Session shut down", MODULE_NAME);
 }

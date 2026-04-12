@@ -2,10 +2,10 @@
 
 #include <stdexcept>
 
-#include <httplib.h>
 #include <nlohmann/json.hpp>
 
 #include "async_logger.h"
+#include "services/utils/curl_helper.h"
 
 namespace shizuru::services {
 
@@ -26,34 +26,30 @@ std::string BaiduTokenManager::GetToken() {
 void BaiduTokenManager::Refresh() {
   LOG_INFO("[{}] Refreshing access token", MODULE_NAME);
 
-  httplib::Client cli(config_.token_url);
-  cli.set_connection_timeout(config_.connect_timeout);
-  cli.set_read_timeout(config_.read_timeout);
+  std::string url = config_.token_url + config_.token_path;
 
   std::string body = "grant_type=client_credentials"
                      "&client_id=" + config_.api_key +
                      "&client_secret=" + config_.secret_key;
 
-  auto res = cli.Post(config_.token_path, body,
-                      "application/x-www-form-urlencoded");
+  auto res = CurlPost(
+      url,
+      {"Content-Type: application/x-www-form-urlencoded"},
+      body,
+      config_.connect_timeout,
+      config_.read_timeout);
 
-  if (!res) {
-    LOG_ERROR("[{}] Token request failed: no response", MODULE_NAME);
-    throw std::runtime_error("Baidu token request failed: " +
-                             httplib::to_string(res.error()));
-  }
-
-  if (res->status != 200) {
+  if (res.status_code != 200) {
     LOG_ERROR("[{}] Token request status {}: {}", MODULE_NAME,
-              res->status, res->body);
+              res.status_code, res.body);
     throw std::runtime_error("Baidu token API returned status " +
-                             std::to_string(res->status) + ": " + res->body);
+                             std::to_string(res.status_code) + ": " + res.body);
   }
 
-  nlohmann::json j = nlohmann::json::parse(res->body);
+  nlohmann::json j = nlohmann::json::parse(res.body);
 
   if (!j.contains("access_token") || !j["access_token"].is_string()) {
-    LOG_ERROR("[{}] Invalid token response: {}", MODULE_NAME, res->body);
+    LOG_ERROR("[{}] Invalid token response: {}", MODULE_NAME, res.body);
     throw std::runtime_error("Baidu token response missing access_token");
   }
 

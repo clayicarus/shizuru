@@ -39,9 +39,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <memory>
 #include <string>
-#include <thread>
 #include <unistd.h>
 
 #include <spdlog/spdlog.h>
@@ -153,6 +153,7 @@ int main(int argc, char* argv[]) {
   auto playout_dump  = std::make_unique<io::PcmDumpDevice>("playout_dump");
   auto playout = std::make_unique<io::AudioPlayoutDevice>(
       std::make_unique<io::PaPlayer>(play_cfg));
+  auto* playout_ptr = playout.get();
 
   io::EnergyVadConfig vad_cfg;
   vad_cfg.energy_threshold        = 400.0F;
@@ -434,6 +435,7 @@ int main(int argc, char* argv[]) {
   runtime.StartSession();
 
   // Start audio capture explicitly (not auto-started by StartSession).
+  playout_ptr->Start();
   capture_ptr->Start();
 
   std::printf("=== Voice Agent (VAD + Baidu ASR + %s LLM + ElevenLabs TTS) ===\n",
@@ -441,11 +443,25 @@ int main(int argc, char* argv[]) {
   std::printf("Log level : %s\n",
               debug_mode ? "debug (all frames)" : "info (events + text)");
   std::printf("Speak naturally — VAD detects speech automatically.\n");
-  std::printf("Ctrl+C to quit.\n\n");
+  std::printf("Type a message and press Enter to send text directly.\n");
+  std::printf("Enter 'q' to quit.\n\n");
 
-  while (true) {
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+  // Read stdin for text input.  Voice input runs in parallel via the
+  // capture → VAD → ASR pipeline.
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (line == "q") { break; }
+    if (line.empty()) { continue; }
+    runtime.SendMessage(line);
   }
+
+  // Stop audio devices before Shutdown() to avoid deadlock: PortAudio's
+  // Stop() waits for its callback thread to finish, but the callback may
+  // be blocked trying to acquire the runtime's devices_mutex_ (held by
+  // Shutdown).  Stopping them here while the mutex is free avoids this.
+  std::printf("\nShutting down...\n");
+  // capture_ptr->Stop();
+  // playout_ptr->Stop();
 
   runtime.Shutdown();
   return 0;

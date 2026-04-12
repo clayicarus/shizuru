@@ -3,10 +3,10 @@
 #include <stdexcept>
 #include <string>
 
-#include <httplib.h>
 #include <nlohmann/json.hpp>
 
 #include "async_logger.h"
+#include "services/utils/curl_helper.h"
 
 namespace shizuru::services {
 
@@ -30,7 +30,6 @@ namespace shizuru::services {
       }
     }
   } catch (const std::exception& /*e*/) {
-    // body is not valid JSON — use raw body as detail
     (void)0;
   }
   throw std::runtime_error("ElevenLabs API error " +
@@ -59,63 +58,53 @@ void ElevenLabsClient::Synthesize(const TtsRequest& request,
   const std::string path =
       "/v1/text-to-speech/" + voice_id + "/stream" + QueryString();
   const std::string body = BuildBody(request);
+  const std::string url = config_.base_url + path;
 
-  LOG_DEBUG("[{}] Synthesize (stream) voice={} format={} path={}",
-            MODULE_NAME, voice_id,
-            TtsOutputFormatString(config_.output_format), path);
-
-  httplib::Client cli(config_.base_url);
-  cli.set_connection_timeout(config_.connect_timeout);
-  cli.set_read_timeout(config_.read_timeout);
-
-  httplib::Headers headers = {
-      {"xi-api-key",   config_.api_key},
-      {"Content-Type", "application/json"},
-      {"Accept",       "audio/*"},
-  };
-
-  httplib::Request req;
-  req.method  = "POST";
-  req.path    = path;
-  req.headers = headers;
-  req.body    = body;
-  req.set_header("Content-Type", "application/json");
+  LOG_DEBUG("[TTS] Synthesize (stream) voice={} format={} url={}",
+            voice_id, TtsOutputFormatString(config_.output_format), url);
 
   size_t total_bytes = 0;
   bool first_chunk_logged = false;
-  req.content_receiver =
-      [&](const char* data, size_t len,
-          uint64_t /*offset*/, uint64_t /*total_length*/) -> bool {
-        if (cancel_requested_.load()) { return false; }
-        if (len > 0 && on_audio) {
-          if (!first_chunk_logged) {
-            LOG_INFO("[{}] TTS first audio chunk: {} bytes (voice={})",
-                     MODULE_NAME, len, voice_id);
-            first_chunk_logged = true;
-          }
-          on_audio(data, len);
-          total_bytes += len;
-        }
-        return true;
-      };
 
-  auto res = cli.send(req);
+  // Accumulate error body in case of non-200 status.
+  std::string error_body;
+  bool got_error = false;
+
+  auto on_data = [&](const char* data, size_t len) -> bool {
+    if (cancel_requested_.load()) { return false; }
+    if (len > 0 && on_audio) {
+      if (!first_chunk_logged) {
+        LOG_INFO("[TTS] TTS first audio chunk: {} bytes (voice={})",
+                 len, voice_id);
+        first_chunk_logged = true;
+      }
+      on_audio(data, len);
+      total_bytes += len;
+    }
+    return true;
+  };
+
+  long status = CurlPostStreaming(
+      url,
+      {"xi-api-key: " + config_.api_key,
+       "Content-Type: application/json",
+       "Accept: audio/*"},
+      body,
+      config_.connect_timeout,
+      config_.read_timeout,
+      on_data,
+      cancel_requested_);
 
   if (cancel_requested_.load()) {
-    LOG_WARN("[{}] Synthesize cancelled (voice={})", MODULE_NAME, voice_id);
+    LOG_WARN("[TTS] Synthesize cancelled (voice={})", voice_id);
     throw std::runtime_error("TTS request cancelled");
   }
-  if (!res) {
-    const std::string err = httplib::to_string(res.error());
-    LOG_ERROR("[{}] HTTP error: {}", MODULE_NAME, err);
-    throw std::runtime_error("TTS HTTP request failed: " + err);
-  }
-  if (res->status != 200) {
-    ThrowApiError(res->status, res->body);
+  if (status != 200) {
+    ThrowApiError(static_cast<int>(status), "streaming request failed");
   }
 
-  LOG_INFO("[{}] Synthesize complete: {} bytes (voice={})",
-           MODULE_NAME, total_bytes, voice_id);
+  LOG_INFO("[TTS] Synthesize complete: {} bytes (voice={})",
+           total_bytes, voice_id);
 }
 
 void ElevenLabsClient::Synthesize(const std::string& text,
@@ -138,38 +127,30 @@ void ElevenLabsClient::SynthesizeFull(const TtsRequest& request,
   const std::string path =
       "/v1/text-to-speech/" + voice_id + QueryString();
   const std::string body = BuildBody(request);
+  const std::string url = config_.base_url + path;
 
-  LOG_DEBUG("[{}] SynthesizeFull voice={} format={} path={}",
-            MODULE_NAME, voice_id,
-            TtsOutputFormatString(config_.output_format), path);
+  LOG_DEBUG("[TTS] SynthesizeFull voice={} format={} url={}",
+            voice_id, TtsOutputFormatString(config_.output_format), url);
 
-  httplib::Client cli(config_.base_url);
-  cli.set_connection_timeout(config_.connect_timeout);
-  cli.set_read_timeout(config_.read_timeout);
+  auto res = CurlPost(
+      url,
+      {"xi-api-key: " + config_.api_key,
+       "Content-Type: application/json",
+       "Accept: audio/*"},
+      body,
+      config_.connect_timeout,
+      config_.read_timeout);
 
-  httplib::Headers headers = {
-      {"xi-api-key",   config_.api_key},
-      {"Content-Type", "application/json"},
-      {"Accept",       "audio/*"},
-  };
-
-  auto res = cli.Post(path, headers, body, "application/json");
-
-  if (!res) {
-    const std::string err = httplib::to_string(res.error());
-    LOG_ERROR("[{}] HTTP error: {}", MODULE_NAME, err);
-    throw std::runtime_error("TTS HTTP request failed: " + err);
-  }
-  if (res->status != 200) {
-    ThrowApiError(res->status, res->body);
+  if (res.status_code != 200) {
+    ThrowApiError(static_cast<int>(res.status_code), res.body);
   }
 
-  if (!res->body.empty() && on_audio) {
-    on_audio(res->body.data(), res->body.size());
+  if (!res.body.empty() && on_audio) {
+    on_audio(res.body.data(), res.body.size());
   }
 
-  LOG_INFO("[{}] SynthesizeFull complete: {} bytes (voice={})",
-           MODULE_NAME, res->body.size(), voice_id);
+  LOG_INFO("[TTS] SynthesizeFull complete: {} bytes (voice={})",
+           res.body.size(), voice_id);
 }
 
 // ---------------------------------------------------------------------------

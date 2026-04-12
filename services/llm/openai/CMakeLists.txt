@@ -11,5 +11,5 @@ target_include_directories(shizuru_llm_openai
 target_link_libraries(shizuru_llm_openai
   PUBLIC  shizuru_core
   PUBLIC  nlohmann_json::nlohmann_json
-  PRIVATE httplib::httplib
+  PRIVATE CURL::libcurl
 )

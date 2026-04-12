@@ -128,6 +128,7 @@ class ShizuruBridge {
 
   factory ShizuruBridge.create(BridgeConfig config) {
     final lib = _load();
+
     final createFn = lib.lookupFunction<_CreateNative, _CreateDart>(
         'shizuru_create');
 
