@@ -113,4 +113,25 @@ inline const char* EventName(Event e) {
   }
 }
 
+// Structured activity events for UI consumption.
+// Unlike DiagnosticCallback (free-form debug text), these are a stable API
+// contract between the controller and the presentation layer.
+enum class ActivityKind {
+  kBufferingInput,      // 0  Aggregator is buffering ASR fragments
+  kFilteringInput,      // 1  Observation filter is evaluating relevance
+  kThinkingStarted,     // 2  LLM request submitted
+  kThinkingRetry,       // 3  LLM request retrying after transient failure
+  kToolDispatched,      // 4  Tool call emitted, waiting for result
+  kToolResultReceived,  // 5  Tool result arrived
+  kSpeaking,            // 6  Response / TTS segment being delivered
+  kInterrupted,         // 7  Turn interrupted by user
+  kTurnComplete,        // 8  Turn finished, back to listening
+  kBudgetExhausted,     // 9  Budget limit hit, entering idle
+};
+
+struct ActivityEvent {
+  ActivityKind kind;
+  std::string detail;  // Optional: tool name, retry count, filter reason, etc.
+};
+
 }  // namespace shizuru::core

@@ -36,6 +36,9 @@ typedef _SetTranscriptCallbackNative = Void Function(
 typedef _SetDiagnosticCallbackNative = Void Function(
     Pointer handle, Pointer<NativeFunction<_DiagnosticCallbackNative>> cb,
     Pointer userData);
+typedef _SetActivityCallbackNative = Void Function(
+    Pointer handle, Pointer<NativeFunction<_ActivityCallbackNative>> cb,
+    Pointer userData);
 
 // Callback native types
 typedef _OutputCallbackNative = Void Function(
@@ -46,6 +49,8 @@ typedef _TranscriptCallbackNative = Void Function(
     Pointer<Utf8> text, Pointer userData);
 typedef _DiagnosticCallbackNative = Void Function(
     Pointer<Utf8> message, Pointer userData);
+typedef _ActivityCallbackNative = Void Function(
+    Int32 kind, Pointer<Utf8> detail, Pointer userData);
 
 // ---------------------------------------------------------------------------
 // Dart function typedefs
@@ -78,6 +83,9 @@ typedef _SetTranscriptCallbackDart = void Function(
 typedef _SetDiagnosticCallbackDart = void Function(
     Pointer handle, Pointer<NativeFunction<_DiagnosticCallbackNative>> cb,
     Pointer userData);
+typedef _SetActivityCallbackDart = void Function(
+    Pointer handle, Pointer<NativeFunction<_ActivityCallbackNative>> cb,
+    Pointer userData);
 
 // ---------------------------------------------------------------------------
 // ShizuruBridge
@@ -103,6 +111,7 @@ class ShizuruBridge {
   late final _SetAudioLevelCallbackDart _setAudioLevelCallback;
   late final _SetTranscriptCallbackDart _setTranscriptCallback;
   late final _SetDiagnosticCallbackDart _setDiagnosticCallback;
+  late final _SetActivityCallbackDart _setActivityCallback;
 
   // Keep NativeCallable references alive
   NativeCallable<_OutputCallbackNative>? _outputCallable;
@@ -110,6 +119,7 @@ class ShizuruBridge {
   NativeCallable<_AudioLevelCallbackNative>? _audioLevelCallable;
   NativeCallable<_TranscriptCallbackNative>? _transcriptCallable;
   NativeCallable<_DiagnosticCallbackNative>? _diagnosticCallable;
+  NativeCallable<_ActivityCallbackNative>? _activityCallable;
 
   ShizuruBridge._(this._handle, this._lib) {
     _bindFunctions();
@@ -179,6 +189,8 @@ class ShizuruBridge {
         _SetTranscriptCallbackDart>('shizuru_set_transcript_callback');
     _setDiagnosticCallback = _lib.lookupFunction<_SetDiagnosticCallbackNative,
         _SetDiagnosticCallbackDart>('shizuru_set_diagnostic_callback');
+    _setActivityCallback = _lib.lookupFunction<_SetActivityCallbackNative,
+        _SetActivityCallbackDart>('shizuru_set_activity_callback');
   }
 
   int start() => _start(_handle);
@@ -187,9 +199,11 @@ class ShizuruBridge {
     _outputCallable?.close();
     _stateCallable?.close();
     _audioLevelCallable?.close();
+    _activityCallable?.close();
     _outputCallable = null;
     _stateCallable = null;
     _audioLevelCallable = null;
+    _activityCallable = null;
     _destroy(_handle);
   }
 
@@ -277,5 +291,19 @@ class ShizuruBridge {
     );
     _setDiagnosticCallback(
         _handle, _diagnosticCallable!.nativeFunction, nullptr);
+  }
+
+  void onActivity(void Function(int kind, String detail) callback) {
+    _activityCallable?.close();
+    _activityCallable = NativeCallable<_ActivityCallbackNative>.listener(
+      (int kind, Pointer<Utf8> detailPtr, Pointer _) {
+        final detail = detailPtr.toDartString();
+        _lib.lookupFunction<Void Function(Pointer), void Function(Pointer)>(
+            'shizuru_free_string')(detailPtr);
+        callback(kind, detail);
+      },
+    );
+    _setActivityCallback(
+        _handle, _activityCallable!.nativeFunction, nullptr);
   }
 }

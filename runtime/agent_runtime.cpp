@@ -158,6 +158,16 @@ std::string AgentRuntime::StartSession() {
         }
       });
 
+  core->Session().GetController().OnActivity(
+      [this](const core::ActivityEvent& event) {
+        ActivityCallback cb;
+        {
+          std::lock_guard<std::mutex> lock(activity_cb_mutex_);
+          cb = activity_cb_;
+        }
+        if (cb) { cb(event); }
+      });
+
   {
     std::unique_lock<std::shared_mutex> lock(devices_mutex_);
     core_device_ = core.get();
@@ -248,6 +258,11 @@ void AgentRuntime::OnOutput(OutputCallback cb) {
 void AgentRuntime::OnDiagnostic(DiagnosticCallback cb) {
   std::lock_guard<std::mutex> lock(diagnostic_cb_mutex_);
   diagnostic_cb_ = std::move(cb);
+}
+
+void AgentRuntime::OnActivity(ActivityCallback cb) {
+  std::lock_guard<std::mutex> lock(activity_cb_mutex_);
+  activity_cb_ = std::move(cb);
 }
 
 void AgentRuntime::Shutdown() {

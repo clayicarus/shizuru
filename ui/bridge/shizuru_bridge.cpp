@@ -203,6 +203,8 @@ struct ShizuruContext {
   void* transcript_user_data = nullptr;
   ShizuruDiagnosticCallback diagnostic_cb = nullptr;
   void* diagnostic_user_data = nullptr;
+  ShizuruActivityCallback activity_cb = nullptr;
+  void* activity_user_data = nullptr;
 
   std::mutex cb_mutex;
 
@@ -655,6 +657,25 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
         cb(heap, ud);
       }
     });
+
+    // Wire structured activity callback: forward ActivityEvents to Dart.
+    ctx->runtime->OnActivity(
+        [raw_ctx](const core::ActivityEvent& event) {
+          ShizuruActivityCallback cb = nullptr;
+          void* ud = nullptr;
+          {
+            std::lock_guard<std::mutex> lock(raw_ctx->cb_mutex);
+            cb = raw_ctx->activity_cb;
+            ud = raw_ctx->activity_user_data;
+          }
+          if (cb) {
+            auto* heap_detail = static_cast<char*>(
+                std::malloc(event.detail.size() + 1));
+            std::memcpy(heap_detail, event.detail.c_str(),
+                        event.detail.size() + 1);
+            cb(static_cast<int32_t>(event.kind), heap_detail, ud);
+          }
+        });
   } catch (const std::exception& e) {
     WriteError(error_buf, error_buf_len,
                (std::string("Bridge init error: ") + e.what()).c_str());
@@ -868,6 +889,16 @@ void shizuru_set_diagnostic_callback(ShizuruHandle handle,
   std::lock_guard<std::mutex> lock(ctx->cb_mutex);
   ctx->diagnostic_cb        = cb;
   ctx->diagnostic_user_data = user_data;
+}
+
+void shizuru_set_activity_callback(ShizuruHandle handle,
+                                   ShizuruActivityCallback cb,
+                                   void* user_data) {
+  if (!handle) return;
+  auto* ctx = static_cast<ShizuruContext*>(handle);
+  std::lock_guard<std::mutex> lock(ctx->cb_mutex);
+  ctx->activity_cb        = cb;
+  ctx->activity_user_data = user_data;
 }
 
 // ---------------------------------------------------------------------------

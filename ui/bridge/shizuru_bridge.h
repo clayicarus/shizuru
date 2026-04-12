@@ -36,6 +36,15 @@ typedef void (*ShizuruAudioLevelCallback)(float rms, void* user_data);
 // Called for diagnostic/activity events from the agent core.
 typedef void (*ShizuruDiagnosticCallback)(const char* message, void* user_data);
 
+// Called for structured activity events from the controller.
+// kind is the int32_t ordinal of core::ActivityKind:
+//   0=BufferingInput, 1=FilteringInput, 2=ThinkingStarted, 3=ThinkingRetry,
+//   4=ToolDispatched, 5=ToolResultReceived, 6=Speaking, 7=Interrupted,
+//   8=TurnComplete, 9=BudgetExhausted
+// detail is an optional context string (tool name, retry count, etc.) — may be empty.
+typedef void (*ShizuruActivityCallback)(int32_t kind, const char* detail,
+                                        void* user_data);
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -100,6 +109,11 @@ void shizuru_set_transcript_callback(ShizuruHandle handle,
 void shizuru_set_diagnostic_callback(ShizuruHandle handle,
                                      ShizuruDiagnosticCallback cb,
                                      void* user_data);
+
+// Register structured activity callback. Fired for UI-consumable events.
+void shizuru_set_activity_callback(ShizuruHandle handle,
+                                   ShizuruActivityCallback cb,
+                                   void* user_data);
 
 // Free a string allocated by the bridge (e.g. from output callbacks).
 // Must be called by Dart after copying the string content.

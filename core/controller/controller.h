@@ -98,6 +98,10 @@ class Controller {
   using StreamTokenCallback = std::function<void(const std::string& token)>;
   void OnStreamToken(StreamTokenCallback cb);
 
+  // Register callback for structured activity events (UI consumption).
+  using ActivityCallback = std::function<void(const ActivityEvent& event)>;
+  void OnActivity(ActivityCallback cb);
+
  private:
   static constexpr char MODULE_NAME[] = "Controller";
 
@@ -114,6 +118,7 @@ class Controller {
   void ResetBudgetWindow();                  // Re-arm counters after Idle
   void HandleInterrupt();                    // Cancel in-progress work
   void EmitDiagnostic(const std::string& message); // Notify diagnostic callbacks
+  void EmitActivity(ActivityKind kind, std::string detail = {}); // Notify activity callbacks
 
   // Static transition table
   static const std::unordered_map<std::pair<State, Event>, State, PairHash>
@@ -169,6 +174,7 @@ class Controller {
   std::vector<DiagnosticCallback> diagnostic_callbacks_;
   std::vector<ResponseCallback> response_callbacks_;
   std::vector<StreamTokenCallback> stream_token_callbacks_;
+  std::vector<ActivityCallback> activity_callbacks_;
 };
 
 }  // namespace shizuru::core

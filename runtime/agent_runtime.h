@@ -71,6 +71,7 @@ class AgentRuntime {
  public:
   using OutputCallback = std::function<void(const RuntimeOutput& output)>;
   using DiagnosticCallback = std::function<void(const std::string& message)>;
+  using ActivityCallback = std::function<void(const core::ActivityEvent& event)>;
 
   AgentRuntime(RuntimeConfig config, services::ToolRegistry& tools);
   ~AgentRuntime();
@@ -105,6 +106,9 @@ class AgentRuntime {
   // Register callback for diagnostic/activity events.
   void OnDiagnostic(DiagnosticCallback cb);
 
+  // Register callback for structured activity events (UI consumption).
+  void OnActivity(ActivityCallback cb);
+
   // Shut down the active session.
   void Shutdown();
 
@@ -138,6 +142,8 @@ class AgentRuntime {
   OutputCallback output_cb_;
   mutable std::mutex diagnostic_cb_mutex_;
   DiagnosticCallback diagnostic_cb_;
+  mutable std::mutex activity_cb_mutex_;
+  ActivityCallback activity_cb_;
 };
 
 }  // namespace shizuru::runtime

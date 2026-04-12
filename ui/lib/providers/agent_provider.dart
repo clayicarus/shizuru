@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../bridge/activity_kind.dart';
 import '../bridge/agent_state.dart';
 import '../bridge/bridge_config.dart';
 import '../bridge/shizuru_ffi.dart';
@@ -24,8 +25,6 @@ class AgentProvider extends ChangeNotifier {
 
   // Activity tracking for fine-grained UI status.
   String _activity = '';
-  DateTime? _lastTranscriptTime;
-  Timer? _activityTimer;
 
   // State transition log for debug panel.
   final List<ActivityLogEntry> _activityLog = [];
@@ -69,7 +68,6 @@ class AgentProvider extends ChangeNotifier {
     _playoutActive = false;
     _audioLevel = 0.0;
     _activity = '';
-    _activityTimer?.cancel();
     notifyListeners();
 
     try {
@@ -81,7 +79,6 @@ class AgentProvider extends ChangeNotifier {
         if (prev != state) {
           _log('${prev.displayName} → ${state.displayName}');
         }
-        _updateActivity();
         notifyListeners();
       });
 
@@ -96,9 +93,7 @@ class AgentProvider extends ChangeNotifier {
 
       if (_transcriptCallback != null) {
         bridge.onTranscript((text) {
-          _lastTranscriptTime = DateTime.now();
           _log('ASR: "$text"');
-          _startActivityTimer();
           _transcriptCallback!(text);
         });
       }
@@ -108,6 +103,9 @@ class AgentProvider extends ChangeNotifier {
         _log(message);
         notifyListeners();
       });
+
+      // Wire structured activity callback from C++ core → UI activity status.
+      bridge.onActivity(_onActivity);
 
       bridge.start();
       _bridge = bridge;
@@ -171,65 +169,45 @@ class AgentProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _updateActivity() {
-    switch (_state) {
-      case AgentState.listening:
-        // Check if we recently received a transcript (filter may be buffering).
-        if (_lastTranscriptTime != null &&
-            DateTime.now().difference(_lastTranscriptTime!).inSeconds < 6) {
-          _activity = 'Waiting for more input...';
-        } else {
-          _activity = '';
-        }
+  void _onActivity(int kind, String detail) {
+    final ak = ActivityKindExtension.fromInt(kind);
+    switch (ak) {
+      case ActivityKind.bufferingInput:
+        _activity = 'Waiting for more input...';
         break;
-      case AgentState.thinking:
+      case ActivityKind.filteringInput:
+        _activity = 'Evaluating input...';
+        break;
+      case ActivityKind.thinkingStarted:
         _activity = 'Thinking...';
-        _lastTranscriptTime = null;
         break;
-      case AgentState.acting:
-        _activity = 'Using tool...';
+      case ActivityKind.thinkingRetry:
+        _activity = 'Retrying (attempt $detail)...';
         break;
-      case AgentState.responding:
-        _activity = 'Responding...';
+      case ActivityKind.toolDispatched:
+        _activity = detail.isNotEmpty ? 'Using tool: $detail' : 'Using tool...';
         break;
-      case AgentState.routing:
-        _activity = 'Planning...';
+      case ActivityKind.toolResultReceived:
+        _activity = 'Tool result received';
         break;
-      case AgentState.error:
-        _activity = 'Error occurred';
+      case ActivityKind.speaking:
+        _activity = 'Speaking...';
         break;
-      default:
+      case ActivityKind.interrupted:
+        _activity = 'Interrupted';
+        break;
+      case ActivityKind.turnComplete:
         _activity = '';
-        _lastTranscriptTime = null;
+        break;
+      case ActivityKind.budgetExhausted:
+        _activity = 'Turn limit reached';
+        break;
     }
-  }
-
-  void _startActivityTimer() {
-    _activityTimer?.cancel();
-    // Poll activity status while in listening + recent transcript.
-    _activityTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
-      if (_state == AgentState.listening && _lastTranscriptTime != null) {
-        final elapsed = DateTime.now().difference(_lastTranscriptTime!);
-        if (elapsed.inSeconds >= 6) {
-          _activity = '';
-          _lastTranscriptTime = null;
-          _activityTimer?.cancel();
-          notifyListeners();
-        } else if (_activity != 'Waiting for more input...') {
-          _activity = 'Waiting for more input...';
-          notifyListeners();
-        }
-      } else {
-        _activityTimer?.cancel();
-      }
-    });
-    _updateActivity();
     notifyListeners();
   }
 
   @override
   void dispose() {
-    _activityTimer?.cancel();
     _bridge?.destroy();
     _bridge = null;
     super.dispose();

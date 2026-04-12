@@ -150,6 +150,13 @@ void Controller::OnStreamToken(StreamTokenCallback cb) {
   stream_token_callbacks_.push_back(std::move(cb));
 }
 
+// Register callback for structured activity events.
+void Controller::OnActivity(ActivityCallback cb) {
+  std::lock_guard<std::mutex> lock(callbacks_mutex_);
+  assert(!loop_thread_.joinable() && "OnActivity must be called before Start()");
+  activity_callbacks_.push_back(std::move(cb));
+}
+
 // Validate + execute transition.
 bool Controller::TryTransition(Event event) {
   State current = state_.load();
@@ -187,6 +194,14 @@ bool Controller::TryTransition(Event event) {
 void Controller::EmitDiagnostic(const std::string& message) {
   for (const auto& cb : diagnostic_callbacks_) {
     cb(message);
+  }
+}
+
+// Emit structured activity event to all registered callbacks.
+void Controller::EmitActivity(ActivityKind kind, std::string detail) {
+  ActivityEvent event{kind, std::move(detail)};
+  for (const auto& cb : activity_callbacks_) {
+    cb(event);
   }
 }
 
@@ -325,10 +340,12 @@ void Controller::RunLoop() {
         LOG_INFO("[{}] Observation buffered by aggregator: \"{}\"",
                  MODULE_NAME, obs.content);
         EmitDiagnostic("Waiting for more input: \"" + obs.content + "\"");
+        EmitActivity(ActivityKind::kBufferingInput, obs.content);
         continue;  // Stay in kListening, wait for more fragments.
       }
 
       // Stage 2: Relevance filter.
+      EmitActivity(ActivityKind::kFilteringInput);
       auto filter_start = std::chrono::steady_clock::now();
       bool accepted = observation_filter_->ShouldProcess(*aggregated);
       auto filter_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -382,6 +399,7 @@ void Controller::HandleThinking(const Observation& obs) {
   // Check budget first.
   if (CheckBudget()) {
     TryTransition(Event::kStopConditionMet);
+    EmitActivity(ActivityKind::kBudgetExhausted);
     return;
   }
 
@@ -406,6 +424,12 @@ void Controller::HandleThinking(const Observation& obs) {
       LOG_DEBUG("[{}] LLM submit (attempt {}/{})",
                 MODULE_NAME, attempt + 1, config_.max_retries + 1);
       LOG_INFO("[{}] LLM submit started", MODULE_NAME);
+      if (attempt == 0) {
+        EmitActivity(ActivityKind::kThinkingStarted);
+      } else {
+        EmitActivity(ActivityKind::kThinkingRetry,
+                     std::to_string(attempt + 1));
+      }
       if (config_.use_streaming) {
         // Streaming path: fire token callbacks as chunks arrive.
         // If a TTS segment strategy is configured, also buffer tokens
@@ -640,6 +664,13 @@ void Controller::HandleActing(ActionCandidate ac) {
     LOG_INFO("[{}] Acting: tool=\"{}\" id=\"{}\" args={}",
              MODULE_NAME, tc.name, tc.id, tc.arguments);
     EmitDiagnostic("Tool call: " + tc.name);
+    {
+      // Build a JSON detail string for the UI to render a tool call card.
+      std::string detail = R"({"id":")" + tc.id +
+                           R"(","name":")" + tc.name +
+                           R"(","arguments":)" + tc.arguments + "}";
+      EmitActivity(ActivityKind::kToolDispatched, std::move(detail));
+    }
 
     const std::string payload_str = tc.name + ":" + tc.arguments;
     io::DataFrame frame;
@@ -699,6 +730,18 @@ void Controller::HandleActingResult(const Observation& obs) {
   LOG_INFO("[{}] Tool result received: id=\"{}\" success={} ({}/{})",
            MODULE_NAME, tool_call_id, success,
            pending_results_.size(), pending_tool_calls_.size());
+  {
+    // Find the tool name for this call id.
+    std::string tool_name;
+    for (const auto& tc : pending_tool_calls_) {
+      if (tc.id == tool_call_id) { tool_name = tc.name; break; }
+    }
+    std::string detail = R"({"id":")" + tool_call_id +
+                         R"(","name":")" + tool_name +
+                         R"(","success":)" + (success ? "true" : "false") +
+                         R"(,"result":)" + obs.content + "}";
+    EmitActivity(ActivityKind::kToolResultReceived, std::move(detail));
+  }
 
   // Check if all results are in.
   if (pending_results_.size() < pending_tool_calls_.size()) {
@@ -744,6 +787,7 @@ void Controller::HandleResponding(ActionCandidate ac) {
   }
 
   LOG_INFO("[{}] Responding: \"{}\"", MODULE_NAME, ac.response_text);
+  EmitActivity(ActivityKind::kSpeaking);
 
   // Notify response callbacks before final state transition.
   for (const auto& cb : response_callbacks_) {
@@ -771,8 +815,10 @@ void Controller::HandleResponding(ActionCandidate ac) {
              total_prompt_tokens_ + total_completion_tokens_,
              action_count_);
     TryTransition(Event::kStopConditionMet);  // → Idle
+    EmitActivity(ActivityKind::kBudgetExhausted);
   } else {
     TryTransition(Event::kResponseDelivered);  // → Listening
+    EmitActivity(ActivityKind::kTurnComplete);
   }
 }
 
@@ -845,6 +891,7 @@ void Controller::HandleInterrupt() {
   conversation_active_ = true;
 
   TryTransition(Event::kInterrupt);  // → Listening
+  EmitActivity(ActivityKind::kInterrupted);
 
   EmitDiagnostic("Turn interrupted in state " +
                  std::to_string(static_cast<int>(state_.load())));
