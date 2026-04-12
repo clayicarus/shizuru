@@ -24,7 +24,6 @@ class PaPlayer : public AudioPlayer {
   explicit PaPlayer(const PlayerConfig& config = {})
       : config_(config),
         buf_(config.buffer_capacity_samples, config.channel_count) {
-    EnsurePaInitialized();
     // Debug PCM dumps: before ring buffer (Write input) and after (callback output).
     dump_pre_ringbuf_  = std::fopen("pa_pre_ringbuf.pcm", "wb");
     dump_post_ringbuf_ = std::fopen("pa_post_ringbuf.pcm", "wb");
@@ -41,6 +40,7 @@ class PaPlayer : public AudioPlayer {
 
   void Start() override {
     if (playing_) { return; }
+    EnsurePaInitialized();
 
     PaStreamParameters params{};
     params.device = (config_.device_id < 0) ? Pa_GetDefaultOutputDevice()

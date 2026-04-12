@@ -72,46 +72,52 @@ class AgentProvider extends ChangeNotifier {
     _activityTimer?.cancel();
     notifyListeners();
 
-    final bridge = ShizuruBridge.create(config);
+    try {
+      final bridge = ShizuruBridge.create(config);
 
-    bridge.onStateChange((state) {
-      final prev = _state;
-      _state = state;
-      if (prev != state) {
-        _log('${prev.displayName} → ${state.displayName}');
-      }
-      _updateActivity();
-      notifyListeners();
-    });
-
-    bridge.onAudioLevel((rms) {
-      _audioLevel = rms / 32767.0;
-      notifyListeners();
-    });
-
-    if (_outputCallback != null) {
-      bridge.onOutput(_outputCallback!);
-    }
-
-    if (_transcriptCallback != null) {
-      bridge.onTranscript((text) {
-        _lastTranscriptTime = DateTime.now();
-        _log('ASR: "$text"');
-        _startActivityTimer();
-        _transcriptCallback!(text);
+      bridge.onStateChange((state) {
+        final prev = _state;
+        _state = state;
+        if (prev != state) {
+          _log('${prev.displayName} → ${state.displayName}');
+        }
+        _updateActivity();
+        notifyListeners();
       });
-    }
 
-    // Wire diagnostic callback from C++ core → activity log.
-    bridge.onDiagnostic((message) {
-      _log(message);
+      bridge.onAudioLevel((rms) {
+        _audioLevel = rms / 32767.0;
+        notifyListeners();
+      });
+
+      if (_outputCallback != null) {
+        bridge.onOutput(_outputCallback!);
+      }
+
+      if (_transcriptCallback != null) {
+        bridge.onTranscript((text) {
+          _lastTranscriptTime = DateTime.now();
+          _log('ASR: "$text"');
+          _startActivityTimer();
+          _transcriptCallback!(text);
+        });
+      }
+
+      // Wire diagnostic callback from C++ core → activity log.
+      bridge.onDiagnostic((message) {
+        _log(message);
+        notifyListeners();
+      });
+
+      bridge.start();
+      _bridge = bridge;
+
       notifyListeners();
-    });
-
-    bridge.start();
-    _bridge = bridge;
-
-    notifyListeners();
+    } catch (e) {
+      _log('Initialization failed: $e');
+      notifyListeners();
+      rethrow;
+    }
   }
 
   void sendMessage(String text) {

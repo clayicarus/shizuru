@@ -17,9 +17,7 @@ class PaRecorder : public AudioRecorder {
  public:
   explicit PaRecorder(const RecorderConfig& config = {})
       : config_(config),
-        buf_(config.buffer_capacity_samples, config.channel_count) {
-    EnsurePaInitialized();
-  }
+        buf_(config.buffer_capacity_samples, config.channel_count) {}
 
   ~PaRecorder() override { Stop(); }
 
@@ -28,6 +26,7 @@ class PaRecorder : public AudioRecorder {
 
   void Start() override {
     if (recording_) { return; }
+    EnsurePaInitialized();
 
     PaStreamParameters params{};
     params.device = (config_.device_id < 0) ? Pa_GetDefaultInputDevice()

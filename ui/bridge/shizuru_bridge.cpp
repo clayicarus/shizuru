@@ -503,102 +503,105 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
     return nullptr;
   }
 
-  // ── Build voice devices ──────────────────────────────────────────────────
-  // Note: skip GetToken() pre-warm here — it blocks the calling thread (Dart
-  // main isolate). The token will be fetched lazily on first ASR request.
-  auto token_mgr = std::make_shared<services::BaiduTokenManager>(baidu_cfg);
+  try {
+    // ── Build voice devices ────────────────────────────────────────────────
+    // Note: skip GetToken() pre-warm here — it blocks the calling thread
+    // (Dart main isolate). The token will be fetched lazily on first ASR
+    // request.
+    auto token_mgr = std::make_shared<services::BaiduTokenManager>(baidu_cfg);
 
 #ifdef __ANDROID__
-  auto capture_dev = std::make_unique<io::AudioCaptureDevice>(
-      std::make_unique<io::OboeRecorder>(rec_cfg));
+    auto capture_dev = std::make_unique<io::AudioCaptureDevice>(
+        std::make_unique<io::OboeRecorder>(rec_cfg));
 #else
-  auto capture_dev = std::make_unique<io::AudioCaptureDevice>(
-      std::make_unique<io::PaRecorder>(rec_cfg));
+    auto capture_dev = std::make_unique<io::AudioCaptureDevice>(
+        std::make_unique<io::PaRecorder>(rec_cfg));
 #endif
-  auto capture_dump_dev = std::make_unique<io::PcmDumpDevice>("capture");
-  auto vad_dev = [&] {
-    io::EnergyVadConfig vad_cfg;
-    vad_cfg.energy_threshold        = 400.0F;
-    vad_cfg.speech_onset_frames     = 3;
-    vad_cfg.silence_hangover_frames = 20;
-    vad_cfg.pre_roll_frames         = 3;
-    return std::make_unique<io::EnergyVadDevice>(vad_cfg);
-  }();
-  auto vad_dump_dev     = std::make_unique<io::PcmDumpDevice>("vad_dump");
-  auto asr_flush_dev    = std::make_unique<io::VadEventDevice>();
-  auto asr_dev          = std::make_unique<io::BaiduAsrDevice>(baidu_cfg, token_mgr);
-  auto tts_dev          = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
-  auto playout_dump_dev = std::make_unique<io::PcmDumpDevice>("playout_dump");
+    auto capture_dump_dev = std::make_unique<io::PcmDumpDevice>("capture");
+    auto vad_dev = [&] {
+      io::EnergyVadConfig vad_cfg;
+      vad_cfg.energy_threshold        = 400.0F;
+      vad_cfg.speech_onset_frames     = 3;
+      vad_cfg.silence_hangover_frames = 20;
+      vad_cfg.pre_roll_frames         = 3;
+      return std::make_unique<io::EnergyVadDevice>(vad_cfg);
+    }();
+    auto vad_dump_dev     = std::make_unique<io::PcmDumpDevice>("vad_dump");
+    auto asr_flush_dev    = std::make_unique<io::VadEventDevice>();
+    auto asr_dev          =
+        std::make_unique<io::BaiduAsrDevice>(baidu_cfg, token_mgr);
+    auto tts_dev          = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
+    auto playout_dump_dev = std::make_unique<io::PcmDumpDevice>("playout_dump");
 #ifdef __ANDROID__
-  auto playout_dev      = std::make_unique<io::AudioPlayoutDevice>(
-      std::make_unique<io::OboePlayer>(play_cfg));
+    auto playout_dev      = std::make_unique<io::AudioPlayoutDevice>(
+        std::make_unique<io::OboePlayer>(play_cfg));
 #else
-  auto playout_dev      = std::make_unique<io::AudioPlayoutDevice>(
-      std::make_unique<io::PaPlayer>(play_cfg));
+    auto playout_dev      = std::make_unique<io::AudioPlayoutDevice>(
+        std::make_unique<io::PaPlayer>(play_cfg));
 #endif
-  auto level_probe_dev  = std::make_unique<AudioLevelProbe>();
-  auto transcript_probe_dev = std::make_unique<TranscriptProbe>();
+    auto level_probe_dev      = std::make_unique<AudioLevelProbe>();
+    auto transcript_probe_dev = std::make_unique<TranscriptProbe>();
 
-  // Keep non-owning raw pointers before moving into runtime.
-  ctx->capture          = capture_dev.get();
-  ctx->playout          = playout_dev.get();
-  ctx->level_probe      = level_probe_dev.get();
-  ctx->transcript_probe = transcript_probe_dev.get();
+    // Keep non-owning raw pointers before moving into runtime.
+    ctx->capture          = capture_dev.get();
+    ctx->playout          = playout_dev.get();
+    ctx->level_probe      = level_probe_dev.get();
+    ctx->transcript_probe = transcript_probe_dev.get();
 
-  // ── Register devices ─────────────────────────────────────────────────────
-  ctx->runtime->RegisterDevice(std::move(capture_dev));
-  ctx->runtime->RegisterDevice(std::move(capture_dump_dev));
-  ctx->runtime->RegisterDevice(std::move(vad_dev));
-  ctx->runtime->RegisterDevice(std::move(vad_dump_dev));
-  ctx->runtime->RegisterDevice(std::move(asr_flush_dev));
-  ctx->runtime->RegisterDevice(std::move(asr_dev));
-  ctx->runtime->RegisterDevice(std::move(tts_dev));
-  ctx->runtime->RegisterDevice(std::move(playout_dump_dev));
-  ctx->runtime->RegisterDevice(std::move(playout_dev));
-  ctx->runtime->RegisterDevice(std::move(level_probe_dev));
-  ctx->runtime->RegisterDevice(std::move(transcript_probe_dev));
+    // ── Register devices ───────────────────────────────────────────────────
+    ctx->runtime->RegisterDevice(std::move(capture_dev));
+    ctx->runtime->RegisterDevice(std::move(capture_dump_dev));
+    ctx->runtime->RegisterDevice(std::move(vad_dev));
+    ctx->runtime->RegisterDevice(std::move(vad_dump_dev));
+    ctx->runtime->RegisterDevice(std::move(asr_flush_dev));
+    ctx->runtime->RegisterDevice(std::move(asr_dev));
+    ctx->runtime->RegisterDevice(std::move(tts_dev));
+    ctx->runtime->RegisterDevice(std::move(playout_dump_dev));
+    ctx->runtime->RegisterDevice(std::move(playout_dev));
+    ctx->runtime->RegisterDevice(std::move(level_probe_dev));
+    ctx->runtime->RegisterDevice(std::move(transcript_probe_dev));
 
-  // ── DMA routes (mirrors voice_agent.cpp) ─────────────────────────────────
-  constexpr runtime::RouteOptions kDma{.requires_control_plane = false};
+    // ── DMA routes (mirrors voice_agent.cpp) ───────────────────────────────
+    constexpr runtime::RouteOptions kDma{.requires_control_plane = false};
 
-  // capture → capture_dump → vad
-  ctx->runtime->AddRoute({"audio_capture", "audio_out"},
-                         {"capture",       io::PcmDumpDevice::kPassIn}, kDma);
-  ctx->runtime->AddRoute({"capture",       io::PcmDumpDevice::kPassOut},
-                         {"vad",           io::EnergyVadDevice::kAudioIn}, kDma);
+    // capture → capture_dump → vad
+    ctx->runtime->AddRoute({"audio_capture", "audio_out"},
+                           {"capture",       io::PcmDumpDevice::kPassIn}, kDma);
+    ctx->runtime->AddRoute({"capture",       io::PcmDumpDevice::kPassOut},
+                           {"vad",           io::EnergyVadDevice::kAudioIn}, kDma);
 
-  // vad audio_out → vad_dump → asr
-  ctx->runtime->AddRoute({"vad",      io::EnergyVadDevice::kAudioOut},
-                         {"vad_dump", io::PcmDumpDevice::kPassIn}, kDma);
-  ctx->runtime->AddRoute({"vad_dump", io::PcmDumpDevice::kPassOut},
-                         {"baidu_asr","audio_in"}, kDma);
+    // vad audio_out → vad_dump → asr
+    ctx->runtime->AddRoute({"vad",      io::EnergyVadDevice::kAudioOut},
+                           {"vad_dump", io::PcmDumpDevice::kPassIn}, kDma);
+    ctx->runtime->AddRoute({"vad_dump", io::PcmDumpDevice::kPassOut},
+                           {"baidu_asr","audio_in"}, kDma);
 
-  // vad vad_out → asr_flush
-  ctx->runtime->AddRoute({"vad",       io::EnergyVadDevice::kVadOut},
-                         {"vad_event", io::VadEventDevice::kVadIn}, kDma);
+    // vad vad_out → asr_flush
+    ctx->runtime->AddRoute({"vad",       io::EnergyVadDevice::kVadOut},
+                           {"vad_event", io::VadEventDevice::kVadIn}, kDma);
 
-  // asr text_out → core text_in
-  ctx->runtime->AddRoute({"baidu_asr", "text_out"},
-                         {"core",      "text_in"}, kDma);
+    // asr text_out → core text_in
+    ctx->runtime->AddRoute({"baidu_asr", "text_out"},
+                           {"core",      "text_in"}, kDma);
 
-  // tts audio_out → playout_dump → playout
-  ctx->runtime->AddRoute({"elevenlabs_tts", "audio_out"},
-                         {"playout_dump",   io::PcmDumpDevice::kPassIn}, kDma);
-  ctx->runtime->AddRoute({"playout_dump",   io::PcmDumpDevice::kPassOut},
-                         {"audio_playout",  "audio_in"}, kDma);
+    // tts audio_out → playout_dump → playout
+    ctx->runtime->AddRoute({"elevenlabs_tts", "audio_out"},
+                           {"playout_dump",   io::PcmDumpDevice::kPassIn}, kDma);
+    ctx->runtime->AddRoute({"playout_dump",   io::PcmDumpDevice::kPassOut},
+                           {"audio_playout",  "audio_in"}, kDma);
 
-  // capture audio_out → level probe (parallel tap for RMS)
-  ctx->runtime->AddRoute({"audio_capture",    "audio_out"},
-                         {"audio_level_probe", AudioLevelProbe::kAudioIn}, kDma);
+    // capture audio_out → level probe (parallel tap for RMS)
+    ctx->runtime->AddRoute({"audio_capture",    "audio_out"},
+                           {"audio_level_probe", AudioLevelProbe::kAudioIn}, kDma);
 
-  // asr text_out → transcript probe (parallel tap for Dart UI)
-  ctx->runtime->AddRoute({"baidu_asr",        "text_out"},
-                         {"transcript_probe",  TranscriptProbe::kTextIn}, kDma);
+    // asr text_out → transcript probe (parallel tap for Dart UI)
+    ctx->runtime->AddRoute({"baidu_asr",        "text_out"},
+                           {"transcript_probe",  TranscriptProbe::kTextIn}, kDma);
 
-  // ── OnOutput callback: display only (TTS is route-driven) ──────────────
-  ShizuruContext* raw_ctx = ctx.get();
+    // ── OnOutput callback: display only (TTS is route-driven) ────────────
+    ShizuruContext* raw_ctx = ctx.get();
 
-  ctx->runtime->OnOutput([raw_ctx](const runtime::RuntimeOutput& output) {
+    ctx->runtime->OnOutput([raw_ctx](const runtime::RuntimeOutput& output) {
     // Accumulate partial tokens so Dart always receives valid UTF-8
     // (SSE chunk boundaries may split multi-byte characters).
     ShizuruOutputCallback cb = nullptr;
@@ -635,23 +638,28 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
     if (cb && heap_str) {
       cb(heap_str, is_partial_flag, ud);
     }
-  });
+    });
 
-  // Wire diagnostic callback: forward Controller events to Dart.
-  ctx->runtime->OnDiagnostic([raw_ctx](const std::string& message) {
-    ShizuruDiagnosticCallback cb = nullptr;
-    void* ud = nullptr;
-    {
-      std::lock_guard<std::mutex> lock(raw_ctx->cb_mutex);
-      cb = raw_ctx->diagnostic_cb;
-      ud = raw_ctx->diagnostic_user_data;
-    }
-    if (cb) {
-      auto* heap = static_cast<char*>(std::malloc(message.size() + 1));
-      std::memcpy(heap, message.c_str(), message.size() + 1);
-      cb(heap, ud);
-    }
-  });
+    // Wire diagnostic callback: forward Controller events to Dart.
+    ctx->runtime->OnDiagnostic([raw_ctx](const std::string& message) {
+      ShizuruDiagnosticCallback cb = nullptr;
+      void* ud = nullptr;
+      {
+        std::lock_guard<std::mutex> lock(raw_ctx->cb_mutex);
+        cb = raw_ctx->diagnostic_cb;
+        ud = raw_ctx->diagnostic_user_data;
+      }
+      if (cb) {
+        auto* heap = static_cast<char*>(std::malloc(message.size() + 1));
+        std::memcpy(heap, message.c_str(), message.size() + 1);
+        cb(heap, ud);
+      }
+    });
+  } catch (const std::exception& e) {
+    WriteError(error_buf, error_buf_len,
+               (std::string("Bridge init error: ") + e.what()).c_str());
+    return nullptr;
+  }
 
   return ctx.release();
 }
