@@ -35,27 +35,32 @@ class PassthroughFilter : public ResponseFilter {
 class StripThinkingFilter : public ResponseFilter {
  public:
   std::string Filter(const std::string& text) override {
+    // Strip all structured blocks: <think>, <tool_call>, <tool_result>.
+    std::string result = StripTag(text, "<think>", "</think>");
+    result = StripTag(result, "<tool_call>", "</tool_call>");
+    result = StripTag(result, "<tool_result>", "</tool_result>");
+    return result;
+  }
+
+ private:
+  static std::string StripTag(const std::string& text,
+                               const std::string& open_tag,
+                               const std::string& close_tag) {
     std::string result;
-    std::string stripped;
     result.reserve(text.size());
     size_t pos = 0;
     while (pos < text.size()) {
-      auto open = text.find("<think>", pos);
+      auto open = text.find(open_tag, pos);
       if (open == std::string::npos) {
         result.append(text, pos, text.size() - pos);
         break;
       }
       result.append(text, pos, open - pos);
-      auto close = text.find("</think>", open);
+      auto close = text.find(close_tag, open);
       if (close == std::string::npos) {
-        stripped.append(text, open + 7, text.size() - open - 7);
         break;  // unclosed tag — strip to end
       }
-      stripped.append(text, open + 7, close - open - 7);
-      pos = close + 8;
-    }
-    if (!stripped.empty()) {
-      LOG_DEBUG("[ResponseFilter] Stripped thinking: \"{}\"", stripped);
+      pos = close + close_tag.size();
     }
     return result;
   }

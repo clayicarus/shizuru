@@ -95,6 +95,14 @@ core::LlmResult OpenAiClient::SubmitStreaming(
       if (ParseStreamChunk(line, accumulated_content,
                            accumulated_tool_calls, result, is_done)) {
         if (is_done) {
+          // Deliver any remaining delta (e.g. </think> closing tag added
+          // by ParseStreamChunk at [DONE] time).
+          if (on_token && accumulated_content.size() > prev_content_len) {
+            std::string delta =
+                accumulated_content.substr(prev_content_len);
+            prev_content_len = accumulated_content.size();
+            on_token(delta);
+          }
           stream_done = true;
           return true;
         }

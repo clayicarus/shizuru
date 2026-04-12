@@ -1,26 +1,16 @@
 import 'package:flutter/widgets.dart';
 
 class ConversationMessage {
-  final String role; // 'user' | 'assistant' | 'tool_call' | 'tool_result'
+  final String role; // 'user' | 'assistant'
   String text;
   final DateTime timestamp;
   bool isStreaming;
-
-  // Tool call fields.
-  String? toolName;
-  String? toolArguments;
-  String? toolCallId;
-  bool? toolSuccess;
 
   ConversationMessage({
     required this.role,
     required this.text,
     required this.timestamp,
     this.isStreaming = false,
-    this.toolName,
-    this.toolArguments,
-    this.toolCallId,
-    this.toolSuccess,
   });
 }
 
@@ -63,7 +53,20 @@ class ConversationProvider extends ChangeNotifier {
       if (_streamingIndex >= 0 && _streamingIndex < _messages.length) {
         final bubble = _messages[_streamingIndex];
         bubble.isStreaming = false;
-        if (text.isNotEmpty) bubble.text = text;
+        if (text.isNotEmpty) {
+          // Preserve structured blocks from the streaming phase.
+          // The final response text has <think> stripped by ResponseFilter,
+          // but the streaming text still has <think>, <tool_call>, <tool_result>.
+          // Extract all structured blocks and prepend to the final text.
+          final blockRegex = RegExp(
+            r'<think>.*?</think>|<tool_call>.*?</tool_call>|<tool_result>.*?</tool_result>',
+            dotAll: true,
+          );
+          final blocks = blockRegex.allMatches(bubble.text)
+              .map((m) => m.group(0)!)
+              .join();
+          bubble.text = blocks.isNotEmpty ? '$blocks$text' : text;
+        }
         _streamingIndex = -1;
       } else {
         _messages.add(ConversationMessage(
@@ -77,38 +80,6 @@ class ConversationProvider extends ChangeNotifier {
     notifyListeners();
     // During streaming use jumpTo to avoid animation conflicts causing flicker.
     _scrollToBottom(animate: !isPartial);
-  }
-
-  void addToolCall(String name, String arguments, String callId) {
-    _messages.add(ConversationMessage(
-      role: 'tool_call',
-      text: '',
-      timestamp: DateTime.now(),
-      toolName: name,
-      toolArguments: arguments,
-      toolCallId: callId,
-    ));
-    notifyListeners();
-    _scrollToBottom(animate: true);
-  }
-
-  void updateToolResult(String callId, bool success, String resultText) {
-    final idx = _messages.lastIndexWhere(
-        (m) => m.role == 'tool_call' && m.toolCallId == callId);
-    if (idx >= 0) {
-      _messages[idx].toolSuccess = success;
-      _messages[idx].text = resultText;
-    } else {
-      _messages.add(ConversationMessage(
-        role: 'tool_result',
-        text: resultText,
-        timestamp: DateTime.now(),
-        toolCallId: callId,
-        toolSuccess: success,
-      ));
-    }
-    notifyListeners();
-    _scrollToBottom(animate: true);
   }
 
   void clearMessages() {

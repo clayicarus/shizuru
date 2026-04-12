@@ -362,5 +362,137 @@ TEST(JsonParserTest, ParseResponse_ToolCallMissingId_GeneratesOne) {
   EXPECT_FALSE(result.candidate.tool_calls[0].id.empty());
 }
 
+// ---------------------------------------------------------------------------
+// ParseStreamChunk — reasoning_content streaming
+// ---------------------------------------------------------------------------
+
+TEST(JsonParserTest, ParseStreamChunk_ReasoningContentWrappedInThinkTags) {
+  std::string content;
+  nlohmann::json tool_calls = nlohmann::json::array();
+  core::LlmResult result;
+  bool is_done = false;
+
+  // Send two reasoning_content chunks.
+  nlohmann::json rc1 = {
+      {"choices", {{{"delta", {{"reasoning_content", "Hello "}}}, {"index", 0}}}},
+  };
+  EXPECT_TRUE(ParseStreamChunk("data: " + rc1.dump(), content, tool_calls,
+                                result, is_done));
+  EXPECT_FALSE(is_done);
+
+  nlohmann::json rc2 = {
+      {"choices", {{{"delta", {{"reasoning_content", "world"}}}, {"index", 0}}}},
+  };
+  EXPECT_TRUE(ParseStreamChunk("data: " + rc2.dump(), content, tool_calls,
+                                result, is_done));
+  EXPECT_FALSE(is_done);
+
+  // Send a content chunk.
+  nlohmann::json cc = {
+      {"choices", {{{"delta", {{"content", "response text"}}}, {"index", 0}}}},
+  };
+  EXPECT_TRUE(ParseStreamChunk("data: " + cc.dump(), content, tool_calls,
+                                result, is_done));
+  EXPECT_FALSE(is_done);
+
+  // Verify accumulated_content before [DONE].
+  EXPECT_EQ(content, "<think>Hello world</think>response text");
+
+  // Send [DONE].
+  EXPECT_TRUE(ParseStreamChunk("data: [DONE]", content, tool_calls, result,
+                                is_done));
+  EXPECT_TRUE(is_done);
+  EXPECT_EQ(content, "<think>Hello world</think>response text");
+  EXPECT_EQ(result.candidate.type, core::ActionType::kResponse);
+  EXPECT_EQ(result.candidate.response_text,
+            "<think>Hello world</think>response text");
+}
+
+TEST(JsonParserTest, ParseStreamChunk_ToolCallWithReasoningContent) {
+  std::string content;
+  nlohmann::json tool_calls = nlohmann::json::array();
+  core::LlmResult result;
+  bool is_done = false;
+
+  // Send reasoning_content chunk.
+  nlohmann::json rc = {
+      {"choices",
+       {{{"delta", {{"reasoning_content", "I need to call a tool"}}},
+         {"index", 0}}}},
+  };
+  EXPECT_TRUE(ParseStreamChunk("data: " + rc.dump(), content, tool_calls,
+                                result, is_done));
+  EXPECT_FALSE(is_done);
+
+  // Send tool_calls delta chunks (name).
+  nlohmann::json tc1;
+  tc1["index"] = 0;
+  tc1["id"] = "call_1";
+  tc1["type"] = "function";
+  tc1["function"] = {{"name", "get_time"}, {"arguments", ""}};
+  nlohmann::json chunk1;
+  chunk1["choices"] = nlohmann::json::array();
+  nlohmann::json choice1;
+  choice1["delta"]["tool_calls"] = nlohmann::json::array({tc1});
+  chunk1["choices"].push_back(choice1);
+  EXPECT_TRUE(ParseStreamChunk("data: " + chunk1.dump(), content, tool_calls,
+                                result, is_done));
+  EXPECT_FALSE(is_done);
+
+  // Send tool_calls delta (arguments).
+  nlohmann::json tc2;
+  tc2["index"] = 0;
+  tc2["function"] = {{"arguments", "{}"}};
+  nlohmann::json chunk2;
+  chunk2["choices"] = nlohmann::json::array();
+  nlohmann::json choice2;
+  choice2["delta"]["tool_calls"] = nlohmann::json::array({tc2});
+  chunk2["choices"].push_back(choice2);
+  EXPECT_TRUE(ParseStreamChunk("data: " + chunk2.dump(), content, tool_calls,
+                                result, is_done));
+  EXPECT_FALSE(is_done);
+
+  // Send [DONE].
+  EXPECT_TRUE(ParseStreamChunk("data: [DONE]", content, tool_calls, result,
+                                is_done));
+  EXPECT_TRUE(is_done);
+
+  // Verify accumulated_content contains both thinking and tool_call markers.
+  EXPECT_NE(content.find("<think>I need to call a tool</think>"),
+            std::string::npos);
+  EXPECT_NE(content.find("<tool_call>"), std::string::npos);
+  EXPECT_NE(content.find("\"name\":\"get_time\""), std::string::npos);
+  EXPECT_NE(content.find("\"id\":\"call_1\""), std::string::npos);
+
+  // Verify result type and tool call details.
+  EXPECT_EQ(result.candidate.type, core::ActionType::kToolCall);
+  ASSERT_EQ(result.candidate.tool_calls.size(), 1u);
+  EXPECT_EQ(result.candidate.tool_calls[0].name, "get_time");
+}
+
+TEST(JsonParserTest, ParseStreamChunk_ReasoningContentClosedAtDone) {
+  std::string content;
+  nlohmann::json tool_calls = nlohmann::json::array();
+  core::LlmResult result;
+  bool is_done = false;
+
+  // Send reasoning_content chunk only.
+  nlohmann::json rc = {
+      {"choices",
+       {{{"delta", {{"reasoning_content", "thinking..."}}}, {"index", 0}}}},
+  };
+  EXPECT_TRUE(ParseStreamChunk("data: " + rc.dump(), content, tool_calls,
+                                result, is_done));
+  EXPECT_FALSE(is_done);
+
+  // Send [DONE] without any content chunks.
+  EXPECT_TRUE(ParseStreamChunk("data: [DONE]", content, tool_calls, result,
+                                is_done));
+  EXPECT_TRUE(is_done);
+
+  // The <think> tag should be closed at [DONE].
+  EXPECT_EQ(content, "<think>thinking...</think>");
+}
+
 }  // namespace
 }  // namespace shizuru::services

@@ -450,36 +450,59 @@ void Controller::HandleThinking(const Observation& obs) {
           for (const auto& cb : stream_token_callbacks_) {
             cb(token);
           }
-          // TTS segmentation: filter out <think>...</think> content before
-          // feeding to TTS.  The state machine tracks whether we are inside
-          // a thinking block across token boundaries.
+          // TTS segmentation: filter out structured blocks before feeding to TTS.
+          // Strips <think>...</think>, <tool_call>...</tool_call>, and
+          // <tool_result>...</tool_result> from the token stream.
           if (tts_segment_) {
-            // Scan the token character by character, accumulating only the
-            // non-thinking portions into tts_clean for TTS consumption.
             std::string tts_clean;
             for (char ch : token) {
               thinking_tag_buf_ += ch;
               if (in_thinking_block_) {
-                // Inside <think> — look for </think> closing tag.
+                // Inside a block — look for closing tags.
                 if (thinking_tag_buf_.size() >= 8 &&
                     thinking_tag_buf_.substr(thinking_tag_buf_.size() - 8) == "</think>") {
                   in_thinking_block_ = false;
                   thinking_tag_buf_.clear();
+                } else if (thinking_tag_buf_.size() >= 12 &&
+                    thinking_tag_buf_.substr(thinking_tag_buf_.size() - 12) == "</tool_call>") {
+                  in_thinking_block_ = false;
+                  thinking_tag_buf_.clear();
+                } else if (thinking_tag_buf_.size() >= 14 &&
+                    thinking_tag_buf_.substr(thinking_tag_buf_.size() - 14) == "</tool_result>") {
+                  in_thinking_block_ = false;
+                  thinking_tag_buf_.clear();
                 }
               } else {
-                // Outside <think> — look for <think> opening tag.
+                // Outside blocks — look for opening tags.
+                bool matched = false;
+                // Check <think> (7 chars)
                 if (thinking_tag_buf_.size() >= 7 &&
                     thinking_tag_buf_.substr(thinking_tag_buf_.size() - 7) == "<think>") {
                   in_thinking_block_ = true;
-                  // Remove the "<think>" characters that were speculatively
-                  // added to tts_clean (last 6 chars, since '<' was the 7th).
-                  if (tts_clean.size() >= 6) {
-                    tts_clean.erase(tts_clean.size() - 6);
-                  } else {
-                    tts_clean.clear();
-                  }
+                  if (tts_clean.size() >= 6) tts_clean.erase(tts_clean.size() - 6);
+                  else tts_clean.clear();
                   thinking_tag_buf_.clear();
-                } else {
+                  matched = true;
+                }
+                // Check <tool_call> (11 chars)
+                if (!matched && thinking_tag_buf_.size() >= 11 &&
+                    thinking_tag_buf_.substr(thinking_tag_buf_.size() - 11) == "<tool_call>") {
+                  in_thinking_block_ = true;
+                  if (tts_clean.size() >= 10) tts_clean.erase(tts_clean.size() - 10);
+                  else tts_clean.clear();
+                  thinking_tag_buf_.clear();
+                  matched = true;
+                }
+                // Check <tool_result> (13 chars)
+                if (!matched && thinking_tag_buf_.size() >= 13 &&
+                    thinking_tag_buf_.substr(thinking_tag_buf_.size() - 13) == "<tool_result>") {
+                  in_thinking_block_ = true;
+                  if (tts_clean.size() >= 12) tts_clean.erase(tts_clean.size() - 12);
+                  else tts_clean.clear();
+                  thinking_tag_buf_.clear();
+                  matched = true;
+                }
+                if (!matched) {
                   tts_clean += ch;
                 }
               }
@@ -757,12 +780,23 @@ void Controller::HandleActingResult(const Observation& obs) {
   LOG_INFO("[{}] Tool result received: id=\"{}\" success={} ({}/{})",
            MODULE_NAME, tool_call_id, success,
            pending_results_.size(), pending_tool_calls_.size());
+
+  // Inject <tool_result> marker into the streaming text flow so the UI
+  // can render it inline within the same assistant bubble.
   {
-    // Find the tool name for this call id.
     std::string tool_name;
     for (const auto& tc : pending_tool_calls_) {
       if (tc.id == tool_call_id) { tool_name = tc.name; break; }
     }
+    std::string marker = "<tool_result>{\"id\":\"" + tool_call_id +
+                         "\",\"name\":\"" + tool_name +
+                         "\",\"success\":" + (success ? "true" : "false") +
+                         ",\"output\":" + obs.content +
+                         "}</tool_result>";
+    for (const auto& cb : stream_token_callbacks_) {
+      cb(marker);
+    }
+
     std::string detail = R"({"id":")" + tool_call_id +
                          R"(","name":")" + tool_name +
                          R"(","success":)" + (success ? "true" : "false") +

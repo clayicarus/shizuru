@@ -551,5 +551,115 @@ TEST(StrategyTest, TtsThinkingFilter_ThinkingContentExcludedFromTts) {
   EXPECT_EQ(combined.find("<think>"), std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// TTS Filter: <tool_call> and <tool_result> tags excluded from TTS
+// ---------------------------------------------------------------------------
+TEST(StrategyTest, TtsFilter_ToolCallAndResultTagsExcludedFromTts) {
+  testing::MockMemoryStore memory;
+  testing::MockAuditSink audit;
+  ContextConfig ctx_cfg;
+  ctx_cfg.max_context_tokens = 100000;
+  ContextStrategy context(ctx_cfg, memory);
+  context.InitSession("tts-filter-session");
+  PolicyConfig pol_cfg;
+  PolicyLayer policy(pol_cfg, audit);
+  policy.InitSession("tts-filter-session");
+
+  // Streaming LLM that emits tokens with think, tool_call, and tool_result.
+  struct ToolTagStreamLlm : public LlmClient {
+    LlmResult Submit(const ContextWindow&) override { return {}; }
+    LlmResult SubmitStreaming(const ContextWindow&,
+                              StreamCallback on_token) override {
+      on_token("<think>reasoning</think>");
+      on_token("<tool_call>{\"name\":\"test\"}</tool_call>");
+      on_token("<tool_result>{\"success\":true}</tool_result>");
+      on_token("Final answer.");
+
+      LlmResult r;
+      r.candidate.type = ActionType::kResponse;
+      r.candidate.response_text =
+          "<think>reasoning</think>"
+          "<tool_call>{\"name\":\"test\"}</tool_call>"
+          "<tool_result>{\"success\":true}</tool_result>"
+          "Final answer.";
+      r.prompt_tokens = 10;
+      r.completion_tokens = 5;
+      return r;
+    }
+    void Cancel() override {}
+  };
+
+  std::mutex mu;
+  std::vector<io::DataFrame> tts_frames;
+  Controller::EmitFrameCallback emit = [&](const std::string& port,
+                                           io::DataFrame frame) {
+    if (port == "tts_out") {
+      std::lock_guard<std::mutex> lock(mu);
+      tts_frames.push_back(std::move(frame));
+    }
+  };
+
+  ControllerConfig cfg;
+  cfg.max_turns = 20;
+  cfg.max_retries = 0;
+  cfg.retry_base_delay = std::chrono::milliseconds(1);
+  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.token_budget = 100000;
+  cfg.action_count_limit = 50;
+  cfg.use_streaming = true;
+
+  auto tts_strat = std::make_unique<PunctuationSegmentStrategy>();
+
+  Controller ctrl("tts-filter-session", cfg,
+                  std::make_unique<ToolTagStreamLlm>(),
+                  std::move(emit), nullptr, context, policy,
+                  nullptr, nullptr, std::move(tts_strat), nullptr);
+
+  ctrl.Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  ctrl.EnqueueObservation(MakeUserObs("do something"));
+
+  // Wait for TTS frames to be emitted.
+  ASSERT_TRUE(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return !tts_frames.empty();
+  }, 3000)) << "No TTS frames emitted";
+
+  // Wait for controller to finish.
+  ASSERT_TRUE(WaitFor([&] {
+    return ctrl.GetState() == State::kListening ||
+           ctrl.GetState() == State::kIdle;
+  }, 3000));
+
+  ctrl.Shutdown();
+
+  std::lock_guard<std::mutex> lock(mu);
+
+  // Concatenate all TTS payloads.
+  std::string combined;
+  for (const auto& f : tts_frames) {
+    combined.append(f.payload.begin(), f.payload.end());
+  }
+
+  // TTS must contain ONLY "Final answer." — no think/tool_call/tool_result.
+  EXPECT_EQ(combined, "Final answer.");
+  EXPECT_EQ(combined.find("<think>"), std::string::npos);
+  EXPECT_EQ(combined.find("<tool_call>"), std::string::npos);
+  EXPECT_EQ(combined.find("<tool_result>"), std::string::npos);
+  EXPECT_EQ(combined.find("reasoning"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// StripThinkingFilter: strips all tag types
+// ---------------------------------------------------------------------------
+TEST(StripThinkingFilterTest, StripsAllTagTypes) {
+  StripThinkingFilter filter;
+  std::string input =
+      "<think>reasoning</think>Hello<tool_call>json</tool_call>"
+      " world<tool_result>result</tool_result>!";
+  EXPECT_EQ(filter.Filter(input), "Hello world!");
+}
+
 }  // namespace
 }  // namespace shizuru::core

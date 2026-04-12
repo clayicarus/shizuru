@@ -316,6 +316,7 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   rt_cfg.llm.model     = llm_model;
   rt_cfg.llm.connect_timeout = std::chrono::seconds(10);
   rt_cfg.llm.read_timeout    = std::chrono::seconds(60);
+  rt_cfg.llm.enable_thinking = true;
   rt_cfg.context.default_system_instruction = system_instr;
   rt_cfg.controller.max_turns     = max_turns;
   rt_cfg.controller.use_streaming = true;

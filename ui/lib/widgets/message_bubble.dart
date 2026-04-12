@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../providers/conversation_provider.dart';
 
@@ -47,11 +48,7 @@ class _MessageBubbleState extends State<MessageBubble>
 
   @override
   Widget build(BuildContext context) {
-    final role = widget.message.role;
-    if (role == 'tool_call') return _buildToolCallCard(context);
-    if (role == 'tool_result') return const SizedBox.shrink();
-
-    final isUser = role == 'user';
+    final isUser = widget.message.role == 'user';
     final isStreaming = widget.message.isStreaming;
     final hasText = widget.message.text.isNotEmpty;
 
@@ -94,144 +91,178 @@ class _MessageBubbleState extends State<MessageBubble>
     );
   }
 
-  static final _thinkRegex = RegExp(r'<think>(.*?)</think>', dotAll: true);
+  // Parse assistant text into segments: plain text, <think>, <tool_call>, <tool_result>.
+  static final _segmentRegex = RegExp(
+    r'<think>(.*?)</think>|<tool_call>(.*?)</tool_call>|<tool_result>(.*?)</tool_result>',
+    dotAll: true,
+  );
 
   List<Widget> _buildAssistantContent(BuildContext context) {
     final text = widget.message.text;
-    final matches = _thinkRegex.allMatches(text);
-    if (matches.isEmpty) return [Text(text)];
-
-    final thinkingBlocks = matches.map((m) => m.group(1) ?? '').toList();
-    final visibleText = text.replaceAll(_thinkRegex, '').trim();
     final widgets = <Widget>[];
+    int lastEnd = 0;
 
-    if (thinkingBlocks.isNotEmpty) {
-      widgets.add(
-        GestureDetector(
-          onTap: () => setState(() => _thinkingExpanded = !_thinkingExpanded),
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: Colors.grey.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      _thinkingExpanded
-                          ? Icons.expand_less
-                          : Icons.expand_more,
-                      size: 16,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Thinking...',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            fontStyle: FontStyle.italic,
-                          ),
-                    ),
-                  ],
-                ),
-                if (_thinkingExpanded) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    thinkingBlocks.join('\n'),
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Colors.grey[600],
-                        ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      );
-      if (visibleText.isNotEmpty) widgets.add(const SizedBox(height: 6));
+    for (final match in _segmentRegex.allMatches(text)) {
+      // Plain text before this match.
+      if (match.start > lastEnd) {
+        final plain = text.substring(lastEnd, match.start).trim();
+        if (plain.isNotEmpty) {
+          widgets.add(Text(plain));
+          widgets.add(const SizedBox(height: 4));
+        }
+      }
+      lastEnd = match.end;
+
+      if (match.group(1) != null) {
+        // <think> block
+        widgets.add(_buildThinkingBlock(context, match.group(1)!));
+        widgets.add(const SizedBox(height: 4));
+      } else if (match.group(2) != null) {
+        // <tool_call> block
+        widgets.add(_buildToolCallInline(context, match.group(2)!));
+        widgets.add(const SizedBox(height: 4));
+      } else if (match.group(3) != null) {
+        // <tool_result> block
+        widgets.add(_buildToolResultInline(context, match.group(3)!));
+        widgets.add(const SizedBox(height: 4));
+      }
     }
 
-    if (visibleText.isNotEmpty) widgets.add(Text(visibleText));
+    // Remaining plain text after last match.
+    if (lastEnd < text.length) {
+      final plain = text.substring(lastEnd).trim();
+      if (plain.isNotEmpty) {
+        widgets.add(Text(plain));
+      }
+    }
+
+    // If no segments matched at all, just show the raw text.
+    if (widgets.isEmpty && text.isNotEmpty) {
+      widgets.add(Text(text));
+    }
+
     return widgets;
   }
 
-  Widget _buildToolCallCard(BuildContext context) {
-    final msg = widget.message;
-    final hasResult = msg.toolSuccess != null;
-    final success = msg.toolSuccess ?? false;
-
-    return Align(
-      alignment: Alignment.centerLeft,
+  Widget _buildThinkingBlock(BuildContext context, String content) {
+    return GestureDetector(
+      onTap: () => setState(() => _thinkingExpanded = !_thinkingExpanded),
       child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.75,
+        width: double.infinity,
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.grey.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(8),
         ),
-        child: Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                Row(
-                  children: [
-                    if (!hasResult)
-                      const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    else if (success)
-                      const Icon(Icons.check_circle, size: 16, color: Colors.green)
-                    else
-                      const Icon(Icons.cancel, size: 16, color: Colors.red),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        msg.toolName ?? 'tool',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ],
+                Icon(
+                  _thinkingExpanded ? Icons.expand_less : Icons.expand_more,
+                  size: 16,
                 ),
-                if (msg.toolArguments != null &&
-                    msg.toolArguments!.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  ExpansionTile(
-                    tilePadding: EdgeInsets.zero,
-                    title: Text(
-                      'Arguments',
-                      style: Theme.of(context).textTheme.labelSmall,
-                    ),
-                    children: [
-                      SizedBox(
-                        width: double.infinity,
-                        child: Text(
-                          msg.toolArguments!,
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 12,
-                          ),
-                        ),
+                const SizedBox(width: 4),
+                Text(
+                  'Thinking...',
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        fontStyle: FontStyle.italic,
                       ),
-                    ],
-                  ),
-                ],
-                if (hasResult && msg.text.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    msg.text,
-                    style: Theme.of(context).textTheme.bodySmall,
-                    maxLines: 5,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
+                ),
               ],
             ),
-          ),
+            if (_thinkingExpanded) ...[
+              const SizedBox(height: 4),
+              Text(
+                content.trim(),
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: Colors.grey[600]),
+              ),
+            ],
+          ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildToolCallInline(BuildContext context, String jsonStr) {
+    String name = 'tool';
+    String args = '';
+    try {
+      final json = jsonDecode(jsonStr) as Map<String, dynamic>;
+      name = json['name'] as String? ?? 'tool';
+      args = json['arguments']?.toString() ?? '';
+    } catch (_) {}
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.blue.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.blue.withValues(alpha: 0.2)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.build_outlined, size: 14, color: Colors.blue),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              name + (args.isNotEmpty && args != '{}' ? '($args)' : ''),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Colors.blue[700],
+                    fontFamily: 'monospace',
+                  ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToolResultInline(BuildContext context, String jsonStr) {
+    bool success = false;
+    String output = '';
+    try {
+      final json = jsonDecode(jsonStr) as Map<String, dynamic>;
+      success = json['success'] as bool? ?? false;
+      output = json['output']?.toString() ?? '';
+    } catch (_) {}
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: (success ? Colors.green : Colors.red).withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: (success ? Colors.green : Colors.red).withValues(alpha: 0.2),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            success ? Icons.check_circle_outline : Icons.cancel_outlined,
+            size: 14,
+            color: success ? Colors.green : Colors.red,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              output.isNotEmpty ? output : (success ? 'Done' : 'Failed'),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace',
+                  ),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
       ),
     );
   }

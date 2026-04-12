@@ -118,6 +118,11 @@ std::string SerializeRequest(const core::ContextWindow& context,
     body["tools"] = SerializeTools(config.tools);
   }
 
+  // Extended thinking mode.
+  if (config.enable_thinking) {
+    body["enable_thinking"] = true;
+  }
+
   return body.dump();
 }
 
@@ -219,6 +224,16 @@ bool ParseStreamChunk(const std::string& data_line,
   if (data == "[DONE]") {
     is_done = true;
 
+    // Close any unclosed thinking tag.
+    if (!accumulated_content.empty()) {
+      auto last_open = accumulated_content.rfind("<think>");
+      auto last_close = accumulated_content.rfind("</think>");
+      if (last_open != std::string::npos &&
+          (last_close == std::string::npos || last_close < last_open)) {
+        accumulated_content += "</think>";
+      }
+    }
+
     // Build final ActionCandidate from accumulated data.
     if (!accumulated_tool_calls.empty() &&
         accumulated_tool_calls.is_array() &&
@@ -242,6 +257,15 @@ bool ParseStreamChunk(const std::string& data_line,
           }
         }
         result.candidate.tool_calls.push_back(std::move(call));
+      }
+
+      // Append <tool_call> markers to accumulated_content so the streaming
+      // callback delivers them to the UI as part of the text flow.
+      for (const auto& tc : result.candidate.tool_calls) {
+        accumulated_content += "<tool_call>{\"name\":\"" + tc.name +
+                               "\",\"id\":\"" + tc.id +
+                               "\",\"arguments\":" + tc.arguments +
+                               "}</tool_call>";
       }
     } else if (!accumulated_content.empty()) {
       result.candidate.type = core::ActionType::kResponse;
@@ -281,9 +305,40 @@ bool ParseStreamChunk(const std::string& data_line,
 
   auto& d = delta["delta"];
 
+  // Accumulate reasoning_content delta (thinking mode).
+  // Wrap in <think>...</think> tags so downstream consumers (TTS filter,
+  // UI rendering) can identify thinking content.
+  if (d.contains("reasoning_content") && !d["reasoning_content"].is_null()) {
+    const auto& rc = d["reasoning_content"].get<std::string>();
+    if (!rc.empty()) {
+      // Open <think> tag only if we haven't opened one yet, or the last one
+      // was already closed.
+      auto last_open = accumulated_content.rfind("<think>");
+      auto last_close = accumulated_content.rfind("</think>");
+      bool need_open = (last_open == std::string::npos) ||
+                       (last_close != std::string::npos && last_close > last_open);
+      if (need_open) {
+        accumulated_content += "<think>";
+      }
+      accumulated_content += rc;
+    }
+  }
+
   // Accumulate content delta.
   if (d.contains("content") && !d["content"].is_null()) {
-    accumulated_content += d["content"].get<std::string>();
+    const auto& content_delta = d["content"].get<std::string>();
+    if (!content_delta.empty()) {
+      // If we were in a thinking block, close it before appending content.
+      if (!accumulated_content.empty()) {
+        auto last_open = accumulated_content.rfind("<think>");
+        auto last_close = accumulated_content.rfind("</think>");
+        if (last_open != std::string::npos &&
+            (last_close == std::string::npos || last_close < last_open)) {
+          accumulated_content += "</think>";
+        }
+      }
+      accumulated_content += content_delta;
+    }
   }
 
   // Accumulate tool_calls delta.

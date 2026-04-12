@@ -1,7 +1,5 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../bridge/activity_kind.dart';
 import '../providers/agent_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../widgets/debug_panel.dart';
@@ -20,41 +18,6 @@ class ConversationScreen extends StatefulWidget {
 class _ConversationScreenState extends State<ConversationScreen> {
   final TextEditingController _inputController = TextEditingController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
-  bool _wired = false;
-
-  @override
-  void initState() {
-    super.initState();
-    // Wire activity forwarding once after first frame.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_wired) return;
-      _wired = true;
-      final agent = context.read<AgentProvider>();
-      final conv = context.read<ConversationProvider>();
-      agent.setActivityForwardCallback((kind, detail) {
-        final ak = ActivityKindExtension.fromInt(kind);
-        if (ak == ActivityKind.toolDispatched) {
-          try {
-            final json = jsonDecode(detail) as Map<String, dynamic>;
-            conv.addToolCall(
-              json['name'] as String? ?? '',
-              json['arguments']?.toString() ?? '{}',
-              json['id'] as String? ?? '',
-            );
-          } catch (_) {}
-        } else if (ak == ActivityKind.toolResultReceived) {
-          try {
-            final json = jsonDecode(detail) as Map<String, dynamic>;
-            conv.updateToolResult(
-              json['id'] as String? ?? '',
-              json['success'] as bool? ?? false,
-              json['result']?.toString() ?? '',
-            );
-          } catch (_) {}
-        }
-      });
-    });
-  }
 
   @override
   void dispose() {

@@ -37,6 +37,10 @@ struct OpenAiConfig {
 
   // Tool definitions for function calling.
   std::vector<ToolDefinition> tools;
+
+  // Enable extended thinking / chain-of-thought mode.
+  // When true, the request includes "enable_thinking": true.
+  bool enable_thinking = false;
 };
 
 }  // namespace shizuru::services

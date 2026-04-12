@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
   // ── CLI args ──────────────────────────────────────────────────────────────
   bool debug_mode = false;
   std::string base_url = "https://dashscope.aliyuncs.com";
-  std::string model    = "qwen3-coder-next";
+  std::string model    = "qwen3.5-35b-a3b";
   std::string voice_id;  // empty → ElevenLabsConfig default (Rachel)
 
   for (int i = 1; i < argc; ++i) {
@@ -185,6 +185,7 @@ int main(int argc, char* argv[]) {
   rt_cfg.llm.model                     = model;
   rt_cfg.llm.connect_timeout           = std::chrono::seconds(10);
   rt_cfg.llm.read_timeout              = std::chrono::seconds(60);
+  rt_cfg.llm.enable_thinking           = true;
   rt_cfg.context.default_system_instruction =
       "You are a helpful voice assistant. Keep responses concise and natural "
       "for speech. Avoid markdown formatting.";
