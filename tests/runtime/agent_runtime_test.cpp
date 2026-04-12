@@ -109,7 +109,7 @@ RuntimeConfig MakeConfig(const std::string& base_url) {
   cfg.controller.max_turns = 5;
   cfg.controller.max_retries = 0;
   cfg.controller.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.controller.wall_clock_timeout = std::chrono::seconds(10);
+  cfg.controller.turn_timeout = std::chrono::seconds(10);
   cfg.controller.token_budget = 100000;
   cfg.controller.action_count_limit = 10;
   cfg.context.max_context_tokens = 100000;

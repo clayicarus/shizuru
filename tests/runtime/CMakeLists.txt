@@ -90,3 +90,38 @@ target_include_directories(tool_dispatch_device_test
 )
 add_test(NAME tool_dispatch_device_test COMMAND tool_dispatch_device_test)
 set_tests_properties(tool_dispatch_device_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=100")
+
+# AgentRuntime bug condition exploration test (Bug 3)
+add_executable(agent_runtime_bug_condition_test
+  agent_runtime_bug_condition_test.cpp
+)
+target_link_libraries(agent_runtime_bug_condition_test
+  PRIVATE shizuru_runtime
+  PRIVATE httplib::httplib
+  PRIVATE nlohmann_json::nlohmann_json
+  PRIVATE GTest::gtest_main
+  PRIVATE rapidcheck_gtest
+)
+target_include_directories(agent_runtime_bug_condition_test
+  PRIVATE ${CMAKE_SOURCE_DIR}
+  PRIVATE ${CMAKE_SOURCE_DIR}/tests/runtime
+)
+add_test(NAME agent_runtime_bug_condition_test COMMAND agent_runtime_bug_condition_test)
+set_tests_properties(agent_runtime_bug_condition_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=5")
+
+# AgentRuntime integration tests (full pipeline, interrupt, tool call round-trip)
+add_executable(agent_runtime_integration_test
+  agent_runtime_integration_test.cpp
+)
+target_link_libraries(agent_runtime_integration_test
+  PRIVATE shizuru_runtime
+  PRIVATE httplib::httplib
+  PRIVATE nlohmann_json::nlohmann_json
+  PRIVATE GTest::gtest_main
+  PRIVATE rapidcheck_gtest
+)
+target_include_directories(agent_runtime_integration_test
+  PRIVATE ${CMAKE_SOURCE_DIR}
+  PRIVATE ${CMAKE_SOURCE_DIR}/tests/runtime
+)
+add_test(NAME agent_runtime_integration_test COMMAND agent_runtime_integration_test)

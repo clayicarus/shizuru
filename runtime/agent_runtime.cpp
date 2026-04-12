@@ -92,22 +92,10 @@ bool AgentRuntime::SetRouteEnabled(const PortAddress& source,
 // ---------------------------------------------------------------------------
 
 std::string AgentRuntime::StartSession() {
-  {
-    std::unique_lock<std::shared_mutex> lock(devices_mutex_);
-    if (HasActiveSessionLocked()) {
-      // Stop devices under the lock before rebuilding.
-      for (auto it = registration_order_.rbegin();
-           it != registration_order_.rend(); ++it) {
-        auto dev_it = devices_.find(*it);
-        if (dev_it != devices_.end()) {
-          try { dev_it->second->Stop(); } catch (...) {}
-        }
-      }
-      devices_.clear();
-      registration_order_.clear();
-      route_table_ = RouteTable{};
-      core_device_ = nullptr;
-    }
+  // Rebuilding an active runtime reuses the same shutdown path so devices are
+  // stopped without holding devices_mutex_ during callbacks.
+  if (HasActiveSession()) {
+    Shutdown();
   }
 
   const std::string session_id =
@@ -235,6 +223,7 @@ std::string AgentRuntime::StartSession() {
 }
 
 void AgentRuntime::SendMessage(const std::string& content) {
+  std::shared_lock<std::shared_mutex> lock(devices_mutex_);
   if (!core_device_) {
     LOG_WARN("[{}] SendMessage called with no active session", MODULE_NAME);
     return;
@@ -268,18 +257,26 @@ void AgentRuntime::Shutdown() {
   // on devices_mutex_.  If we held a unique (write) lock while calling
   // Stop(), the callback thread would block on the read lock, and Stop()
   // would block waiting for the callback thread — classic deadlock.
-  std::vector<std::pair<std::string, io::IoDevice*>> to_stop;
+  //
+  // We move all ownership out of devices_ in the first lock scope so that
+  // concurrent Shutdown() calls see devices_.empty() and return immediately,
+  // preventing double-Stop() on the same device.
+  std::vector<std::pair<std::string, std::unique_ptr<io::IoDevice>>> to_stop;
   {
     std::unique_lock<std::shared_mutex> lock(devices_mutex_);
     if (devices_.empty()) { return; }
+    core_device_ = nullptr;  // Invalidate FIRST — concurrent SendMessage sees null
     // Collect in reverse registration order (Requirement 8.6).
-    for (auto it = registration_order_.rbegin();
-         it != registration_order_.rend(); ++it) {
+    auto order = std::move(registration_order_);
+    registration_order_.clear();
+    for (auto it = order.rbegin(); it != order.rend(); ++it) {
       auto dev_it = devices_.find(*it);
       if (dev_it != devices_.end()) {
-        to_stop.push_back({dev_it->first, dev_it->second.get()});
+        to_stop.emplace_back(dev_it->first, std::move(dev_it->second));
       }
     }
+    devices_.clear();
+    route_table_ = RouteTable{};
   }
 
   // Stop devices without holding the lock.
@@ -290,16 +287,6 @@ void AgentRuntime::Shutdown() {
       LOG_ERROR("[{}] Error stopping device {}: {}", MODULE_NAME, entry.first,
                 e.what());
     }
-  }
-  to_stop.clear();
-
-  // Re-acquire the lock to clean up state.
-  {
-    std::unique_lock<std::shared_mutex> lock(devices_mutex_);
-    devices_.clear();
-    registration_order_.clear();
-    route_table_ = RouteTable{};
-    core_device_ = nullptr;
   }
 
   LOG_INFO("[{}] Session shut down", MODULE_NAME);
