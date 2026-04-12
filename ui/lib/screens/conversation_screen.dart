@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../bridge/activity_kind.dart';
 import '../providers/agent_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../widgets/debug_panel.dart';
@@ -18,6 +20,41 @@ class ConversationScreen extends StatefulWidget {
 class _ConversationScreenState extends State<ConversationScreen> {
   final TextEditingController _inputController = TextEditingController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  bool _wired = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Wire activity forwarding once after first frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_wired) return;
+      _wired = true;
+      final agent = context.read<AgentProvider>();
+      final conv = context.read<ConversationProvider>();
+      agent.setActivityForwardCallback((kind, detail) {
+        final ak = ActivityKindExtension.fromInt(kind);
+        if (ak == ActivityKind.toolDispatched) {
+          try {
+            final json = jsonDecode(detail) as Map<String, dynamic>;
+            conv.addToolCall(
+              json['name'] as String? ?? '',
+              json['arguments']?.toString() ?? '{}',
+              json['id'] as String? ?? '',
+            );
+          } catch (_) {}
+        } else if (ak == ActivityKind.toolResultReceived) {
+          try {
+            final json = jsonDecode(detail) as Map<String, dynamic>;
+            conv.updateToolResult(
+              json['id'] as String? ?? '',
+              json['success'] as bool? ?? false,
+              json['result']?.toString() ?? '',
+            );
+          } catch (_) {}
+        }
+      });
+    });
+  }
 
   @override
   void dispose() {
@@ -47,6 +84,26 @@ class _ConversationScreenState extends State<ConversationScreen> {
       appBar: AppBar(
         title: StateIndicator(state: agent.state, activity: agent.activity),
         actions: [
+          IconButton(
+            icon: Icon(
+              agent.captureActive ? Icons.mic : Icons.mic_none,
+              color: agent.captureActive ? Colors.red : null,
+            ),
+            tooltip: agent.captureActive ? 'Stop mic' : 'Start mic',
+            onPressed: agent.isInitialized
+                ? () => agent.toggleCapture()
+                : null,
+          ),
+          IconButton(
+            icon: Icon(
+              agent.playoutActive ? Icons.volume_up : Icons.volume_off,
+              color: agent.playoutActive ? Colors.blue : null,
+            ),
+            tooltip: agent.playoutActive ? 'Stop speaker' : 'Start speaker',
+            onPressed: agent.isInitialized
+                ? () => agent.togglePlayout()
+                : null,
+          ),
           IconButton(
             icon: const Icon(Icons.bug_report_outlined),
             tooltip: 'Debug',
@@ -86,27 +143,12 @@ class _ConversationScreenState extends State<ConversationScreen> {
               children: [
                 IconButton(
                   icon: Icon(
-                    agent.captureActive ? Icons.mic : Icons.mic_none,
-                    color: agent.captureActive ? Colors.red : null,
+                    agent.thinkingEnabled
+                        ? Icons.psychology
+                        : Icons.psychology_outlined,
                   ),
-                  tooltip: agent.captureActive ? 'Stop mic' : 'Start mic',
-                  onPressed: agent.isInitialized
-                      ? () => agent.toggleCapture()
-                      : null,
-                ),
-                IconButton(
-                  icon: Icon(
-                    agent.playoutActive
-                        ? Icons.volume_up
-                        : Icons.volume_off,
-                    color: agent.playoutActive ? Colors.blue : null,
-                  ),
-                  tooltip: agent.playoutActive
-                      ? 'Stop speaker'
-                      : 'Start speaker',
-                  onPressed: agent.isInitialized
-                      ? () => agent.togglePlayout()
-                      : null,
+                  tooltip: 'Thinking mode',
+                  onPressed: () => agent.toggleThinking(),
                 ),
                 Expanded(
                   child: TextField(

@@ -26,6 +26,12 @@ class AgentProvider extends ChangeNotifier {
   // Activity tracking for fine-grained UI status.
   String _activity = '';
 
+  // Thinking mode toggle (UI-only for now, bridge API TBD).
+  bool _thinkingEnabled = false;
+
+  // Forward activity events to other providers (e.g. ConversationProvider).
+  void Function(int kind, String detail)? _activityForwardCallback;
+
   // State transition log for debug panel.
   final List<ActivityLogEntry> _activityLog = [];
   static const int _maxLogEntries = 200;
@@ -39,6 +45,17 @@ class AgentProvider extends ChangeNotifier {
   /// Human-readable activity string for the UI.
   /// Returns empty string when there's nothing special to show.
   String get activity => _activity;
+
+  bool get thinkingEnabled => _thinkingEnabled;
+
+  void toggleThinking() {
+    _thinkingEnabled = !_thinkingEnabled;
+    notifyListeners();
+  }
+
+  void setActivityForwardCallback(void Function(int kind, String detail) cb) {
+    _activityForwardCallback = cb;
+  }
 
   /// Activity log entries for the debug panel.
   List<ActivityLogEntry> get activityLog => List.unmodifiable(_activityLog);
@@ -203,6 +220,7 @@ class AgentProvider extends ChangeNotifier {
         _activity = 'Turn limit reached';
         break;
     }
+    _activityForwardCallback?.call(kind, detail);
     notifyListeners();
   }
 

@@ -1,16 +1,26 @@
 import 'package:flutter/widgets.dart';
 
 class ConversationMessage {
-  final String role; // 'user' | 'assistant'
+  final String role; // 'user' | 'assistant' | 'tool_call' | 'tool_result'
   String text;
   final DateTime timestamp;
   bool isStreaming;
+
+  // Tool call fields.
+  String? toolName;
+  String? toolArguments;
+  String? toolCallId;
+  bool? toolSuccess;
 
   ConversationMessage({
     required this.role,
     required this.text,
     required this.timestamp,
     this.isStreaming = false,
+    this.toolName,
+    this.toolArguments,
+    this.toolCallId,
+    this.toolSuccess,
   });
 }
 
@@ -67,6 +77,38 @@ class ConversationProvider extends ChangeNotifier {
     notifyListeners();
     // During streaming use jumpTo to avoid animation conflicts causing flicker.
     _scrollToBottom(animate: !isPartial);
+  }
+
+  void addToolCall(String name, String arguments, String callId) {
+    _messages.add(ConversationMessage(
+      role: 'tool_call',
+      text: '',
+      timestamp: DateTime.now(),
+      toolName: name,
+      toolArguments: arguments,
+      toolCallId: callId,
+    ));
+    notifyListeners();
+    _scrollToBottom(animate: true);
+  }
+
+  void updateToolResult(String callId, bool success, String resultText) {
+    final idx = _messages.lastIndexWhere(
+        (m) => m.role == 'tool_call' && m.toolCallId == callId);
+    if (idx >= 0) {
+      _messages[idx].toolSuccess = success;
+      _messages[idx].text = resultText;
+    } else {
+      _messages.add(ConversationMessage(
+        role: 'tool_result',
+        text: resultText,
+        timestamp: DateTime.now(),
+        toolCallId: callId,
+        toolSuccess: success,
+      ));
+    }
+    notifyListeners();
+    _scrollToBottom(animate: true);
   }
 
   void clearMessages() {
