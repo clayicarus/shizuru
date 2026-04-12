@@ -12,7 +12,17 @@ void EnsurePaInitialized() {
       throw std::runtime_error(
           std::string("PortAudio init failed: ") + Pa_GetErrorText(err));
     }
-    std::atexit([] { Pa_Terminate(); });
+    // Do NOT register Pa_Terminate via atexit.  The atexit handler runs
+    // during static destruction / process exit, at which point PaPlayer
+    // and PaRecorder streams may still be open.  Pa_Terminate calls
+    // CloseOpenStreams → AbortStream → AudioOutputUnitStop, which blocks
+    // waiting for the CoreAudio IO thread callback to finish.  If that
+    // callback is itself waiting on a lock held by the main thread (e.g.
+    // DispatchFrame's shared_mutex), the process deadlocks and aborts.
+    //
+    // Instead, streams are closed explicitly by PaPlayer::Stop() and
+    // PaRecorder::Stop() (called from device destructors and
+    // AgentRuntime::Shutdown).  The OS reclaims all resources on exit.
     return true;
   }();
   (void)initialized;
