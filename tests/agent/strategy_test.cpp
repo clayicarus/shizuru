@@ -458,5 +458,98 @@ TEST(ResponseFilterIntegrationTest, EmptyResponseSuppressed) {
   EXPECT_TRUE(responses.empty());
 }
 
+// ---------------------------------------------------------------------------
+// TTS Thinking Filter: <think> content must NOT reach TTS
+// ---------------------------------------------------------------------------
+TEST(StrategyTest, TtsThinkingFilter_ThinkingContentExcludedFromTts) {
+  testing::MockMemoryStore memory;
+  testing::MockAuditSink audit;
+  ContextConfig ctx_cfg;
+  ctx_cfg.max_context_tokens = 100000;
+  ContextStrategy context(ctx_cfg, memory);
+  context.InitSession("test-session");
+  PolicyConfig pol_cfg;
+  PolicyLayer policy(pol_cfg, audit);
+  policy.InitSession("test-session");
+
+  // Custom streaming LLM that emits tokens with <think> blocks.
+  struct ThinkingStreamLlm : public LlmClient {
+    LlmResult Submit(const ContextWindow&) override { return {}; }
+    LlmResult SubmitStreaming(const ContextWindow&,
+                              StreamCallback on_token) override {
+      on_token("<think>");
+      on_token("internal reasoning");
+      on_token("</think>");
+      on_token("Hello ");
+      on_token("world.");
+
+      LlmResult r;
+      r.candidate.type = ActionType::kResponse;
+      r.candidate.response_text =
+          "<think>internal reasoning</think>Hello world.";
+      r.prompt_tokens = 10;
+      r.completion_tokens = 5;
+      return r;
+    }
+    void Cancel() override {}
+  };
+
+  std::mutex mu;
+  std::vector<io::DataFrame> tts_frames;
+  Controller::EmitFrameCallback emit = [&](const std::string& port,
+                                           io::DataFrame frame) {
+    if (port == "tts_out") {
+      std::lock_guard<std::mutex> lock(mu);
+      tts_frames.push_back(std::move(frame));
+    }
+  };
+
+  ControllerConfig cfg;
+  cfg.max_turns = 20;
+  cfg.max_retries = 0;
+  cfg.retry_base_delay = std::chrono::milliseconds(1);
+  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.token_budget = 100000;
+  cfg.action_count_limit = 50;
+  cfg.use_streaming = true;
+
+  auto tts_strat = std::make_unique<PunctuationSegmentStrategy>();
+
+  Controller ctrl("test-session", cfg,
+                  std::make_unique<ThinkingStreamLlm>(),
+                  std::move(emit), nullptr, context, policy,
+                  nullptr, nullptr, std::move(tts_strat), nullptr);
+
+  ctrl.Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  ctrl.EnqueueObservation(MakeUserObs("say something"));
+
+  // Wait for TTS frames to be emitted.
+  ASSERT_TRUE(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return !tts_frames.empty();
+  }, 3000)) << "No TTS frames emitted";
+
+  // Wait for controller to finish responding.
+  ASSERT_TRUE(WaitFor([&] {
+    return ctrl.GetState() == State::kListening ||
+           ctrl.GetState() == State::kIdle;
+  }, 3000));
+
+  ctrl.Shutdown();
+
+  std::lock_guard<std::mutex> lock(mu);
+
+  // Concatenate all TTS payloads — must NOT contain thinking content.
+  std::string combined;
+  for (const auto& f : tts_frames) {
+    combined.append(f.payload.begin(), f.payload.end());
+  }
+  EXPECT_EQ(combined, "Hello world.");
+  EXPECT_EQ(combined.find("internal reasoning"), std::string::npos);
+  EXPECT_EQ(combined.find("<think>"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace shizuru::core

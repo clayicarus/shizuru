@@ -35,4 +35,7 @@ bool ParseStreamChunk(const std::string& data_line,
                       core::LlmResult& result,
                       bool& is_done);
 
+// Generate a unique tool call ID when the API doesn't provide one.
+std::string GenerateToolCallId();
+
 }  // namespace shizuru::services

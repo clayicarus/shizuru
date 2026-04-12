@@ -159,6 +159,8 @@ class Controller {
   int total_completion_tokens_ = 0;
   int action_count_ = 0;
   bool first_token_logged_ = false;
+  bool in_thinking_block_ = false;  // Tracks <think>...</think> for TTS filtering
+  std::string thinking_tag_buf_;    // Partial tag accumulator
   std::chrono::steady_clock::time_point session_start_;
   std::chrono::steady_clock::time_point last_activity_;
   bool conversation_active_ = false;

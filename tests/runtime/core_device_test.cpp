@@ -155,6 +155,13 @@ TEST(CoreDeviceTest, ToolCallActionCandidateToDataFrame) {
       r.candidate.type = core::ActionType::kToolCall;
       r.candidate.action_name = "search";
       r.candidate.arguments = "{}";
+      {
+        core::ToolCall tc;
+        tc.id = "call_dev_1";
+        tc.name = "search";
+        tc.arguments = "{}";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = core::ActionType::kResponse;
       r.candidate.response_text = "done";
@@ -257,6 +264,13 @@ TEST(CoreDeviceTest, ToolResultInPortCreatesToolResultObservation) {
       r.candidate.type = core::ActionType::kToolCall;
       r.candidate.action_name = "search";
       r.candidate.arguments = "{}";
+      {
+        core::ToolCall tc;
+        tc.id = "call_dev_2";
+        tc.name = "search";
+        tc.arguments = "{}";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = core::ActionType::kResponse;
       r.candidate.response_text = "done";
@@ -294,6 +308,13 @@ TEST(CoreDeviceTest, ToolResultInPortCreatesToolResultObservation) {
       r.candidate.type = core::ActionType::kToolCall;
       r.candidate.action_name = "search";
       r.candidate.arguments = "{}";
+      {
+        core::ToolCall tc;
+        tc.id = "call_dev_3";
+        tc.name = "search";
+        tc.arguments = "{}";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = core::ActionType::kResponse;
       r.candidate.response_text = "done";

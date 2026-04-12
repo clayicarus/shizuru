@@ -1,8 +1,20 @@
 #include "llm/openai/json_parser.h"
 
+#include <random>
 #include <stdexcept>
 
 namespace shizuru::services {
+
+// Generate a unique tool call ID when the API doesn't provide one.
+std::string GenerateToolCallId() {
+  static thread_local std::mt19937 rng(std::random_device{}());
+  static constexpr char kChars[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+  std::string id = "call_";
+  for (int i = 0; i < 12; ++i) {
+    id += kChars[rng() % (sizeof(kChars) - 1)];
+  }
+  return id;
+}
 
 namespace {
 
@@ -54,18 +66,16 @@ core::ActionCandidate ParseCandidate(const nlohmann::json& choice) {
 
     for (const auto& tc : message["tool_calls"]) {
       core::ToolCall call;
-      if (tc.contains("id")) {
+      if (tc.contains("id") && !tc["id"].get<std::string>().empty()) {
         call.id = tc["id"].get<std::string>();
+      } else {
+        call.id = GenerateToolCallId();
       }
       call.name = tc.at("function").at("name").get<std::string>();
       call.arguments = tc.at("function").at("arguments").get<std::string>();
       ac.tool_calls.push_back(std::move(call));
     }
 
-    // Legacy fields mirror the first tool call.
-    ac.action_name = ac.tool_calls[0].name;
-    ac.arguments = ac.tool_calls[0].arguments;
-    ac.response_text = ac.tool_calls[0].id;
     return ac;
   }
 
@@ -218,8 +228,10 @@ bool ParseStreamChunk(const std::string& data_line,
       for (const auto& tc : accumulated_tool_calls) {
         if (tc.empty()) continue;
         core::ToolCall call;
-        if (tc.contains("id")) {
+        if (tc.contains("id") && !tc["id"].get<std::string>().empty()) {
           call.id = tc["id"].get<std::string>();
+        } else {
+          call.id = GenerateToolCallId();
         }
         if (tc.contains("function")) {
           if (tc["function"].contains("name")) {
@@ -230,13 +242,6 @@ bool ParseStreamChunk(const std::string& data_line,
           }
         }
         result.candidate.tool_calls.push_back(std::move(call));
-      }
-
-      // Legacy fields mirror the first tool call.
-      if (!result.candidate.tool_calls.empty()) {
-        result.candidate.action_name = result.candidate.tool_calls[0].name;
-        result.candidate.arguments = result.candidate.tool_calls[0].arguments;
-        result.candidate.response_text = result.candidate.tool_calls[0].id;
       }
     } else if (!accumulated_content.empty()) {
       result.candidate.type = core::ActionType::kResponse;

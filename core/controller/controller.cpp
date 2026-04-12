@@ -413,6 +413,8 @@ void Controller::HandleThinking(const Observation& obs) {
   // Build context window.
   auto window = context_.BuildContext(session_id_, obs);
   first_token_logged_ = false;  // Reset for this turn's latency measurement.
+  in_thinking_block_ = false;   // Reset thinking tag state for this turn.
+  thinking_tag_buf_.clear();
   LOG_DEBUG("[{}] Context built: {} messages, ~{} tokens",
             MODULE_NAME, window.messages.size(), window.estimated_tokens);
 
@@ -443,12 +445,48 @@ void Controller::HandleThinking(const Observation& obs) {
             first_token_logged_ = true;
           }
           // Always fire raw token callbacks (for display / UI).
+          // UI receives the full stream including <think> tags and decides
+          // how to render them.
           for (const auto& cb : stream_token_callbacks_) {
             cb(token);
           }
-          // TTS segmentation: buffer and flush when ready.
+          // TTS segmentation: filter out <think>...</think> content before
+          // feeding to TTS.  The state machine tracks whether we are inside
+          // a thinking block across token boundaries.
           if (tts_segment_) {
-            tts_segment_->Append(token);
+            // Scan the token character by character, accumulating only the
+            // non-thinking portions into tts_clean for TTS consumption.
+            std::string tts_clean;
+            for (char ch : token) {
+              thinking_tag_buf_ += ch;
+              if (in_thinking_block_) {
+                // Inside <think> — look for </think> closing tag.
+                if (thinking_tag_buf_.size() >= 8 &&
+                    thinking_tag_buf_.substr(thinking_tag_buf_.size() - 8) == "</think>") {
+                  in_thinking_block_ = false;
+                  thinking_tag_buf_.clear();
+                }
+              } else {
+                // Outside <think> — look for <think> opening tag.
+                if (thinking_tag_buf_.size() >= 7 &&
+                    thinking_tag_buf_.substr(thinking_tag_buf_.size() - 7) == "<think>") {
+                  in_thinking_block_ = true;
+                  // Remove the "<think>" characters that were speculatively
+                  // added to tts_clean (last 6 chars, since '<' was the 7th).
+                  if (tts_clean.size() >= 6) {
+                    tts_clean.erase(tts_clean.size() - 6);
+                  } else {
+                    tts_clean.clear();
+                  }
+                  thinking_tag_buf_.clear();
+                } else {
+                  tts_clean += ch;
+                }
+              }
+            }
+            if (!tts_clean.empty()) {
+              tts_segment_->Append(tts_clean);
+            }
             size_t ready = tts_segment_->ReadyLength();
             if (ready > 0) {
               // Extract the ready portion and emit as TTS frame.
@@ -548,17 +586,6 @@ void Controller::HandleThinking(const Observation& obs) {
 void Controller::HandleRouting(ActionCandidate ac) {
   switch (ac.type) {
     case ActionType::kToolCall: {
-      // Legacy compatibility: if tool_calls is empty but action_name is set,
-      // create a single ToolCall entry from the legacy fields.
-      if (ac.tool_calls.empty() && !ac.action_name.empty()) {
-        ToolCall tc;
-        tc.id = ac.response_text.empty() ? ac.action_name : ac.response_text;
-        tc.name = ac.action_name;
-        tc.arguments = ac.arguments;
-        tc.required_capability = ac.required_capability;
-        ac.tool_calls.push_back(std::move(tc));
-      }
-
       // Check policy permission for each tool call.
       LOG_INFO("[{}] Routing: {} tool call(s)",
                MODULE_NAME, ac.tool_calls.size());
@@ -653,7 +680,7 @@ void Controller::HandleActing(ActionCandidate ac) {
   call_entry.type = MemoryEntryType::kToolCall;
   call_entry.role = "assistant";
   call_entry.content = "";
-  call_entry.tool_call_id = ac.tool_calls.empty() ? ac.action_name : ac.tool_calls[0].id;
+  call_entry.tool_call_id = ac.tool_calls.empty() ? "" : ac.tool_calls[0].id;
   call_entry.tool_calls_json = tc_json;
   call_entry.timestamp = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, call_entry);
@@ -854,6 +881,8 @@ void Controller::ResetBudgetWindow() {
   total_completion_tokens_ = 0;
   action_count_ = 0;
   first_token_logged_ = false;
+  in_thinking_block_ = false;
+  thinking_tag_buf_.clear();
   session_start_ = std::chrono::steady_clock::now();
   interrupt_requested_.store(false);
   pending_action_ = ActionCandidate{};

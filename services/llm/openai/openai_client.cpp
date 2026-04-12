@@ -142,8 +142,10 @@ core::LlmResult OpenAiClient::SubmitStreaming(
       for (const auto& tc : accumulated_tool_calls) {
         if (tc.empty()) { continue; }
         core::ToolCall call;
-        if (tc.contains("id")) {
+        if (tc.contains("id") && !tc["id"].get<std::string>().empty()) {
           call.id = tc["id"].get<std::string>();
+        } else {
+          call.id = GenerateToolCallId();
         }
         if (tc.contains("function")) {
           if (tc["function"].contains("name")) {
@@ -154,12 +156,6 @@ core::LlmResult OpenAiClient::SubmitStreaming(
           }
         }
         result.candidate.tool_calls.push_back(std::move(call));
-      }
-
-      if (!result.candidate.tool_calls.empty()) {
-        result.candidate.action_name = result.candidate.tool_calls[0].name;
-        result.candidate.arguments = result.candidate.tool_calls[0].arguments;
-        result.candidate.response_text = result.candidate.tool_calls[0].id;
       }
     } else if (!accumulated_content.empty()) {
       result.candidate.type = core::ActionType::kResponse;
@@ -172,7 +168,9 @@ core::LlmResult OpenAiClient::SubmitStreaming(
   LOG_DEBUG("[{}] SubmitStreaming result: type={}, text=\"{}\"", MODULE_NAME,
             static_cast<int>(result.candidate.type),
             result.candidate.type == core::ActionType::kToolCall
-                ? result.candidate.action_name
+                ? (result.candidate.tool_calls.empty()
+                       ? "<no tools>"
+                       : result.candidate.tool_calls[0].name)
                 : result.candidate.response_text);
 
   return result;

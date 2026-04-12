@@ -332,6 +332,14 @@ RC_GTEST_PROP(ControllerPropTest, prop_action_routing_by_type, (void)) {
       r.candidate.action_name = "test_tool";
       r.candidate.response_text = "test response";
       r.candidate.required_capability = "test_cap";
+      if (action_type == ActionType::kToolCall) {
+        ToolCall tc;
+        tc.id = "call_routing_1";
+        tc.name = "test_tool";
+        tc.arguments = "{}";
+        tc.required_capability = "test_cap";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "done";
@@ -670,6 +678,14 @@ RC_GTEST_PROP(ControllerPropTest, prop_io_failure_feeds_thinking, (void)) {
       r.candidate.type = ActionType::kToolCall;
       r.candidate.action_name = "failing_tool";
       r.candidate.required_capability = "test_cap";
+      {
+        ToolCall tc;
+        tc.id = "call_fail_1";
+        tc.name = "failing_tool";
+        tc.arguments = "{}";
+        tc.required_capability = "test_cap";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "recovered";
@@ -1009,6 +1025,13 @@ RC_GTEST_PROP(ControllerPropTest,
       r.candidate.type = ActionType::kToolCall;
       r.candidate.action_name = captured_name;
       r.candidate.arguments = captured_args;
+      {
+        ToolCall tc;
+        tc.id = "call_emit_1";
+        tc.name = captured_name;
+        tc.arguments = captured_args;
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "done";
@@ -1149,6 +1172,13 @@ RC_GTEST_PROP(ControllerPropTest,
     if (c == 0) {
       r.candidate.type = ActionType::kToolCall;
       r.candidate.action_name = "test_tool";
+      {
+        ToolCall tc;
+        tc.id = "call_resume_1";
+        tc.name = "test_tool";
+        tc.arguments = "{}";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "done";
@@ -1262,6 +1292,13 @@ RC_GTEST_PROP(ControllerPropTest,
     if (c == 0) {
       r.candidate.type = ActionType::kToolCall;
       r.candidate.action_name = captured_name;
+      {
+        ToolCall tc;
+        tc.id = "call_deny_1";
+        tc.name = captured_name;
+        tc.arguments = "{}";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "done";

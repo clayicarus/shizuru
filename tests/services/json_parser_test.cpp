@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 
 #include "context/types.h"
@@ -170,9 +171,10 @@ TEST(JsonParserTest, ParseResponse_ToolCall) {
   auto result = ParseResponse(resp.dump());
 
   EXPECT_EQ(result.candidate.type, core::ActionType::kToolCall);
-  EXPECT_EQ(result.candidate.action_name, "get_weather");
-  EXPECT_EQ(result.candidate.arguments, "{\"location\":\"Tokyo\"}");
-  EXPECT_EQ(result.candidate.response_text, "call_abc");
+  ASSERT_EQ(result.candidate.tool_calls.size(), 1u);
+  EXPECT_EQ(result.candidate.tool_calls[0].name, "get_weather");
+  EXPECT_EQ(result.candidate.tool_calls[0].arguments, "{\"location\":\"Tokyo\"}");
+  EXPECT_EQ(result.candidate.tool_calls[0].id, "call_abc");
   EXPECT_EQ(result.prompt_tokens, 20);
   EXPECT_EQ(result.completion_tokens, 15);
 }
@@ -301,8 +303,10 @@ TEST(JsonParserTest, ParseStreamChunk_DoneWithToolCalls) {
   EXPECT_TRUE(ok);
   EXPECT_TRUE(is_done);
   EXPECT_EQ(result.candidate.type, core::ActionType::kToolCall);
-  EXPECT_EQ(result.candidate.action_name, "search");
-  EXPECT_EQ(result.candidate.arguments, "{\"q\":\"test\"}");
+  ASSERT_EQ(result.candidate.tool_calls.size(), 1u);
+  EXPECT_EQ(result.candidate.tool_calls[0].name, "search");
+  EXPECT_EQ(result.candidate.tool_calls[0].arguments, "{\"q\":\"test\"}");
+  EXPECT_EQ(result.candidate.tool_calls[0].id, "call_1");
 }
 
 TEST(JsonParserTest, ParseStreamChunk_EmptyLine) {
@@ -314,6 +318,48 @@ TEST(JsonParserTest, ParseStreamChunk_EmptyLine) {
   bool ok = ParseStreamChunk("", content, tool_calls, result, is_done);
   EXPECT_FALSE(ok);
   EXPECT_FALSE(is_done);
+}
+
+// ---------------------------------------------------------------------------
+// GenerateToolCallId
+// ---------------------------------------------------------------------------
+
+TEST(JsonParserTest, GenerateToolCallId_HasCorrectPrefix) {
+  auto id = GenerateToolCallId();
+  EXPECT_EQ(id.substr(0, 5), "call_");
+  EXPECT_EQ(id.size(), 17u);  // "call_" (5) + 12 random chars
+}
+
+TEST(JsonParserTest, GenerateToolCallId_UniqueAcrossCalls) {
+  std::set<std::string> ids;
+  for (int i = 0; i < 100; ++i) {
+    ids.insert(GenerateToolCallId());
+  }
+  EXPECT_EQ(ids.size(), 100u) << "Generated IDs should be unique";
+}
+
+TEST(JsonParserTest, ParseResponse_ToolCallMissingId_GeneratesOne) {
+  nlohmann::json resp = {
+      {"choices",
+       {{{"message",
+          {{"role", "assistant"},
+           {"content", nullptr},
+           {"tool_calls",
+            {{{"type", "function"},
+              {"function",
+               {{"name", "my_tool"},
+                {"arguments", "{}"}}}}}}}},
+         {"finish_reason", "tool_calls"}}}},
+      {"usage", {{"prompt_tokens", 5}, {"completion_tokens", 5}}},
+  };
+
+  auto result = ParseResponse(resp.dump());
+  EXPECT_EQ(result.candidate.type, core::ActionType::kToolCall);
+  ASSERT_EQ(result.candidate.tool_calls.size(), 1u);
+  EXPECT_EQ(result.candidate.tool_calls[0].name, "my_tool");
+  // ID should have been auto-generated with "call_" prefix.
+  EXPECT_EQ(result.candidate.tool_calls[0].id.substr(0, 5), "call_");
+  EXPECT_FALSE(result.candidate.tool_calls[0].id.empty());
 }
 
 }  // namespace

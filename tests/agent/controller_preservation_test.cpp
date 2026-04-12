@@ -244,6 +244,14 @@ RC_GTEST_PROP(ControllerPreservation,
       r.candidate.type = ActionType::kToolCall;
       r.candidate.action_name = tool_name;
       r.candidate.required_capability = "test_cap";
+      {
+        ToolCall tc;
+        tc.id = "call_pres_1";
+        tc.name = tool_name;
+        tc.arguments = "{}";
+        tc.required_capability = "test_cap";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "done";

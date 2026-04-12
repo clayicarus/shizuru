@@ -182,6 +182,14 @@ TEST_F(ControllerTest, TransitionSequence_ToolCallCycle) {
       r.candidate.type = ActionType::kToolCall;
       r.candidate.action_name = "my_tool";
       r.candidate.required_capability = "tool_cap";
+      {
+        ToolCall tc;
+        tc.id = "call_test_1";
+        tc.name = "my_tool";
+        tc.arguments = "{}";
+        tc.required_capability = "tool_cap";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "final";
@@ -412,6 +420,14 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
     r.candidate.type = ActionType::kToolCall;
     r.candidate.action_name = "tool";
     r.candidate.required_capability = "cap";
+    {
+      ToolCall tc;
+      tc.id = "call_budget_1";
+      tc.name = "tool";
+      tc.arguments = "{}";
+      tc.required_capability = "cap";
+      r.candidate.tool_calls.push_back(std::move(tc));
+    }
     r.prompt_tokens = 1;
     r.completion_tokens = 1;
     return r;
@@ -864,6 +880,14 @@ TEST_F(ControllerTest, HandleInterrupt_WhileActing_InvokesCancelCallback) {
       r.candidate.type = ActionType::kToolCall;
       r.candidate.action_name = "slow_tool";
       r.candidate.required_capability = "tool_cap";
+      {
+        ToolCall tc;
+        tc.id = "call_slow_1";
+        tc.name = "slow_tool";
+        tc.arguments = "{}";
+        tc.required_capability = "tool_cap";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "done";
@@ -936,6 +960,14 @@ TEST_F(ControllerTest, HandleInterrupt_NullCancel_DoesNotCrash) {
       r.candidate.type = ActionType::kToolCall;
       r.candidate.action_name = "any_tool";
       r.candidate.required_capability = "cap";
+      {
+        ToolCall tc;
+        tc.id = "call_any_1";
+        tc.name = "any_tool";
+        tc.arguments = "{}";
+        tc.required_capability = "cap";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
     } else {
       r.candidate.type = ActionType::kResponse;
       r.candidate.response_text = "done";
