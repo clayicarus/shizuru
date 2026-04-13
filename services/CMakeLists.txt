@@ -53,6 +53,8 @@ else()
   # Linux: system OpenSSL.
   if(APPLE AND NOT IOS)
     set(CURL_USE_SECTRANSP ON CACHE BOOL "" FORCE)
+  elseif(WIN32)
+    set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
   endif()
 endif()
 

@@ -12,7 +12,12 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#ifdef _WIN32
+#define NOMINMAX
+#include <winsock2.h>
+#else
 #include <unistd.h>
+#endif
 #include <vector>
 
 #include <nlohmann/json.hpp>
