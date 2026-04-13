@@ -11,7 +11,7 @@ namespace shizuru::services {
 
 BaiduTokenManager::BaiduTokenManager(BaiduConfig config)
     : config_(std::move(config)),
-      expires_at_(std::chrono::steady_clock::time_point::min()) {}
+      expires_at_((std::chrono::steady_clock::time_point::min)()) {}
 
 std::string BaiduTokenManager::GetToken() {
   std::lock_guard<std::mutex> lock(mutex_);
