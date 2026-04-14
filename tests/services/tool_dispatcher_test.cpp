@@ -1,12 +1,12 @@
-// Unit tests for services::ToolRegistry
+// Unit tests for runtime::ToolRegistry
 
 #include <gtest/gtest.h>
 
 #include <string>
 
-#include "io/tool_registry.h"
+#include "runtime/tool_registry.h"
 
-namespace shizuru::services {
+namespace shizuru::runtime {
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -48,4 +48,4 @@ TEST(ToolRegistryTest, FindUnknownReturnsNull) {
 }
 
 }  // namespace
-}  // namespace shizuru::services
+}  // namespace shizuru::runtime

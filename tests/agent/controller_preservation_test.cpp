@@ -619,23 +619,7 @@ class OrderTrackingDevice : public io::IoDevice {
 };
 
 TEST(ShutdownPreservation, DevicesStoppedInReverseRegistrationOrder) {
-  services::ToolRegistry tools;
-
-  RuntimeConfig cfg;
-  cfg.controller.max_turns = 5;
-  cfg.controller.max_retries = 0;
-  cfg.controller.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.controller.turn_timeout = std::chrono::seconds(5);
-  cfg.controller.token_budget = 100000;
-  cfg.controller.action_count_limit = 10;
-  cfg.context.max_context_tokens = 100000;
-  cfg.llm.base_url = "http://127.0.0.1:1";  // no real LLM needed
-  cfg.llm.api_key = "mock";
-  cfg.llm.model = "mock";
-  cfg.llm.connect_timeout = std::chrono::seconds(1);
-  cfg.llm.read_timeout = std::chrono::seconds(1);
-
-  AgentRuntime runtime(cfg, tools);
+  AgentRuntime runtime;
 
   std::mutex log_mu;
   std::vector<std::string> stop_log;

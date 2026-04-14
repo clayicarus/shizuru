@@ -23,7 +23,7 @@ add_executable(tool_dispatcher_test
   tool_dispatcher_test.cpp
 )
 target_link_libraries(tool_dispatcher_test
-  PRIVATE shizuru_io_services
+  PRIVATE shizuru_runtime
   PRIVATE GTest::gtest_main
 )
 add_test(NAME tool_dispatcher_test COMMAND tool_dispatcher_test)

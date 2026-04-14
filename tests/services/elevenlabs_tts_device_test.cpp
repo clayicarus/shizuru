@@ -149,7 +149,11 @@ TEST(ElevenLabsTtsDeviceTest, SynthesisEmitsAudioDataFrames) {
   std::lock_guard<std::mutex> lock(mu);
   ASSERT_FALSE(emitted.empty());
   EXPECT_EQ(emitted[0].type, "audio/pcm");
-  EXPECT_EQ(emitted[0].payload, (std::vector<uint8_t>{0xAA, 0xBB, 0xCC}));
+  // ElevenLabsTtsDevice ensures even-sized payloads for int16 alignment.
+  // Mock returns 3 bytes {0xAA, 0xBB, 0xCC}; the carry-byte buffer holds
+  // the odd trailing byte, so the first emitted frame contains only the
+  // first 2 bytes.
+  EXPECT_EQ(emitted[0].payload, (std::vector<uint8_t>{0xAA, 0xBB}));
 }
 
 // ---------------------------------------------------------------------------

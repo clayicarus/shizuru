@@ -16,8 +16,15 @@
 #include <nlohmann/json.hpp>
 
 #include "io/data_frame.h"
+#include "runtime/tool_registry.h"
+#include "runtime/tool_dispatch_device.h"
 #include "runtime/agent_runtime.h"
+#include "runtime/core_device.h"
+#include "runtime/route_table.h"
 #include "policy/types.h"
+#include "services/audit/log_audit_sink.h"
+#include "services/llm/openai/openai_client.h"
+#include "services/memory/in_memory_store.h"
 #include "mock_io_device.h"
 
 namespace shizuru::runtime {
@@ -73,23 +80,56 @@ class MockLlmServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-RuntimeConfig MakeConfig(const std::string& base_url, bool streaming = false) {
-  RuntimeConfig cfg;
-  cfg.controller.max_turns = 10;
-  cfg.controller.max_retries = 0;
-  cfg.controller.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.controller.turn_timeout = std::chrono::seconds(15);
-  cfg.controller.token_budget = 100000;
-  cfg.controller.action_count_limit = 20;
-  cfg.controller.use_streaming = streaming;
-  cfg.controller.tool_call_timeout = std::chrono::seconds(10);
-  cfg.context.max_context_tokens = 100000;
-  cfg.llm.base_url = base_url;
-  cfg.llm.api_key = "mock";
-  cfg.llm.model = "mock";
-  cfg.llm.connect_timeout = std::chrono::seconds(5);
-  cfg.llm.read_timeout = std::chrono::seconds(10);
-  return cfg;
+// Assemble a CoreDevice + ToolDispatchDevice on the bus and return the CoreDevice*.
+// Accepts optional policy config for tool-call tests.
+CoreDevice* AssembleAgent(AgentRuntime& runtime,
+                          const std::string& base_url,
+                          ToolRegistry& tools,
+                          bool streaming = false,
+                          core::PolicyConfig pol_cfg = {}) {
+  core::ControllerConfig ctrl_cfg;
+  ctrl_cfg.max_turns = 10;
+  ctrl_cfg.max_retries = 0;
+  ctrl_cfg.retry_base_delay = std::chrono::milliseconds(1);
+  ctrl_cfg.turn_timeout = std::chrono::seconds(15);
+  ctrl_cfg.token_budget = 100000;
+  ctrl_cfg.action_count_limit = 20;
+  ctrl_cfg.use_streaming = streaming;
+  ctrl_cfg.tool_call_timeout = std::chrono::seconds(10);
+
+  core::ContextConfig ctx_cfg;
+  ctx_cfg.max_context_tokens = 100000;
+
+  services::OpenAiConfig llm_cfg;
+  llm_cfg.base_url = base_url;
+  llm_cfg.api_key = "mock";
+  llm_cfg.model = "mock";
+  llm_cfg.connect_timeout = std::chrono::seconds(5);
+  llm_cfg.read_timeout = std::chrono::seconds(10);
+
+  auto core = std::make_unique<CoreDevice>(
+      "core", "test-session", ctrl_cfg, ctx_cfg, pol_cfg,
+      std::make_unique<services::OpenAiClient>(llm_cfg),
+      std::make_unique<services::InMemoryStore>(),
+      std::make_unique<services::LogAuditSink>());
+  CoreDevice* core_ptr = core.get();
+
+  auto tool_dev = std::make_unique<ToolDispatchDevice>(tools);
+
+  runtime.RegisterDevice(std::move(core), DeviceOptions{.auto_start = true});
+  runtime.RegisterDevice(std::move(tool_dev), DeviceOptions{.auto_start = true});
+
+  // core action_out → tool_dispatch action_in
+  runtime.AddRoute(PortAddress{"core", "action_out"},
+                   PortAddress{"tool_dispatch", "action_in"});
+  // tool_dispatch result_out → core tool_result_in
+  runtime.AddRoute(PortAddress{"tool_dispatch", "result_out"},
+                   PortAddress{"core", "tool_result_in"});
+  // core text_out → app_output (virtual sink)
+  runtime.AddRoute(PortAddress{"core", "text_out"},
+                   PortAddress{"app_output", "in"});
+
+  return core_ptr;
 }
 
 // Build a standard non-streaming chat completion JSON response.
@@ -199,47 +239,51 @@ bool WaitFor(std::function<bool()> pred, int timeout_ms = 8000) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: Full Pipeline — StartSession → SendMessage → OnOutput → Shutdown
+// Test 1: Full Pipeline — Assemble → StartAll → OnInput → OnFrameSink → Shutdown
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeIntegrationTest, FullPipeline) {
   MockLlmServer mock([](const httplib::Request&, httplib::Response& res) {
     res.set_content(MakeChatResponse("hello from agent"), "application/json");
   });
 
-  services::ToolRegistry tools;
-  AgentRuntime runtime(MakeConfig(mock.BaseUrl()), tools);
+  ToolRegistry tools;
+  AgentRuntime runtime;
+
+  CoreDevice* core = AssembleAgent(runtime, mock.BaseUrl(), tools);
 
   std::mutex mu;
   std::string received_text;
-  runtime.OnOutput([&](const RuntimeOutput& out) {
-    if (!out.is_partial) {
-      std::lock_guard<std::mutex> lock(mu);
-      received_text = out.text;
-    }
+  runtime.OnFrameSink([&](io::DataFrame frame) {
+    std::lock_guard<std::mutex> lock(mu);
+    received_text = std::string(frame.payload.begin(), frame.payload.end());
   });
 
-  std::string session_id = runtime.StartSession();
-  ASSERT_FALSE(session_id.empty());
+  runtime.StartAll();
 
-  runtime.SendMessage("hello");
+  // Send a text message to the core device.
+  io::DataFrame msg;
+  msg.type = "text/plain";
+  const std::string text = "hello";
+  msg.payload = std::vector<uint8_t>(text.begin(), text.end());
+  msg.timestamp = std::chrono::steady_clock::now();
+  core->OnInput("text_in", std::move(msg));
 
   bool got_output = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
     return !received_text.empty();
   });
 
-  ASSERT_TRUE(got_output) << "OnOutput callback never fired with final response";
+  ASSERT_TRUE(got_output) << "OnFrameSink callback never fired with final response";
   {
     std::lock_guard<std::mutex> lock(mu);
     EXPECT_EQ(received_text, "hello from agent");
   }
 
   runtime.Shutdown();
-  EXPECT_EQ(runtime.GetState(), core::State::kTerminated);
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: Interrupt Path — SendMessage → slow streaming LLM → VAD speech_start → cancel
+// Test 2: Interrupt Path — OnInput → slow streaming LLM → VAD speech_start → cancel
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeIntegrationTest, InterruptPath) {
   // Track whether the LLM handler was entered (to know when to interrupt).
@@ -301,31 +345,41 @@ TEST(AgentRuntimeIntegrationTest, InterruptPath) {
     }
   });
 
-  services::ToolRegistry tools;
-  // Use streaming mode so CurlPostStreaming checks cancel_requested_ between chunks.
-  auto cfg = MakeConfig(mock.BaseUrl(), /*streaming=*/true);
-  AgentRuntime runtime(cfg, tools);
+  ToolRegistry tools;
+  AgentRuntime runtime;
 
-  // Register a VAD event device BEFORE StartSession so the route gets wired.
+  // Register a VAD event device BEFORE assembling the agent so the route gets wired.
   auto vad_dev = std::make_unique<MockIoDevice>(
       "vad_event",
       std::vector<io::PortDescriptor>{
           {"vad_out", io::PortDirection::kOutput, "vad/event"}});
   MockIoDevice* vad_ptr = vad_dev.get();
-  runtime.RegisterDevice(std::move(vad_dev));
+  runtime.RegisterDevice(std::move(vad_dev), DeviceOptions{.auto_start = true});
+
+  CoreDevice* core = AssembleAgent(runtime, mock.BaseUrl(), tools, /*streaming=*/true);
+
+  // Wire VAD → core vad_in route.
+  runtime.AddRoute(PortAddress{"vad_event", "vad_out"},
+                   PortAddress{"core", "vad_in"});
 
   // Track output — we expect NO final response for the interrupted turn.
   std::mutex mu;
   std::vector<std::string> final_outputs;
-  runtime.OnOutput([&](const RuntimeOutput& out) {
-    if (!out.is_partial) {
-      std::lock_guard<std::mutex> lock(mu);
-      final_outputs.push_back(out.text);
-    }
+  runtime.OnFrameSink([&](io::DataFrame frame) {
+    std::lock_guard<std::mutex> lock(mu);
+    final_outputs.push_back(
+        std::string(frame.payload.begin(), frame.payload.end()));
   });
 
-  runtime.StartSession();
-  runtime.SendMessage("hello");
+  runtime.StartAll();
+
+  // Send a text message to the core device.
+  io::DataFrame msg;
+  msg.type = "text/plain";
+  const std::string text = "hello";
+  msg.payload = std::vector<uint8_t>(text.begin(), text.end());
+  msg.timestamp = std::chrono::steady_clock::now();
+  core->OnInput("text_in", std::move(msg));
 
   // Wait for the LLM handler to be entered (loop thread is now in streaming).
   bool entered = WaitFor([&] { return handler_entered.load() >= 1; }, 3000);
@@ -343,18 +397,14 @@ TEST(AgentRuntimeIntegrationTest, InterruptPath) {
   vad_ptr->EmitOutput("vad_out", std::move(vad_frame));
 
   // Wait for controller to transition to kListening after interrupt.
-  // The controller may briefly pass through kListening then re-enter kThinking
-  // (because the interrupt observation is re-enqueued as a user message).
-  // We wait for it to settle back to kListening after processing.
   bool reached_listening = WaitFor([&] {
-    auto state = runtime.GetState();
+    auto state = core->GetState();
     return state == core::State::kListening;
   }, 8000);
 
   EXPECT_TRUE(reached_listening) << "Controller did not reach kListening after interrupt";
 
   // The interrupted turn's response ("should not arrive") must NOT have been delivered.
-  // A subsequent turn from the re-enqueued empty observation may produce output.
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
   {
     std::lock_guard<std::mutex> lock(mu);
@@ -388,33 +438,40 @@ TEST(AgentRuntimeIntegrationTest, ToolCallRoundTrip) {
     }
   });
 
-  services::ToolRegistry tools;
+  ToolRegistry tools;
   // Register a "noop" tool that always succeeds.
-  tools.Register("noop", [](const std::string& /*args*/) -> services::ToolResult {
+  tools.Register("noop", [](const std::string& /*args*/) -> ToolResult {
     return {.success = true, .output = "noop executed", .error_message = ""};
   });
 
   // Configure policy to allow the "noop" tool call.
-  auto cfg = MakeConfig(mock.BaseUrl());
+  core::PolicyConfig pol_cfg;
   core::PolicyRule allow_noop;
   allow_noop.priority = 0;
   allow_noop.action_pattern = "noop";
   allow_noop.outcome = core::PolicyOutcome::kAllow;
-  cfg.policy.initial_rules.push_back(allow_noop);
+  pol_cfg.initial_rules.push_back(allow_noop);
 
-  AgentRuntime runtime(cfg, tools);
+  AgentRuntime runtime;
+  CoreDevice* core = AssembleAgent(runtime, mock.BaseUrl(), tools,
+                                   /*streaming=*/false, pol_cfg);
 
   std::mutex mu;
   std::string final_response;
-  runtime.OnOutput([&](const RuntimeOutput& out) {
-    if (!out.is_partial) {
-      std::lock_guard<std::mutex> lock(mu);
-      final_response = out.text;
-    }
+  runtime.OnFrameSink([&](io::DataFrame frame) {
+    std::lock_guard<std::mutex> lock(mu);
+    final_response = std::string(frame.payload.begin(), frame.payload.end());
   });
 
-  runtime.StartSession();
-  runtime.SendMessage("use tool");
+  runtime.StartAll();
+
+  // Send a text message to the core device.
+  io::DataFrame msg;
+  msg.type = "text/plain";
+  const std::string text = "use tool";
+  msg.payload = std::vector<uint8_t>(text.begin(), text.end());
+  msg.timestamp = std::chrono::steady_clock::now();
+  core->OnInput("text_in", std::move(msg));
 
   // Wait for the final response after the tool call round-trip.
   bool got_response = WaitFor([&] {
@@ -433,7 +490,6 @@ TEST(AgentRuntimeIntegrationTest, ToolCallRoundTrip) {
   EXPECT_GE(call_count.load(), 2);
 
   runtime.Shutdown();
-  EXPECT_EQ(runtime.GetState(), core::State::kTerminated);
 }
 
 }  // namespace

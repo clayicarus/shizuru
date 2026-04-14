@@ -14,8 +14,14 @@
 #include <nlohmann/json.hpp>
 
 #include "io/data_frame.h"
+#include "runtime/tool_registry.h"
+#include "runtime/tool_dispatch_device.h"
 #include "runtime/agent_runtime.h"
+#include "runtime/core_device.h"
 #include "runtime/route_table.h"
+#include "services/audit/log_audit_sink.h"
+#include "services/llm/openai/openai_client.h"
+#include "services/memory/in_memory_store.h"
 #include "mock_io_device.h"
 
 namespace shizuru::runtime {
@@ -104,21 +110,54 @@ class MockLlmServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-RuntimeConfig MakeConfig(const std::string& base_url) {
-  RuntimeConfig cfg;
-  cfg.controller.max_turns = 5;
-  cfg.controller.max_retries = 0;
-  cfg.controller.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.controller.turn_timeout = std::chrono::seconds(10);
-  cfg.controller.token_budget = 100000;
-  cfg.controller.action_count_limit = 10;
-  cfg.context.max_context_tokens = 100000;
-  cfg.llm.base_url = base_url;
-  cfg.llm.api_key = "mock";
-  cfg.llm.model = "mock";
-  cfg.llm.connect_timeout = std::chrono::seconds(5);
-  cfg.llm.read_timeout = std::chrono::seconds(10);
-  return cfg;
+// Assemble a CoreDevice + ToolDispatchDevice, register them on the bus,
+// wire the standard routes, and return a raw pointer to the CoreDevice.
+CoreDevice* AssembleAgent(AgentRuntime& runtime,
+                          const std::string& base_url,
+                          ToolRegistry& tools) {
+  core::ControllerConfig ctrl_cfg;
+  ctrl_cfg.max_turns = 5;
+  ctrl_cfg.max_retries = 0;
+  ctrl_cfg.retry_base_delay = std::chrono::milliseconds(1);
+  ctrl_cfg.turn_timeout = std::chrono::seconds(10);
+  ctrl_cfg.token_budget = 100000;
+  ctrl_cfg.action_count_limit = 10;
+
+  core::ContextConfig ctx_cfg;
+  ctx_cfg.max_context_tokens = 100000;
+
+  core::PolicyConfig pol_cfg;
+
+  services::OpenAiConfig llm_cfg;
+  llm_cfg.base_url = base_url;
+  llm_cfg.api_key = "mock";
+  llm_cfg.model = "mock";
+  llm_cfg.connect_timeout = std::chrono::seconds(5);
+  llm_cfg.read_timeout = std::chrono::seconds(10);
+
+  auto core = std::make_unique<CoreDevice>(
+      "core", "test-session", ctrl_cfg, ctx_cfg, pol_cfg,
+      std::make_unique<services::OpenAiClient>(llm_cfg),
+      std::make_unique<services::InMemoryStore>(),
+      std::make_unique<services::LogAuditSink>());
+  CoreDevice* core_ptr = core.get();
+
+  auto tool_dev = std::make_unique<ToolDispatchDevice>(tools);
+
+  runtime.RegisterDevice(std::move(core), DeviceOptions{.auto_start = true});
+  runtime.RegisterDevice(std::move(tool_dev), DeviceOptions{.auto_start = true});
+
+  // core action_out → tool_dispatch action_in
+  runtime.AddRoute(PortAddress{"core", "action_out"},
+                   PortAddress{"tool_dispatch", "action_in"});
+  // tool_dispatch result_out → core tool_result_in
+  runtime.AddRoute(PortAddress{"tool_dispatch", "result_out"},
+                   PortAddress{"core", "tool_result_in"});
+  // core text_out → app_output (virtual sink)
+  runtime.AddRoute(PortAddress{"core", "text_out"},
+                   PortAddress{"app_output", "in"});
+
+  return core_ptr;
 }
 
 bool WaitFor(std::function<bool()> pred, int timeout_ms = 5000) {
@@ -132,22 +171,31 @@ bool WaitFor(std::function<bool()> pred, int timeout_ms = 5000) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: StartSession → SendMessage → output callback fires
+// Test 1: Assembled agent pipeline — send message → output callback fires
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeTest, StartSessionSendMessageOutputCallbackFires) {
   MockLlmServer mock;
-  services::ToolRegistry tools;
-  AgentRuntime runtime(MakeConfig(mock.BaseUrl()), tools);
+  ToolRegistry tools;
+  AgentRuntime runtime;
+
+  CoreDevice* core = AssembleAgent(runtime, mock.BaseUrl(), tools);
 
   std::mutex mu;
   std::string received;
-  runtime.OnOutput([&](const RuntimeOutput& out) {
+  runtime.OnFrameSink([&](io::DataFrame frame) {
     std::lock_guard<std::mutex> lock(mu);
-    received = out.text;
+    received = std::string(frame.payload.begin(), frame.payload.end());
   });
 
-  runtime.StartSession();
-  runtime.SendMessage("hello");
+  runtime.StartAll();
+
+  // Send a text message to the core device.
+  io::DataFrame msg;
+  msg.type = "text/plain";
+  const std::string text = "hello";
+  msg.payload = std::vector<uint8_t>(text.begin(), text.end());
+  msg.timestamp = std::chrono::steady_clock::now();
+  core->OnInput("text_in", std::move(msg));
 
   bool got = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
@@ -165,8 +213,7 @@ TEST(AgentRuntimeTest, StartSessionSendMessageOutputCallbackFires) {
 // Test 2: Shutdown stops all devices
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeTest, ShutdownStopsAllDevices) {
-  services::ToolRegistry tools;
-  AgentRuntime runtime(MakeConfig("http://127.0.0.1:1"), tools);  // no real LLM needed
+  AgentRuntime runtime;
 
   auto dev1 = std::make_unique<MockIoDevice>("dev1");
   auto dev2 = std::make_unique<MockIoDevice>("dev2");
@@ -176,7 +223,7 @@ TEST(AgentRuntimeTest, ShutdownStopsAllDevices) {
   runtime.RegisterDevice(std::move(dev1));
   runtime.RegisterDevice(std::move(dev2));
 
-  // Manually start them (StartSession would need a real LLM).
+  // Manually start them.
   d1->Start();
   d2->Start();
 
@@ -190,21 +237,37 @@ TEST(AgentRuntimeTest, ShutdownStopsAllDevices) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: GetState returns kTerminated when no session active
+// Test 3: CoreDevice GetState returns kTerminated when no session started
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeTest, GetStateTerminatedWithNoSession) {
-  services::ToolRegistry tools;
-  AgentRuntime runtime(MakeConfig("http://127.0.0.1:1"), tools);
+  ToolRegistry tools;
+  AgentRuntime runtime;
 
-  EXPECT_EQ(runtime.GetState(), core::State::kTerminated);
+  // Create a CoreDevice but don't start it — state should be kTerminated (default).
+  core::ControllerConfig ctrl_cfg;
+  core::ContextConfig ctx_cfg;
+  core::PolicyConfig pol_cfg;
+  services::OpenAiConfig llm_cfg;
+  llm_cfg.base_url = "http://127.0.0.1:1";
+  llm_cfg.api_key = "mock";
+  llm_cfg.model = "mock";
+
+  auto core = std::make_unique<CoreDevice>(
+      "core", "test-session", ctrl_cfg, ctx_cfg, pol_cfg,
+      std::make_unique<services::OpenAiClient>(llm_cfg),
+      std::make_unique<services::InMemoryStore>(),
+      std::make_unique<services::LogAuditSink>());
+  CoreDevice* core_ptr = core.get();
+  runtime.RegisterDevice(std::move(core), DeviceOptions{.auto_start = false});
+
+  EXPECT_EQ(core_ptr->GetState(), core::State::kIdle);
 }
 
 // ---------------------------------------------------------------------------
 // Test 4: RegisterDevice with duplicate ID throws std::invalid_argument
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeTest, RegisterDeviceDuplicateIdThrows) {
-  services::ToolRegistry tools;
-  AgentRuntime runtime(MakeConfig("http://127.0.0.1:1"), tools);
+  AgentRuntime runtime;
 
   runtime.RegisterDevice(std::make_unique<MockIoDevice>("dup_id"));
   EXPECT_THROW(runtime.RegisterDevice(std::make_unique<MockIoDevice>("dup_id")),
@@ -215,8 +278,7 @@ TEST(AgentRuntimeTest, RegisterDeviceDuplicateIdThrows) {
 // Test 5: Frame emitted on port with no routes is silently discarded
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeTest, FrameWithNoRouteIsSilentlyDiscarded) {
-  services::ToolRegistry tools;
-  AgentRuntime runtime(MakeConfig("http://127.0.0.1:1"), tools);
+  AgentRuntime runtime;
 
   auto src = std::make_unique<MockIoDevice>("src");
   MockIoDevice* src_ptr = src.get();
@@ -237,8 +299,7 @@ TEST(AgentRuntimeTest, FrameWithNoRouteIsSilentlyDiscarded) {
 // Test 6: DMA path delivers frame without control-plane check
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeTest, DmaPathDeliversFrameDirectly) {
-  services::ToolRegistry tools;
-  AgentRuntime runtime(MakeConfig("http://127.0.0.1:1"), tools);
+  AgentRuntime runtime;
 
   auto src = std::make_unique<MockIoDevice>("src");
   auto dst = std::make_unique<MockIoDevice>("dst");

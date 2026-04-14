@@ -11,6 +11,5 @@ target_include_directories(shizuru_runtime
 
 target_link_libraries(shizuru_runtime
   PUBLIC shizuru_core
-  PUBLIC shizuru_llm_openai
-  PUBLIC shizuru_io_services
+  PUBLIC shizuru_utils
 )

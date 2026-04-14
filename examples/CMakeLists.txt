@@ -16,7 +16,9 @@ target_link_libraries(audio_loopback PRIVATE shizuru_audio)
 add_executable(tool_call_example tool_call.cpp)
 target_link_libraries(tool_call_example
   PRIVATE shizuru_runtime
+  PRIVATE shizuru_llm_openai
   PRIVATE httplib::httplib
+  PRIVATE nlohmann_json::nlohmann_json
 )
 
 # WAV file playout example

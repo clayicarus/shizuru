@@ -12,7 +12,7 @@
 //   [ElevenLabsTtsDevice]   audio_out ──► [PcmDumpDevice]      pass_in   (playout_dump.pcm)
 //   [PcmDumpDevice]         pass_out  ──► [AudioPlayoutDevice] audio_in
 //
-// Control routes registered automatically by AgentRuntime::StartSession:
+// Control routes:
 //
 //   [VadEventDevice]        vad_out   ──► [core]               vad_in
 //   [core]                  control_out ► [BaiduAsrDevice]     control_in
@@ -21,11 +21,11 @@
 //   [core]                  action_out  ► [ToolDispatchDevice] action_in
 //   [ToolDispatchDevice]    result_out  ► [core]               tool_result_in
 //
-// The TTS device is driven by the AgentRuntime output callback: when the LLM
-// produces a final text response, it is fed directly into ElevenLabsTtsDevice.
+// The TTS device is driven by the route core:tts_out → elevenlabs_tts:text_in.
+// This callback only handles console display of streaming tokens and final text.
 //
 // All audio routes use requires_control_plane = false (DMA path).
-// The LLM/controller path is handled internally by AgentRuntime.
+// The LLM/controller path is handled by CoreDevice.
 //
 // Usage:
 //   export BAIDU_API_KEY=...
@@ -59,14 +59,18 @@
 #include "utils/baidu/baidu_config.h"
 #include "tts/config.h"
 #include "runtime/agent_runtime.h"
+#include "runtime/core_device.h"
 #include "runtime/route_table.h"
-#include "io/tool_registry.h"
+#include "runtime/tool_registry.h"
+#include "runtime/tool_dispatch_device.h"
 #include "llm/config.h"
+#include "llm/openai/openai_client.h"
+#include "services/memory/in_memory_store.h"
+#include "services/audit/log_audit_sink.h"
 #include "strategies/llm_observation_filter.h"
 #include "strategies/llm_observation_aggregator.h"
 #include "strategies/tts_segment_strategy.h"
 #include "strategies/response_filter.h"
-#include "llm/openai/openai_client.h"
 
 using namespace shizuru;
 
@@ -171,31 +175,76 @@ int main(int argc, char* argv[]) {
   if (!voice_id.empty()) { el_cfg.voice_id = voice_id; }
   auto tts = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
 
-  // Keep raw pointers before moving ownership into the runtime.
-
   // VadEventDevice: emits vad/event frames on vad_out (routed to core:vad_in).
   auto asr_flush = std::make_unique<io::VadEventDevice>();
 
-  // ── AgentRuntime config ───────────────────────────────────────────────────
-  runtime::RuntimeConfig rt_cfg;
-  rt_cfg.logger                        = log_cfg;
-  rt_cfg.llm.base_url                  = base_url;
-  rt_cfg.llm.api_path                  = "/compatible-mode/v1/chat/completions";
-  rt_cfg.llm.api_key                   = openai_key;
-  rt_cfg.llm.model                     = model;
-  rt_cfg.llm.connect_timeout           = std::chrono::seconds(10);
-  rt_cfg.llm.read_timeout              = std::chrono::seconds(60);
-  rt_cfg.llm.enable_thinking           = true;
-  rt_cfg.context.default_system_instruction =
+  // ── LLM config ────────────────────────────────────────────────────────────
+  services::OpenAiConfig llm_cfg;
+  llm_cfg.base_url        = base_url;
+  llm_cfg.api_path        = "/compatible-mode/v1/chat/completions";
+  llm_cfg.api_key         = openai_key;
+  llm_cfg.model           = model;
+  llm_cfg.connect_timeout = std::chrono::seconds(10);
+  llm_cfg.read_timeout    = std::chrono::seconds(60);
+  llm_cfg.enable_thinking = true;
+
+  // ── Tool definitions for LLM (function calling schema) ────────────────────
+  {
+    services::ToolDefinition time_tool;
+    time_tool.name = "get_current_time";
+    time_tool.description = "Get the current date and time";
+    time_tool.required_capability = "builtin";
+    llm_cfg.tools.push_back(std::move(time_tool));
+
+    services::ToolDefinition sys_tool;
+    sys_tool.name = "get_system_info";
+    sys_tool.description = "Get system information (OS, hostname)";
+    sys_tool.required_capability = "builtin";
+    llm_cfg.tools.push_back(std::move(sys_tool));
+
+    services::ToolDefinition calc_tool;
+    calc_tool.name = "calculate";
+    calc_tool.description = "Evaluate a simple math expression (a op b)";
+    calc_tool.parameters = {
+        {"expression", "string", "Math expression like '2 + 3' or '10 / 4'", true}};
+    calc_tool.required_capability = "builtin";
+    llm_cfg.tools.push_back(std::move(calc_tool));
+
+    services::ToolDefinition reminder_tool;
+    reminder_tool.name = "set_reminder";
+    reminder_tool.description = "Set a reminder with a message and delay in minutes";
+    reminder_tool.parameters = {
+        {"message", "string", "Reminder message", true},
+        {"minutes", "integer", "Minutes from now", true}};
+    reminder_tool.required_capability = "builtin";
+    llm_cfg.tools.push_back(std::move(reminder_tool));
+  }
+
+  // ── Core configs ──────────────────────────────────────────────────────────
+  core::ControllerConfig ctrl_cfg;
+  ctrl_cfg.max_turns     = 100;
+  ctrl_cfg.use_streaming = true;  // Enable SSE streaming
+
+  core::ContextConfig ctx_cfg;
+  ctx_cfg.default_system_instruction =
       "You are a helpful voice assistant. Keep responses concise and natural "
       "for speech. Avoid markdown formatting.";
-  rt_cfg.controller.max_turns          = 100;
-  rt_cfg.controller.use_streaming      = true;  // Enable SSE streaming
+
+  core::PolicyConfig pol_cfg;
+  pol_cfg.default_capabilities = {"builtin"};
+  {
+    core::PolicyRule allow_builtin;
+    allow_builtin.priority = 0;
+    allow_builtin.action_pattern = "*";
+    allow_builtin.required_capability = "builtin";
+    allow_builtin.outcome = core::PolicyOutcome::kAllow;
+    pol_cfg.initial_rules = {allow_builtin};
+  }
 
   // ── Strategy factories ────────────────────────────────────────────────────
   // ObservationAggregator: LLM-based endpointing — buffers ASR fragments
   // until the user finishes speaking.
-  rt_cfg.observation_aggregator_factory = [=]() {
+  auto obs_agg = [=]() {
     services::OpenAiConfig agg_llm_cfg;
     agg_llm_cfg.base_url        = base_url;
     agg_llm_cfg.api_path        = "/compatible-mode/v1/chat/completions";
@@ -213,11 +262,11 @@ int main(int argc, char* argv[]) {
     return std::make_unique<core::LlmObservationAggregator>(
         std::make_unique<services::OpenAiClient>(agg_llm_cfg),
         std::move(agg_cfg));
-  };
+  }();
 
   // ObservationFilter: LLM-based relevance check — decides if the complete
   // observation is worth sending to the main LLM.
-  rt_cfg.observation_filter_factory = [=]() {
+  auto obs_filter = [=]() {
     services::OpenAiConfig filter_llm_cfg;
     filter_llm_cfg.base_url        = base_url;
     filter_llm_cfg.api_path        = "/compatible-mode/v1/chat/completions";
@@ -229,26 +278,27 @@ int main(int argc, char* argv[]) {
     filter_llm_cfg.read_timeout    = std::chrono::seconds(10);
     return std::make_unique<core::LlmObservationFilter>(
         std::make_unique<services::OpenAiClient>(filter_llm_cfg));
-  };
+  }();
 
   // TtsSegmentStrategy: punctuation-based sentence segmentation for TTS.
-  rt_cfg.tts_segment_factory = []() {
+  auto tts_seg = []() {
     core::PunctuationSegmentStrategy::Config seg_cfg;
     seg_cfg.min_chars = 15;
     seg_cfg.max_chars = 200;
     return std::make_unique<core::PunctuationSegmentStrategy>(seg_cfg);
-  };
+  }();
 
   // ResponseFilter: strip <think> tags from LLM output.
-  rt_cfg.response_filter_factory = []() {
+  auto resp_filter = []() {
     return std::make_unique<core::StripThinkingFilter>();
-  };
+  }();
 
-  services::ToolRegistry tools;
+  // ── Tool registry ─────────────────────────────────────────────────────────
+  runtime::ToolRegistry tools;
 
   // ── Builtin tools ─────────────────────────────────────────────────────────
   tools.Register("get_current_time",
-                 [](const std::string& /*args*/) -> services::ToolResult {
+                 [](const std::string& /*args*/) -> runtime::ToolResult {
                    auto now = std::chrono::system_clock::now();
                    auto t = std::chrono::system_clock::to_time_t(now);
                    char buf[64];
@@ -258,7 +308,7 @@ int main(int argc, char* argv[]) {
                  });
 
   tools.Register("get_system_info",
-                 [](const std::string& /*args*/) -> services::ToolResult {
+                 [](const std::string& /*args*/) -> runtime::ToolResult {
                    char hostname[256] = {};
                    gethostname(hostname, sizeof(hostname));
 #if defined(__APPLE__)
@@ -276,7 +326,7 @@ int main(int argc, char* argv[]) {
                  });
 
   tools.Register("calculate",
-                 [](const std::string& args) -> services::ToolResult {
+                 [](const std::string& args) -> runtime::ToolResult {
                    // Simple eval: parse "expression" field, support +,-,*,/
                    // For safety, only handle a op b format.
                    auto expr_pos = args.find(R"("expression":")");
@@ -314,7 +364,7 @@ int main(int argc, char* argv[]) {
                  });
 
   tools.Register("set_reminder",
-                 [](const std::string& args) -> services::ToolResult {
+                 [](const std::string& args) -> runtime::ToolResult {
                    // Parse message and minutes fields.
                    auto msg_pos = args.find(R"("message":")");
                    auto min_pos = args.find(R"("minutes":)");
@@ -334,53 +384,56 @@ int main(int argc, char* argv[]) {
                    return {true, result, ""};
                  });
 
-  // ── Tool definitions for LLM (function calling schema) ────────────────────
-  {
-    services::ToolDefinition time_tool;
-    time_tool.name = "get_current_time";
-    time_tool.description = "Get the current date and time";
-    time_tool.required_capability = "builtin";
-    rt_cfg.llm.tools.push_back(std::move(time_tool));
+  // ── Create CoreDevice ─────────────────────────────────────────────────────
+  const std::string session_id =
+      "voice-" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count());
 
-    services::ToolDefinition sys_tool;
-    sys_tool.name = "get_system_info";
-    sys_tool.description = "Get system information (OS, hostname)";
-    sys_tool.required_capability = "builtin";
-    rt_cfg.llm.tools.push_back(std::move(sys_tool));
+  auto core = std::make_unique<runtime::CoreDevice>(
+      "core", session_id, ctrl_cfg, ctx_cfg, pol_cfg,
+      std::make_unique<services::OpenAiClient>(llm_cfg),
+      std::make_unique<services::InMemoryStore>(),
+      std::make_unique<services::LogAuditSink>(),
+      std::move(obs_agg),
+      std::move(obs_filter),
+      std::move(tts_seg),
+      std::move(resp_filter));
 
-    services::ToolDefinition calc_tool;
-    calc_tool.name = "calculate";
-    calc_tool.description = "Evaluate a simple math expression (a op b)";
-    calc_tool.parameters = {
-        {"expression", "string", "Math expression like '2 + 3' or '10 / 4'", true}};
-    calc_tool.required_capability = "builtin";
-    rt_cfg.llm.tools.push_back(std::move(calc_tool));
+  auto* core_ptr = core.get();
 
-    services::ToolDefinition reminder_tool;
-    reminder_tool.name = "set_reminder";
-    reminder_tool.description = "Set a reminder with a message and delay in minutes";
-    reminder_tool.parameters = {
-        {"message", "string", "Reminder message", true},
-        {"minutes", "integer", "Minutes from now", true}};
-    reminder_tool.required_capability = "builtin";
-    rt_cfg.llm.tools.push_back(std::move(reminder_tool));
-  }
+  // ── Wire Controller callbacks ─────────────────────────────────────────────
+  core->Session().GetController().OnDiagnostic(
+      [](const std::string& msg) {
+        std::printf("[diag] %s\n", msg.c_str());
+        std::fflush(stdout);
+      });
 
-  // ── Policy: allow all builtin tools ───────────────────────────────────────
-  rt_cfg.policy.default_capabilities = {"builtin"};
-  {
-    core::PolicyRule allow_builtin;
-    allow_builtin.priority = 0;
-    allow_builtin.action_pattern = "*";
-    allow_builtin.required_capability = "builtin";
-    allow_builtin.outcome = core::PolicyOutcome::kAllow;
-    rt_cfg.policy.initial_rules = {allow_builtin};
-  }
+  core->Session().GetController().OnTransition(
+      [](core::State from, core::State to, core::Event event) {
+        std::printf("[transition] %s → %s [%s]\n",
+                    core::StateName(from), core::StateName(to),
+                    core::EventName(event));
+        std::fflush(stdout);
+      });
 
-  runtime::AgentRuntime runtime(rt_cfg, tools);
+  core->Session().GetController().OnActivity(
+      [](const core::ActivityEvent& event) {
+        std::printf("[activity] kind=%d detail=%s\n",
+                    static_cast<int>(event.kind), event.detail.c_str());
+        std::fflush(stdout);
+      });
 
-  // ── Register voice devices ────────────────────────────────────────────────
-  runtime.RegisterDevice(std::move(capture));
+  // ── Create ToolDispatchDevice ─────────────────────────────────────────────
+  auto tool_dispatch = std::make_unique<runtime::ToolDispatchDevice>(tools);
+
+  // ── AgentRuntime (pure device bus) ────────────────────────────────────────
+  runtime::AgentRuntime runtime;
+
+  // ── Register devices ──────────────────────────────────────────────────────
+  // Audio devices: auto_start = false (started explicitly below).
+  constexpr runtime::DeviceOptions kManual{.auto_start = false};
+
+  runtime.RegisterDevice(std::move(capture), kManual);
   runtime.RegisterDevice(std::move(capture_dump));
   runtime.RegisterDevice(std::move(vad));
   runtime.RegisterDevice(std::move(vad_dump));
@@ -388,10 +441,13 @@ int main(int argc, char* argv[]) {
   runtime.RegisterDevice(std::move(asr));
   runtime.RegisterDevice(std::move(tts));
   runtime.RegisterDevice(std::move(playout_dump));
-  runtime.RegisterDevice(std::move(playout));
+  runtime.RegisterDevice(std::move(playout), kManual);
+  runtime.RegisterDevice(std::move(core));
+  runtime.RegisterDevice(std::move(tool_dispatch));
 
-  // ── Routes (all DMA — requires_control_plane = false) ────────────────────
+  // ── Routes (DMA — requires_control_plane = false) ─────────────────────────
   constexpr runtime::RouteOptions kDma{.requires_control_plane = false};
+  constexpr runtime::RouteOptions kCtrl{.requires_control_plane = true};
 
   // capture → dump → vad
   runtime.AddRoute({"audio_capture", "audio_out"},
@@ -419,23 +475,53 @@ int main(int argc, char* argv[]) {
   runtime.AddRoute({"playout_dump",   io::PcmDumpDevice::kPassOut},
                    {"audio_playout",  "audio_in"}, kDma);
 
+  // Core output → app_output sink (for console display)
+  runtime.AddRoute({"core", "text_out"},
+                   {"app_output", "text_in"}, kDma);
+
+  // TTS segment route
+  runtime.AddRoute({"core", "tts_out"},
+                   {"elevenlabs_tts", "text_in"}, kDma);
+
+  // Tool call round-trip (control plane)
+  runtime.AddRoute({"core", "action_out"},
+                   {"tool_dispatch", runtime::ToolDispatchDevice::kActionIn}, kCtrl);
+  runtime.AddRoute({"tool_dispatch", runtime::ToolDispatchDevice::kResultOut},
+                   {"core", "tool_result_in"}, kCtrl);
+
+  // VAD → core (interrupt detection)
+  runtime.AddRoute({"vad_event", "vad_out"},
+                   {"core", "vad_in"}, kDma);
+
+  // Control plane: core controls ASR, TTS, and playout
+  runtime.AddRoute({"core", "control_out"},
+                   {"baidu_asr", "control_in"}, kCtrl);
+  runtime.AddRoute({"core", "control_out"},
+                   {"elevenlabs_tts", "control_in"}, kCtrl);
+  runtime.AddRoute({"core", "control_out"},
+                   {"audio_playout", "control_in"}, kCtrl);
+
   // ── Output callback: display only ──────────────────────────────────────────
   // TTS is now driven by the route core:tts_out → elevenlabs_tts:text_in.
   // This callback only handles console display of streaming tokens and final text.
-  runtime.OnOutput([](const runtime::RuntimeOutput& output) {
-    if (output.is_partial) {
-      std::printf("%s", output.text.c_str());
+  runtime.OnFrameSink([](io::DataFrame frame) {
+    if (frame.type != "text/plain") { return; }
+    std::string text(frame.payload.begin(), frame.payload.end());
+    bool is_partial = (frame.metadata.count("streaming") != 0 &&
+                       frame.metadata.at("streaming") == "1");
+    if (is_partial) {
+      std::printf("%s", text.c_str());
       std::fflush(stdout);
       return;
     }
-    std::printf("\n[agent] %s\n", output.text.c_str());
+    std::printf("\n[agent] %s\n", text.c_str());
     std::fflush(stdout);
   });
 
   // ── Start ─────────────────────────────────────────────────────────────────
-  runtime.StartSession();
+  runtime.StartAll();
 
-  // Start audio capture explicitly (not auto-started by StartSession).
+  // Start audio capture/playout explicitly (not auto-started).
   playout_ptr->Start();
   capture_ptr->Start();
 
@@ -453,7 +539,13 @@ int main(int argc, char* argv[]) {
   while (std::getline(std::cin, line)) {
     if (line == "q") { break; }
     if (line.empty()) { continue; }
-    runtime.SendMessage(line);
+
+    // Build a text/plain DataFrame and send directly to CoreDevice.
+    io::DataFrame frame;
+    frame.type = "text/plain";
+    frame.payload.assign(line.begin(), line.end());
+    frame.timestamp = std::chrono::steady_clock::now();
+    core_ptr->OnInput("text_in", std::move(frame));
   }
 
   // Stop audio devices before Shutdown() to avoid deadlock: PortAudio's

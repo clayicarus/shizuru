@@ -64,6 +64,7 @@ add_executable(agent_runtime_test
 )
 target_link_libraries(agent_runtime_test
   PRIVATE shizuru_runtime
+  PRIVATE shizuru_llm_openai
   PRIVATE httplib::httplib
   PRIVATE nlohmann_json::nlohmann_json
   PRIVATE GTest::gtest_main
@@ -115,6 +116,7 @@ add_executable(agent_runtime_integration_test
 )
 target_link_libraries(agent_runtime_integration_test
   PRIVATE shizuru_runtime
+  PRIVATE shizuru_llm_openai
   PRIVATE httplib::httplib
   PRIVATE nlohmann_json::nlohmann_json
   PRIVATE GTest::gtest_main

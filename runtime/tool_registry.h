@@ -4,7 +4,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace shizuru::services {
+namespace shizuru::runtime {
 
 // Result of a tool execution.
 struct ToolResult {
@@ -47,4 +47,4 @@ class ToolRegistry {
   std::unordered_map<std::string, ToolFunction> tools_;
 };
 
-}  // namespace shizuru::services
+}  // namespace shizuru::runtime

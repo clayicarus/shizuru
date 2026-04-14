@@ -28,10 +28,15 @@
 #include <nlohmann/json.hpp>
 
 #include "agent_runtime.h"
-#include "io/tool_registry.h"
+#include "runtime/core_device.h"
+#include "runtime/tool_registry.h"
+#include "runtime/tool_dispatch_device.h"
 #include "llm/config.h"
 #include "policy/config.h"
 #include "policy/types.h"
+#include "services/memory/in_memory_store.h"
+#include "services/audit/log_audit_sink.h"
+#include "llm/openai/openai_client.h"
 #include "spdlog/common.h"
 
 namespace {
@@ -195,9 +200,9 @@ int main(int argc, char* argv[]) {
   }
 
   // Register tools.
-  shizuru::services::ToolRegistry tools;
+  shizuru::runtime::ToolRegistry tools;
   tools.Register("get_weather",
-                 [](const std::string& args) -> shizuru::services::ToolResult {
+                 [](const std::string& args) -> shizuru::runtime::ToolResult {
                    auto j = nlohmann::json::parse(args);
                    std::string city = j.value("city", "unknown");
                    std::printf("[tool]  get_weather(city=%s)\n", city.c_str());
@@ -208,45 +213,88 @@ int main(int argc, char* argv[]) {
                    return {true, result.dump(), ""};
                  });
 
-  // Configure the runtime.
-  shizuru::runtime::RuntimeConfig config;
-  config.logger.level              = spdlog::level::debug;
-  config.llm.base_url              = base_url;
-  config.llm.api_key               = api_key;
-  config.llm.model                 = model;
-  config.llm.connect_timeout       = std::chrono::seconds(5);
-  config.llm.read_timeout          = std::chrono::seconds(30);
+  // Configure the LLM.
+  shizuru::services::OpenAiConfig llm_cfg;
+  llm_cfg.base_url              = base_url;
+  llm_cfg.api_key               = api_key;
+  llm_cfg.model                 = model;
+  llm_cfg.connect_timeout       = std::chrono::seconds(5);
+  llm_cfg.read_timeout          = std::chrono::seconds(30);
   if (!api_path.empty()) {
-    config.llm.api_path = api_path;
+    llm_cfg.api_path = api_path;
   }
 
   shizuru::services::ToolDefinition weather_tool;
   weather_tool.name        = "get_weather";
   weather_tool.description = "Get current weather for a city";
   weather_tool.parameters  = {{"city", "string", "City name", true}};
-  config.llm.tools         = {weather_tool};
+  llm_cfg.tools            = {weather_tool};
 
-  config.policy.default_capabilities = {"get_weather"};
+  shizuru::core::ControllerConfig ctrl_cfg;
+  ctrl_cfg.max_turns = 100;
+
+  shizuru::core::ContextConfig ctx_cfg;
+
+  shizuru::core::PolicyConfig pol_cfg;
+  pol_cfg.default_capabilities = {"get_weather"};
   {
     shizuru::core::PolicyRule allow_weather;
     allow_weather.priority = 0;
     allow_weather.action_pattern = "get_weather";
     allow_weather.required_capability = "get_weather";
     allow_weather.outcome = shizuru::core::PolicyOutcome::kAllow;
-    config.policy.initial_rules = {allow_weather};
+    pol_cfg.initial_rules = {allow_weather};
   }
-  config.controller.max_turns        = 100;
 
-  // Create runtime.
-  shizuru::runtime::AgentRuntime runtime(config, tools);
+  // Initialize logger.
+  shizuru::core::LoggerConfig log_cfg;
+  log_cfg.level = spdlog::level::debug;
+  shizuru::core::InitLogger(log_cfg);
+
+  // Create CoreDevice.
+  const std::string session_id =
+      "tool-" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count());
+
+  auto core = std::make_unique<shizuru::runtime::CoreDevice>(
+      "core", session_id, ctrl_cfg, ctx_cfg, pol_cfg,
+      std::make_unique<shizuru::services::OpenAiClient>(llm_cfg),
+      std::make_unique<shizuru::services::InMemoryStore>(),
+      std::make_unique<shizuru::services::LogAuditSink>());
+
+  auto* core_ptr = core.get();
+
+  // Create ToolDispatchDevice.
+  auto tool_dispatch = std::make_unique<shizuru::runtime::ToolDispatchDevice>(tools);
+
+  // Create runtime (pure device bus).
+  shizuru::runtime::AgentRuntime runtime;
+
+  runtime.RegisterDevice(std::move(core));
+  runtime.RegisterDevice(std::move(tool_dispatch));
+
+  // Wire routes.
+  constexpr shizuru::runtime::RouteOptions kDma{.requires_control_plane = false};
+  constexpr shizuru::runtime::RouteOptions kCtrl{.requires_control_plane = true};
+
+  runtime.AddRoute({"core", "text_out"}, {"app_output", "text_in"}, kDma);
+  runtime.AddRoute({"core", "action_out"},
+                   {"tool_dispatch", shizuru::runtime::ToolDispatchDevice::kActionIn}, kCtrl);
+  runtime.AddRoute({"tool_dispatch", shizuru::runtime::ToolDispatchDevice::kResultOut},
+                   {"core", "tool_result_in"}, kCtrl);
 
   // Synchronization: block the input loop until the agent replies.
   std::mutex            resp_mutex;
   std::condition_variable resp_cv;
   std::atomic<bool>     waiting{false};
 
-  runtime.OnOutput([&](const shizuru::runtime::RuntimeOutput& output) {
-    std::printf("\n[agent] %s\n", output.text.c_str());
+  runtime.OnFrameSink([&](shizuru::io::DataFrame frame) {
+    if (frame.type != "text/plain") { return; }
+    bool is_partial = (frame.metadata.count("streaming") != 0 &&
+                       frame.metadata.at("streaming") == "1");
+    if (is_partial) { return; }  // Only show final response
+    std::string text(frame.payload.begin(), frame.payload.end());
+    std::printf("\n[agent] %s\n", text.c_str());
     std::fflush(stdout);
     {
       std::lock_guard<std::mutex> lk(resp_mutex);
@@ -256,7 +304,7 @@ int main(int argc, char* argv[]) {
   });
 
   // Start session.
-  std::string session_id = runtime.StartSession();
+  runtime.StartAll();
   std::printf("[session] %s started\n\n", session_id.c_str());
 
   // Interactive loop.
@@ -280,7 +328,13 @@ int main(int argc, char* argv[]) {
 
     // Send and wait for response.
     waiting.store(true);
-    runtime.SendMessage(line);
+    {
+      shizuru::io::DataFrame frame;
+      frame.type = "text/plain";
+      frame.payload.assign(line.begin(), line.end());
+      frame.timestamp = std::chrono::steady_clock::now();
+      core_ptr->OnInput("text_in", std::move(frame));
+    }
 
     {
       std::unique_lock<std::mutex> lk(resp_mutex);

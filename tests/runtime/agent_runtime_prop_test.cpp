@@ -19,8 +19,14 @@
 
 #include "io/data_frame.h"
 #include "io/io_device.h"
+#include "runtime/tool_registry.h"
+#include "runtime/tool_dispatch_device.h"
 #include "runtime/agent_runtime.h"
+#include "runtime/core_device.h"
 #include "runtime/route_table.h"
+#include "services/audit/log_audit_sink.h"
+#include "services/llm/openai/openai_client.h"
+#include "services/memory/in_memory_store.h"
 #include "mock_io_device.h"
 
 // ---------------------------------------------------------------------------
@@ -84,18 +90,6 @@ using testing::MockIoDevice;
 // Helpers
 // ---------------------------------------------------------------------------
 
-RuntimeConfig MakeConfig() {
-  RuntimeConfig cfg;
-  cfg.controller.max_turns = 1;
-  cfg.controller.max_retries = 0;
-  cfg.controller.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.controller.turn_timeout = std::chrono::seconds(5);
-  cfg.controller.token_budget = 100000;
-  cfg.controller.action_count_limit = 10;
-  cfg.context.max_context_tokens = 100000;
-  return cfg;
-}
-
 io::DataFrame MakeTextFrame(const std::string& text) {
   io::DataFrame f;
   f.type = "text/plain";
@@ -104,6 +98,52 @@ io::DataFrame MakeTextFrame(const std::string& text) {
   f.source_port = "out";
   f.timestamp = std::chrono::steady_clock::now();
   return f;
+}
+
+// Assemble a CoreDevice + ToolDispatchDevice on the bus and return the CoreDevice*.
+CoreDevice* AssembleAgent(AgentRuntime& runtime,
+                          const std::string& base_url,
+                          ToolRegistry& tools) {
+  core::ControllerConfig ctrl_cfg;
+  ctrl_cfg.max_turns = 1;
+  ctrl_cfg.max_retries = 0;
+  ctrl_cfg.retry_base_delay = std::chrono::milliseconds(1);
+  ctrl_cfg.turn_timeout = std::chrono::seconds(5);
+  ctrl_cfg.token_budget = 100000;
+  ctrl_cfg.action_count_limit = 10;
+
+  core::ContextConfig ctx_cfg;
+  ctx_cfg.max_context_tokens = 100000;
+
+  core::PolicyConfig pol_cfg;
+
+  services::OpenAiConfig llm_cfg;
+  llm_cfg.base_url = base_url;
+  llm_cfg.api_key = "mock";
+  llm_cfg.model = "mock";
+  llm_cfg.connect_timeout = std::chrono::seconds(5);
+  llm_cfg.read_timeout = std::chrono::seconds(10);
+
+  auto core = std::make_unique<CoreDevice>(
+      "core", "test-session", ctrl_cfg, ctx_cfg, pol_cfg,
+      std::make_unique<services::OpenAiClient>(llm_cfg),
+      std::make_unique<services::InMemoryStore>(),
+      std::make_unique<services::LogAuditSink>());
+  CoreDevice* core_ptr = core.get();
+
+  auto tool_dev = std::make_unique<ToolDispatchDevice>(tools);
+
+  runtime.RegisterDevice(std::move(core), DeviceOptions{.auto_start = true});
+  runtime.RegisterDevice(std::move(tool_dev), DeviceOptions{.auto_start = true});
+
+  runtime.AddRoute(PortAddress{"core", "action_out"},
+                   PortAddress{"tool_dispatch", "action_in"});
+  runtime.AddRoute(PortAddress{"tool_dispatch", "result_out"},
+                   PortAddress{"core", "tool_result_in"});
+  runtime.AddRoute(PortAddress{"core", "text_out"},
+                   PortAddress{"app_output", "in"});
+
+  return core_ptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,8 +264,7 @@ RC_GTEST_PROP(AgentRuntimePropTest, prop_device_id_uniqueness, ()) {
   const std::string id = *rc::gen::nonEmpty(
       rc::gen::container<std::string>(rc::gen::inRange('a', 'z')));
 
-  services::ToolRegistry tools;
-  AgentRuntime runtime(MakeConfig(), tools);
+  AgentRuntime runtime;
 
   auto dev1 = std::make_unique<MockIoDevice>(id);
   auto dev2 = std::make_unique<MockIoDevice>(id);
@@ -253,25 +292,26 @@ RC_GTEST_PROP(AgentRuntimePropTest, prop_send_message_routes_to_core_device,
 
   MinimalMockLlmServer mock_server;
 
-  services::ToolRegistry tools;
-  RuntimeConfig cfg = MakeConfig();
-  cfg.llm.base_url = mock_server.BaseUrl();
-  cfg.llm.api_key = "mock";
-  cfg.llm.model = "mock";
-  cfg.llm.connect_timeout = std::chrono::seconds(5);
-  cfg.llm.read_timeout = std::chrono::seconds(10);
+  ToolRegistry tools;
+  AgentRuntime runtime;
 
-  AgentRuntime runtime(cfg, tools);
+  CoreDevice* core = AssembleAgent(runtime, mock_server.BaseUrl(), tools);
 
   std::mutex mu;
   std::string received_text;
-  runtime.OnOutput([&](const RuntimeOutput& out) {
+  runtime.OnFrameSink([&](io::DataFrame frame) {
     std::lock_guard<std::mutex> lock(mu);
-    received_text = out.text;
+    received_text = std::string(frame.payload.begin(), frame.payload.end());
   });
 
-  runtime.StartSession();
-  runtime.SendMessage(content);
+  runtime.StartAll();
+
+  // Send text to core device directly.
+  io::DataFrame msg;
+  msg.type = "text/plain";
+  msg.payload = std::vector<uint8_t>(content.begin(), content.end());
+  msg.timestamp = std::chrono::steady_clock::now();
+  core->OnInput("text_in", std::move(msg));
 
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   bool got_response = false;
