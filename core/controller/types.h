@@ -1,7 +1,10 @@
 #pragma once
 
 #include <chrono>
+#include <optional>
 #include <string>
+
+#include "conversation/item.h"
 
 namespace shizuru::core {
 
@@ -54,6 +57,7 @@ struct Observation {
   std::string content;   // Serialized payload
   std::string source;    // Origin identifier (e.g., "user", "tool:web_search")
   std::chrono::steady_clock::time_point timestamp;
+  std::optional<conversation::ConversationItem> item;
 };
 
 // A single tool call proposed by the LLM.

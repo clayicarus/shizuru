@@ -7,6 +7,8 @@
 #include <thread>
 
 #include "async_logger.h"
+#include "conversation/item.h"
+#include "conversation/render.h"
 #include "io/data_frame.h"
 
 namespace shizuru::core {
@@ -252,6 +254,28 @@ void Controller::RunLoop() {
 
       // Check aggregator timeout (force-flush buffered content).
       if (observation_queue_.empty() && state_.load() == State::kListening) {
+        // Post-interrupt cooldown expired: all barge-in messages have been
+        // recorded to context.  Enter thinking with a continuation so the
+        // LLM sees all accumulated messages together.
+        if (post_interrupt_cooldown_) {
+          post_interrupt_cooldown_ = false;
+          LOG_INFO("[{}] Post-interrupt cooldown expired, entering thinking",
+                   MODULE_NAME);
+          TryTransition(Event::kUserObservation);
+          Observation cont;
+          cont.type = ObservationType::kContinuation;
+          cont.source = "controller";
+          cont.timestamp = std::chrono::steady_clock::now();
+          lock.unlock();
+          try {
+            HandleThinking(cont);
+          } catch (const std::exception& e) {
+            EmitDiagnostic("Unhandled exception: " + std::string(e.what()));
+            TryTransition(Event::kLlmFailure);
+          }
+          continue;
+        }
+
         auto timeout_obs = observation_aggregator_->CheckTimeout();
         if (timeout_obs.has_value()) {
           // Timeout flush — run through filter only, skip aggregator.
@@ -295,14 +319,26 @@ void Controller::RunLoop() {
     }
 
     // Check for barge-in: if we're in Thinking/Routing/Acting and receive a
-    // real user observation, interrupt the current turn and reprocess the
-    // actual observation after transitioning back to Listening.
+    // real user observation, interrupt the current turn and record the new
+    // message to context.  Do NOT immediately re-enter HandleThinking —
+    // stay in kListening and let the debounce window collect more input.
+    // This implements the natural conversation model: wait until the user
+    // finishes talking, then respond to everything together.
     if (obs.type == ObservationType::kUserMessage &&
         (current == State::kThinking || current == State::kRouting ||
          current == State::kActing)) {
       HandleInterrupt();
-      // Re-enqueue the observation to process after transitioning to Listening.
-      EnqueueObservation(std::move(obs));
+      // Record the interrupting message to context so LLM sees it next time.
+      MemoryEntry barge_entry;
+      barge_entry.type = MemoryEntryType::kUserMessage;
+      barge_entry.role = "user";
+      barge_entry.content = obs.content;
+      barge_entry.source_tag = obs.source;
+      barge_entry.timestamp = obs.timestamp;
+      context_.RecordTurn(session_id_, barge_entry);
+      // Set a short cooldown so the next RunLoop iteration waits for more
+      // input instead of immediately processing.
+      post_interrupt_cooldown_ = true;
       continue;
     }
 
@@ -344,6 +380,23 @@ void Controller::RunLoop() {
         continue;  // Stay in kListening, wait for more fragments.
       }
 
+      // Post-interrupt cooldown: after a barge-in, buffer this message
+      // and wait for more input instead of immediately thinking.
+      // The message is recorded to context so the LLM sees it when we
+      // eventually think.
+      if (post_interrupt_cooldown_) {
+        MemoryEntry cooldown_entry;
+        cooldown_entry.type = MemoryEntryType::kUserMessage;
+        cooldown_entry.role = "user";
+        cooldown_entry.content = aggregated->content;
+        cooldown_entry.source_tag = aggregated->source;
+        cooldown_entry.timestamp = aggregated->timestamp;
+        context_.RecordTurn(session_id_, cooldown_entry);
+        LOG_INFO("[{}] Post-interrupt cooldown: buffered \"{}\"",
+                 MODULE_NAME, aggregated->content);
+        continue;  // Stay in kListening, wait for more or timeout.
+      }
+
       // Stage 2: Relevance filter.
       EmitActivity(ActivityKind::kFilteringInput);
       auto filter_start = std::chrono::steady_clock::now();
@@ -372,6 +425,27 @@ void Controller::RunLoop() {
         TryTransition(Event::kLlmFailure);
       }
     }
+
+    // System events (scheduler reminders, followup check-ins): bypass
+    // aggregator and filter, go straight to thinking.
+    if ((current == State::kListening || current == State::kIdle) &&
+        obs.type == ObservationType::kSystemEvent) {
+      if (current == State::kIdle) {
+        if (!TryTransition(Event::kStart)) { continue; }
+      }
+      LOG_INFO("[{}] System event received: \"{}\"",
+               MODULE_NAME, obs.content);
+      session_start_ = std::chrono::steady_clock::now();
+      last_activity_ = session_start_;
+      conversation_active_ = true;
+      TryTransition(Event::kUserObservation);
+      try {
+        HandleThinking(obs);
+      } catch (const std::exception& e) {
+        EmitDiagnostic("Unhandled exception: " + std::string(e.what()));
+        TryTransition(Event::kLlmFailure);
+      }
+    }
   }
 }
 
@@ -383,10 +457,47 @@ void Controller::HandleThinking(const Observation& obs) {
   if (obs.type == ObservationType::kUserMessage) {
     MemoryEntry user_entry;
     user_entry.type = MemoryEntryType::kUserMessage;
-    user_entry.role = "user";
-    user_entry.content = obs.content;
+    if (obs.item.has_value()) {
+      auto rendered = conversation::RenderForLlm(*obs.item);
+      user_entry.role = rendered.role;
+      user_entry.content = rendered.content;
+      user_entry.source_tag = rendered.name;
+      user_entry.item_json = conversation::SerializeConversationItem(*obs.item);
+    } else {
+      user_entry.role = "user";
+      user_entry.content = obs.content;
+      user_entry.source_tag = obs.source;  // "user", "voice", etc.
+    }
     user_entry.timestamp = obs.timestamp;
     context_.RecordTurn(session_id_, user_entry);
+
+    Observation cont;
+    cont.type = ObservationType::kContinuation;
+    cont.source = obs.source;
+    cont.timestamp = obs.timestamp;
+    HandleThinking(cont);
+    return;
+  }
+
+  // System events (reminders, followups) are recorded as user-role messages
+  // with source_tag set so the LLM sees name="scheduler" (or other source)
+  // in the context window and can distinguish them from real user input.
+  if (obs.type == ObservationType::kSystemEvent) {
+    MemoryEntry event_entry;
+    event_entry.type = MemoryEntryType::kUserMessage;
+    if (obs.item.has_value()) {
+      auto rendered = conversation::RenderForLlm(*obs.item);
+      event_entry.role = rendered.role;
+      event_entry.content = rendered.content;
+      event_entry.source_tag = rendered.name;
+      event_entry.item_json = conversation::SerializeConversationItem(*obs.item);
+    } else {
+      event_entry.role = "user";
+      event_entry.content = obs.content;
+      event_entry.source_tag = obs.source;  // "scheduler", "followup", etc.
+    }
+    event_entry.timestamp = obs.timestamp;
+    context_.RecordTurn(session_id_, event_entry);
 
     Observation cont;
     cont.type = ObservationType::kContinuation;
@@ -649,10 +760,11 @@ void Controller::HandleRouting(ActionCandidate ac) {
 
         TryTransition(Event::kRouteToContinue);
 
-        // Create observation from denial and re-enter thinking.
+        // Re-enter thinking via continuation — the denial is already recorded
+        // in memory above as a tool result entry.
         Observation denial_obs;
-        denial_obs.type = ObservationType::kSystemEvent;
-        denial_obs.content = "Action denied: " + denied_reason;
+        denial_obs.type = ObservationType::kContinuation;
+        denial_obs.content = "";
         denial_obs.source = "policy";
         denial_obs.timestamp = std::chrono::steady_clock::now();
         HandleThinking(denial_obs);
@@ -727,6 +839,7 @@ void Controller::HandleActing(ActionCandidate ac) {
     frame.type = "action/tool_call";
     frame.payload = std::vector<uint8_t>(payload_str.begin(), payload_str.end());
     frame.metadata["tool_call_id"] = tc.id;
+    frame.metadata["tool_name"] = tc.name;
     frame.timestamp = std::chrono::steady_clock::now();
 
     if (emit_frame_) {
@@ -765,13 +878,27 @@ void Controller::HandleActingResult(const Observation& obs) {
   pending_results_[tool_call_id] = obs.content;
 
   const bool success = obs.content.find(R"("success":true)") != std::string::npos;
+  std::string tool_name;
+  for (const auto& tc : pending_tool_calls_) {
+    if (tc.id == tool_call_id) {
+      tool_name = tc.name;
+      break;
+    }
+  }
 
   // Record this tool result in memory.
   MemoryEntry result_entry;
   result_entry.type        = MemoryEntryType::kToolResult;
   result_entry.role        = "tool";
-  result_entry.content     = obs.content;
+  auto item = conversation::MakeToolResultItem(
+      tool_name.empty() ? "tool" : tool_name,
+      tool_call_id,
+      conversation::ParseJsonOrString(obs.content));
+  auto rendered = conversation::RenderForLlm(item);
+  result_entry.content = rendered.content;
+  result_entry.source_tag = rendered.name;
   result_entry.tool_call_id = tool_call_id;
+  result_entry.item_json = conversation::SerializeConversationItem(item);
   result_entry.timestamp   = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, result_entry);
   last_activity_ = result_entry.timestamp;
@@ -784,10 +911,6 @@ void Controller::HandleActingResult(const Observation& obs) {
   // Inject <tool_result> marker into the streaming text flow so the UI
   // can render it inline within the same assistant bubble.
   {
-    std::string tool_name;
-    for (const auto& tc : pending_tool_calls_) {
-      if (tc.id == tool_call_id) { tool_name = tc.name; break; }
-    }
     std::string marker = "<tool_result>{\"id\":\"" + tool_call_id +
                          "\",\"name\":\"" + tool_name +
                          "\",\"success\":" + (success ? "true" : "false") +
@@ -858,8 +981,13 @@ void Controller::HandleResponding(ActionCandidate ac) {
   // Record response as MemoryEntry.
   MemoryEntry response_entry;
   response_entry.type = MemoryEntryType::kAssistantMessage;
-  response_entry.role = "assistant";
-  response_entry.content = ac.response_text;
+  auto item = conversation::MakeAssistantMessageItem(
+      "assistant", "", ac.response_text);
+  auto rendered = conversation::RenderForLlm(item);
+  response_entry.role = rendered.role;
+  response_entry.content = rendered.content;
+  response_entry.source_tag = rendered.name;
+  response_entry.item_json = conversation::SerializeConversationItem(item);
   response_entry.timestamp = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, response_entry);
   last_activity_ = response_entry.timestamp;

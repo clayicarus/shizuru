@@ -164,6 +164,7 @@ class Controller {
   std::chrono::steady_clock::time_point session_start_;
   std::chrono::steady_clock::time_point last_activity_;
   bool conversation_active_ = false;
+  bool post_interrupt_cooldown_ = false;  // After barge-in, buffer input before thinking
 
   // Loop thread
   std::thread loop_thread_;

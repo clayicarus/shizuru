@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "async_logger.h"
+#include "conversation/item.h"
 #include "io/control_frame.h"
 
 namespace shizuru::runtime {
@@ -97,6 +98,7 @@ std::vector<io::PortDescriptor> CoreDevice::GetPortDescriptors() const {
       {kTextIn,       io::PortDirection::kInput,  "text/plain"},
       {kToolResultIn, io::PortDirection::kInput,  "action/tool_result"},
       {kVadIn,        io::PortDirection::kInput,  "vad/event"},
+      {kSchedulerIn,  io::PortDirection::kInput,  "scheduler/event"},
       {kTextOut,      io::PortDirection::kOutput, "text/plain"},
       {kTtsOut,       io::PortDirection::kOutput, "text/plain"},
       {kActionOut,    io::PortDirection::kOutput, "action/tool_call"},
@@ -111,11 +113,21 @@ void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
 
   if (port_name == kTextIn) {
     const std::string content(frame.payload.begin(), frame.payload.end());
+    std::string actor_id = "user";
+    if (frame.metadata.count("actor_id") != 0) {
+      actor_id = frame.metadata.at("actor_id");
+    }
+    std::string actor_name;
+    if (frame.metadata.count("actor_name") != 0) {
+      actor_name = frame.metadata.at("actor_name");
+    }
     core::Observation obs;
     obs.type = core::ObservationType::kUserMessage;
     obs.content = content;
-    obs.source = "user";
+    obs.source = actor_id;
     obs.timestamp = std::chrono::steady_clock::now();
+    obs.item = core::conversation::MakeHumanMessageItem(
+        std::move(actor_id), std::move(actor_name), content);
     session_->EnqueueObservation(std::move(obs));
   } else if (port_name == kToolResultIn) {
     const std::string content(frame.payload.begin(), frame.payload.end());
@@ -138,6 +150,22 @@ void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
       session_->GetController().Interrupt();
     }
     // speech_active is silently ignored.
+  } else if (port_name == kSchedulerIn) {
+    // Scheduler events bypass aggregator and filter.
+    const std::string content(frame.payload.begin(), frame.payload.end());
+    std::string event_type = "reminder";
+    if (frame.metadata.count("event_type") != 0) {
+      event_type = frame.metadata.at("event_type");
+    }
+    core::Observation obs;
+    obs.type = core::ObservationType::kSystemEvent;
+    obs.content = content;
+    obs.source = "scheduler";
+    obs.timestamp = std::chrono::steady_clock::now();
+    obs.item = core::conversation::MakeSystemEventItem(
+        "system:scheduler", "Scheduler", std::move(event_type), "scheduler",
+        core::conversation::ParseJsonOrString(content));
+    session_->EnqueueObservation(std::move(obs));
   } else {
     LOG_WARN("CoreDevice: unsupported input port: {}", port_name);
   }

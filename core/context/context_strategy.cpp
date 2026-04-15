@@ -4,7 +4,60 @@
 #include <chrono>
 #include <cstddef>
 
+#include "conversation/render.h"
+
 namespace shizuru::core {
+
+namespace {
+
+ContextMessage LegacyObservationMessage(const Observation& observation) {
+  ContextMessage msg;
+  switch (observation.type) {
+    case ObservationType::kUserMessage:
+      msg.role = "user";
+      break;
+    case ObservationType::kToolResult:
+      msg.role = "tool";
+      break;
+    case ObservationType::kSystemEvent:
+      msg.role = "user";
+      break;
+    case ObservationType::kInterruption:
+      msg.role = "system";
+      break;
+    case ObservationType::kContinuation:
+      break;
+  }
+  msg.content = observation.content;
+  return msg;
+}
+
+ContextMessage BuildMemoryContextMessage(const MemoryEntry& entry) {
+  if (!entry.tool_calls_json.empty()) {
+    ContextMessage msg;
+    msg.role = entry.role;
+    msg.content = entry.content;
+    msg.tool_call_id = entry.tool_call_id;
+    msg.name = entry.source_tag;
+    msg.tool_calls_json = entry.tool_calls_json;
+    return msg;
+  }
+
+  if (auto item = conversation::TryParseConversationItem(entry.item_json);
+      item.has_value()) {
+    return conversation::RenderForLlm(*item);
+  }
+
+  ContextMessage msg;
+  msg.role = entry.role;
+  msg.content = entry.content;
+  msg.tool_call_id = entry.tool_call_id;
+  msg.name = entry.source_tag;
+  msg.tool_calls_json = entry.tool_calls_json;
+  return msg;
+}
+
+}  // namespace
 
 int EntryTokens(const MemoryEntry& entry) {
   return static_cast<int>((entry.content.size() + entry.tool_calls_json.size()) / 4);
@@ -43,21 +96,11 @@ ContextWindow ContextStrategy::BuildContext(
   ContextMessage obs_message;
   bool append_obs = (current_observation.type != ObservationType::kContinuation);
   if (append_obs) {
-    switch (current_observation.type) {
-      case ObservationType::kUserMessage:
-        obs_message.role = "user";
-        break;
-      case ObservationType::kToolResult:
-        obs_message.role = "tool";
-        break;
-      case ObservationType::kSystemEvent:
-      case ObservationType::kInterruption:
-        obs_message.role = "system";
-        break;
-      case ObservationType::kContinuation:
-        break;  // unreachable
+    if (current_observation.item.has_value()) {
+      obs_message = conversation::RenderForLlm(*current_observation.item);
+    } else {
+      obs_message = LegacyObservationMessage(current_observation);
     }
-    obs_message.content = current_observation.content;
   }
 
   // 3. Calculate fixed token costs.
@@ -157,16 +200,7 @@ ContextWindow ContextStrategy::BuildContext(
   // Memory entries in chronological order (only included ones).
   for (size_t i = 0; i < all_entries.size(); ++i) {
     if (!included[i]) continue;
-
-    ContextMessage msg;
-    msg.role = all_entries[i].role;
-    msg.content = all_entries[i].content;
-    msg.tool_call_id = all_entries[i].tool_call_id;
-    // source_tag maps to name for tool messages.
-    msg.name = all_entries[i].source_tag;
-    // Propagate tool_calls_json for assistant tool call entries.
-    msg.tool_calls_json = all_entries[i].tool_calls_json;
-    window.messages.push_back(std::move(msg));
+    window.messages.push_back(BuildMemoryContextMessage(all_entries[i]));
   }
 
   // Current observation last (skipped for kContinuation).

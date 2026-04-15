@@ -527,6 +527,123 @@ TEST(CoreDeviceTest, StoppedDeviceDiscardsFrames) {
 }
 
 // ---------------------------------------------------------------------------
+// Test: SchedulerIn passes content as user message with name="scheduler"
+// ---------------------------------------------------------------------------
+TEST(CoreDeviceTest, SchedulerEventUsesNameField) {
+  core::testing::MockLlmClient* llm = nullptr;
+  auto device = MakeCoreDevice("core_sched", &llm);
+
+  std::mutex mu;
+  std::vector<core::ContextWindow> windows;
+  llm->submit_fn = [&](const core::ContextWindow& cw) -> core::LlmResult {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      windows.push_back(cw);
+    }
+    core::LlmResult r;
+    r.candidate.type = core::ActionType::kResponse;
+    r.candidate.response_text = "ok";
+    r.prompt_tokens = 1;
+    r.completion_tokens = 1;
+    return r;
+  };
+
+  device->SetOutputCallback([](const std::string&, const std::string&,
+                                io::DataFrame) {});
+  device->Start();
+
+  // Send a scheduler event with pure JSON payload.
+  const std::string payload = R"({"message":"dentist appointment"})";
+  io::DataFrame frame;
+  frame.type = "scheduler/event";
+  frame.payload = std::vector<uint8_t>(payload.begin(), payload.end());
+  device->OnInput("scheduler_in", std::move(frame));
+
+  bool got_call = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return !windows.empty();
+  }, 500);
+
+  device->Stop();
+
+  ASSERT_TRUE(got_call) << "LLM was never called for scheduler event";
+  std::lock_guard<std::mutex> lock(mu);
+  ASSERT_FALSE(windows.empty());
+
+  // Find the scheduler message — role="user", name="scheduler" as a weak
+  // hint, but the real event semantics live in the explicit <event> envelope.
+  bool found = false;
+  for (const auto& msg : windows.front().messages) {
+    if (msg.name == "scheduler") {
+      EXPECT_EQ(msg.role, "user");
+      EXPECT_NE(msg.content.find("<event"), std::string::npos);
+      EXPECT_NE(msg.content.find("event_type=\"reminder\""), std::string::npos);
+      EXPECT_NE(msg.content.find("source=\"scheduler\""), std::string::npos);
+      EXPECT_NE(msg.content.find("dentist appointment"), std::string::npos);
+      found = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found) << "No message with name='scheduler' found in context window";
+}
+
+// ---------------------------------------------------------------------------
+// Test: SchedulerIn source_tag propagates even without event_type metadata
+// ---------------------------------------------------------------------------
+TEST(CoreDeviceTest, SchedulerEventSourceTagAlwaysSet) {
+  core::testing::MockLlmClient* llm = nullptr;
+  auto device = MakeCoreDevice("core_sched_def", &llm);
+
+  std::mutex mu;
+  std::vector<core::ContextWindow> windows;
+  llm->submit_fn = [&](const core::ContextWindow& cw) -> core::LlmResult {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      windows.push_back(cw);
+    }
+    core::LlmResult r;
+    r.candidate.type = core::ActionType::kResponse;
+    r.candidate.response_text = "ok";
+    r.prompt_tokens = 1;
+    r.completion_tokens = 1;
+    return r;
+  };
+
+  device->SetOutputCallback([](const std::string&, const std::string&,
+                                io::DataFrame) {});
+  device->Start();
+
+  // Send a scheduler event WITHOUT event_type metadata.
+  const std::string payload = R"({"topic":"interview prep"})";
+  io::DataFrame frame;
+  frame.type = "scheduler/event";
+  frame.payload = std::vector<uint8_t>(payload.begin(), payload.end());
+  device->OnInput("scheduler_in", std::move(frame));
+
+  bool got_call = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return !windows.empty();
+  }, 500);
+
+  device->Stop();
+
+  ASSERT_TRUE(got_call);
+  std::lock_guard<std::mutex> lock(mu);
+
+  bool found = false;
+  for (const auto& msg : windows.front().messages) {
+    if (msg.name == "scheduler") {
+      EXPECT_NE(msg.content.find("<event"), std::string::npos);
+      EXPECT_NE(msg.content.find("event_type=\"reminder\""), std::string::npos);
+      EXPECT_NE(msg.content.find("interview prep"), std::string::npos);
+      found = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found) << "name='scheduler' should be set regardless of metadata";
+}
+
+// ---------------------------------------------------------------------------
 // Test: StreamingTokensEmittedWithMetadataFlag
 // With use_streaming=true, SubmitStreaming is called and each token delta
 // arrives on text_out with metadata["streaming"]="1".

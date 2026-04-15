@@ -10,6 +10,7 @@
 #include "context/config.h"
 #include "context/context_strategy.h"
 #include "context/types.h"
+#include "conversation/item.h"
 #include "controller/types.h"
 #include "mock_memory_store.h"
 
@@ -400,6 +401,154 @@ TEST(ContextStrategyTest, MultipleSessionsIsolated) {
   strategy.ReleaseSession("s1");
   EXPECT_TRUE(store.GetAll("s1").empty());
   EXPECT_FALSE(store.GetAll("s2").empty());
+}
+
+// ---------------------------------------------------------------------------
+// Test: SystemEvent observation maps to role "user" (not "system")
+// ---------------------------------------------------------------------------
+TEST(ContextStrategyTest, SystemEventMapsToUserRole) {
+  ContextConfig config;
+  config.max_context_tokens = 100000;
+
+  testing::MockMemoryStore store;
+  ContextStrategy strategy(config, store);
+
+  std::string sid = "s1";
+  strategy.InitSession(sid, "System prompt");
+
+  Observation obs;
+  obs.type = ObservationType::kSystemEvent;
+  obs.content = "<event type=\"reminder\" source=\"scheduler\">dentist tomorrow</event>";
+  obs.source = "scheduler";
+  obs.timestamp = std::chrono::steady_clock::now();
+
+  auto window = strategy.BuildContext(sid, obs);
+
+  // Last message should be the system event, mapped to role "user".
+  ASSERT_GE(window.messages.size(), 2u);
+  EXPECT_EQ(window.messages.back().role, "user");
+  EXPECT_EQ(window.messages.back().content, obs.content);
+}
+
+TEST(ContextStrategyTest, StructuredSingleUserMessageStaysPlainText) {
+  ContextConfig config;
+  config.max_context_tokens = 100000;
+
+  testing::MockMemoryStore store;
+  ContextStrategy strategy(config, store);
+
+  std::string sid = "s1";
+  strategy.InitSession(sid, "System prompt");
+
+  Observation obs;
+  obs.type = ObservationType::kUserMessage;
+  obs.content = "hello there";
+  obs.source = "user";
+  obs.timestamp = std::chrono::steady_clock::now();
+  obs.item = conversation::MakeHumanMessageItem("user", "", "hello there");
+
+  auto window = strategy.BuildContext(sid, obs);
+
+  ASSERT_GE(window.messages.size(), 2u);
+  EXPECT_EQ(window.messages.back().role, "user");
+  EXPECT_EQ(window.messages.back().content, "hello there");
+}
+
+TEST(ContextStrategyTest, StructuredNamedUserMessageUsesEnvelope) {
+  ContextConfig config;
+  config.max_context_tokens = 100000;
+
+  testing::MockMemoryStore store;
+  ContextStrategy strategy(config, store);
+
+  std::string sid = "s1";
+  strategy.InitSession(sid, "System prompt");
+
+  Observation obs;
+  obs.type = ObservationType::kUserMessage;
+  obs.content = "I prefer Friday";
+  obs.source = "user:alice";
+  obs.timestamp = std::chrono::steady_clock::now();
+  obs.item = conversation::MakeHumanMessageItem(
+      "user:alice", "Alice", "I prefer Friday");
+
+  auto window = strategy.BuildContext(sid, obs);
+
+  ASSERT_GE(window.messages.size(), 2u);
+  EXPECT_EQ(window.messages.back().role, "user");
+  EXPECT_NE(window.messages.back().content.find("<message"), std::string::npos);
+  EXPECT_NE(window.messages.back().content.find("actor_id=\"user:alice\""),
+            std::string::npos);
+  EXPECT_NE(window.messages.back().content.find("actor_name=\"Alice\""),
+            std::string::npos);
+  EXPECT_NE(window.messages.back().content.find("I prefer Friday"),
+            std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Test: SystemEvent in memory history also appears as role "user"
+// ---------------------------------------------------------------------------
+TEST(ContextStrategyTest, SystemEventInHistoryHasUserRole) {
+  ContextConfig config;
+  config.max_context_tokens = 100000;
+
+  testing::MockMemoryStore store;
+  ContextStrategy strategy(config, store);
+
+  std::string sid = "s1";
+  strategy.InitSession(sid, "System prompt");
+
+  // Simulate a recorded system event in memory (as the controller would store it).
+  MemoryEntry event_entry;
+  event_entry.type = MemoryEntryType::kUserMessage;
+  event_entry.role = "user";
+  event_entry.content = "<event type=\"reminder\" source=\"scheduler\">dentist</event>";
+  event_entry.timestamp = std::chrono::steady_clock::now();
+  store.Append(sid, event_entry);
+
+  // Then a normal assistant response.
+  store.Append(sid, MakeEntry(MemoryEntryType::kAssistantMessage, "assistant",
+                              "Hey, don't forget your dentist appointment!"));
+
+  auto window = strategy.BuildContext(sid, MakeObservation("thanks"));
+
+  // Messages: system, event(user), assistant, user("thanks")
+  ASSERT_EQ(window.messages.size(), 4u);
+  EXPECT_EQ(window.messages[1].role, "user");
+  EXPECT_NE(window.messages[1].content.find("<event"), std::string::npos);
+  EXPECT_EQ(window.messages[2].role, "assistant");
+  EXPECT_EQ(window.messages[3].role, "user");
+  EXPECT_EQ(window.messages[3].content, "thanks");
+}
+
+// ---------------------------------------------------------------------------
+// Test: kContinuation observation does not append a message
+// ---------------------------------------------------------------------------
+TEST(ContextStrategyTest, ContinuationObservationNotAppended) {
+  ContextConfig config;
+  config.max_context_tokens = 100000;
+
+  testing::MockMemoryStore store;
+  ContextStrategy strategy(config, store);
+
+  std::string sid = "s1";
+  strategy.InitSession(sid, "System");
+
+  store.Append(sid, MakeEntry(MemoryEntryType::kUserMessage, "user", "hello"));
+
+  Observation cont;
+  cont.type = ObservationType::kContinuation;
+  cont.content = "";
+  cont.source = "controller";
+  cont.timestamp = std::chrono::steady_clock::now();
+
+  auto window = strategy.BuildContext(sid, cont);
+
+  // Only system + the memory entry, no continuation message appended.
+  ASSERT_EQ(window.messages.size(), 2u);
+  EXPECT_EQ(window.messages[0].role, "system");
+  EXPECT_EQ(window.messages[1].role, "user");
+  EXPECT_EQ(window.messages[1].content, "hello");
 }
 
 }  // namespace

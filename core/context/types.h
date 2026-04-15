@@ -38,6 +38,7 @@ struct MemoryEntry {
   std::string source_tag;     // For external context: origin identifier
   std::string tool_call_id;   // For tool call/result pairing
   std::string tool_calls_json; // JSON array string for kToolCall entries
+  std::string item_json;      // Serialized ConversationItem for structured input.
   std::chrono::steady_clock::time_point timestamp;
   int estimated_tokens = 0;
 };
