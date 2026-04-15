@@ -4,6 +4,7 @@
 #include <cctype>
 
 #include "async_logger.h"
+#include "conversation/item.h"
 #include "context/types.h"
 
 namespace shizuru::core {
@@ -16,8 +17,14 @@ bool LlmObservationFilter::ShouldProcess(const Observation& obs) {
   // Only filter user messages.  Tool results, system events, etc. always pass.
   if (obs.type != ObservationType::kUserMessage) return true;
 
+  std::string content = obs.content;
+  if (obs.item.has_value() &&
+      obs.item->kind == conversation::ItemKind::kHumanMessage) {
+    content = obs.item->payload.value("text", obs.content);
+  }
+
   // Empty content — skip (likely an interrupt signal).
-  if (obs.content.empty()) return true;
+  if (content.empty()) return true;
 
   // Build a minimal context window for classification.
   ContextWindow window;
@@ -30,7 +37,7 @@ bool LlmObservationFilter::ShouldProcess(const Observation& obs) {
 
   ContextMessage user_msg;
   user_msg.role = "user";
-  user_msg.content = obs.content;
+  user_msg.content = content;
   window.messages.push_back(std::move(user_msg));
 
   try {
@@ -48,7 +55,7 @@ bool LlmObservationFilter::ShouldProcess(const Observation& obs) {
 
     bool should_process = normalized.find("yes") == 0;
     LOG_INFO("[ObsFilter] \"{}\" → {} (raw: \"{}\")",
-             obs.content, should_process ? "PROCESS" : "SKIP", answer);
+             content, should_process ? "PROCESS" : "SKIP", answer);
     return should_process;
   } catch (const std::exception& e) {
     // On error, default to processing (don't silently drop user input).

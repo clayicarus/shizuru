@@ -33,6 +33,11 @@ ContextMessage LegacyObservationMessage(const Observation& observation) {
 }
 
 ContextMessage BuildMemoryContextMessage(const MemoryEntry& entry) {
+  if (auto item = conversation::TryParseConversationItem(entry.item_json);
+      item.has_value()) {
+    return conversation::RenderForLlm(*item);
+  }
+
   if (!entry.tool_calls_json.empty()) {
     ContextMessage msg;
     msg.role = entry.role;
@@ -41,11 +46,6 @@ ContextMessage BuildMemoryContextMessage(const MemoryEntry& entry) {
     msg.name = entry.source_tag;
     msg.tool_calls_json = entry.tool_calls_json;
     return msg;
-  }
-
-  if (auto item = conversation::TryParseConversationItem(entry.item_json);
-      item.has_value()) {
-    return conversation::RenderForLlm(*item);
   }
 
   ContextMessage msg;
@@ -60,7 +60,8 @@ ContextMessage BuildMemoryContextMessage(const MemoryEntry& entry) {
 }  // namespace
 
 int EntryTokens(const MemoryEntry& entry) {
-  return static_cast<int>((entry.content.size() + entry.tool_calls_json.size()) / 4);
+  return static_cast<int>(
+      (entry.content.size() + entry.tool_calls_json.size() + entry.item_json.size()) / 4);
 }
 
 ContextStrategy::ContextStrategy(ContextConfig config, MemoryStore& store)

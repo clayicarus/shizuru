@@ -5,6 +5,7 @@
 #include <future>
 
 #include "async_logger.h"
+#include "conversation/item.h"
 #include "context/types.h"
 
 namespace shizuru::core {
@@ -30,6 +31,17 @@ std::optional<Observation> LlmObservationAggregator::Feed(
   last_input_time_ = std::chrono::steady_clock::now();
   has_pending_ = true;
   source_ = obs.source;
+  if (!pending_item_.has_value()) {
+    if (obs.item.has_value()) {
+      pending_item_ = obs.item;
+    } else {
+      pending_item_ = conversation::MakeHumanMessageItem(
+          obs.source.empty() ? "user" : obs.source, "", obs.content);
+    }
+  }
+  if (pending_item_.has_value()) {
+    pending_item_->payload["text"] = buffer_;
+  }
 
   LOG_INFO("[Aggregator] Buffered: \"{}\" (total: \"{}\")",
            obs.content, buffer_);
@@ -66,6 +78,7 @@ void LlmObservationAggregator::Reset() {
   std::lock_guard<std::mutex> lock(mu_);
   buffer_.clear();
   has_pending_ = false;
+  pending_item_.reset();
 }
 
 bool LlmObservationAggregator::IsUtteranceComplete(const std::string& text) {
@@ -119,8 +132,13 @@ Observation LlmObservationAggregator::FlushBuffer() {
   obs.content = std::move(buffer_);
   obs.source = source_;
   obs.timestamp = std::chrono::steady_clock::now();
+  if (pending_item_.has_value()) {
+    pending_item_->payload["text"] = obs.content;
+    obs.item = pending_item_;
+  }
   buffer_.clear();
   has_pending_ = false;
+  pending_item_.reset();
   return obs;
 }
 

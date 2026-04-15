@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -202,6 +204,10 @@ TEST(CoreDeviceTest, ToolCallActionCandidateToDataFrame) {
   bool found = false;
   for (const auto& f : emitted) {
     if (f.type == "action/tool_call") {
+      const std::string payload(f.payload.begin(), f.payload.end());
+      const auto json = nlohmann::json::parse(payload);
+      EXPECT_EQ(json.value("tool_name", ""), "search");
+      ASSERT_TRUE(json.contains("arguments"));
       found = true;
       break;
     }
@@ -343,7 +349,8 @@ TEST(CoreDeviceTest, ToolResultInPortCreatesToolResultObservation) {
   ASSERT_TRUE(first_call) << "LLM was never called for user message";
 
   // Step 2: now send the tool result — the controller is waiting for it.
-  const std::string result_payload = "{\"result\": \"ok\"}";
+  const std::string result_payload =
+      R"({"success":true,"tool_name":"search","tool_call_id":"call_dev_3","output":"ok"})";
   io::DataFrame frame;
   frame.type = "action/tool_result";
   frame.payload = std::vector<uint8_t>(result_payload.begin(),

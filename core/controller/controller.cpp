@@ -13,6 +13,88 @@
 
 namespace shizuru::core {
 
+namespace {
+
+conversation::ConversationItem EnsureConversationItem(const Observation& obs) {
+  if (obs.item.has_value()) { return *obs.item; }
+
+  switch (obs.type) {
+    case ObservationType::kUserMessage:
+      return conversation::MakeHumanMessageItem(
+          obs.source.empty() ? "user" : obs.source, "", obs.content);
+    case ObservationType::kSystemEvent:
+      return conversation::MakeSystemEventItem(
+          obs.source.empty() ? "system:event" : "system:" + obs.source,
+          "",
+          "event",
+          obs.source,
+          conversation::ParseJsonOrString(obs.content));
+    case ObservationType::kToolResult:
+      if (obs.source.rfind("tool:", 0) == 0) {
+        return conversation::MakeToolResultItem(
+            obs.source.substr(5), "", conversation::ParseJsonOrString(obs.content));
+      }
+      return conversation::MakeToolResultItem(
+          obs.source.empty() ? "tool" : obs.source, "", 
+          conversation::ParseJsonOrString(obs.content));
+    case ObservationType::kInterruption:
+    case ObservationType::kContinuation:
+      break;
+  }
+
+  return conversation::ConversationItem{};
+}
+
+std::string FirstToolCallId(const conversation::ConversationItem& item) {
+  if (item.kind != conversation::ItemKind::kToolCall ||
+      !item.payload.contains("tool_calls") ||
+      !item.payload["tool_calls"].is_array() ||
+      item.payload["tool_calls"].empty()) {
+    return "";
+  }
+
+  const auto& tool_calls = item.payload["tool_calls"];
+  if (!tool_calls[0].contains("id")) { return ""; }
+  return tool_calls[0]["id"].get<std::string>();
+}
+
+MemoryEntry MemoryEntryFromItem(MemoryEntryType type,
+                                const conversation::ConversationItem& item,
+                                std::chrono::steady_clock::time_point ts) {
+  auto rendered = conversation::RenderForLlm(item);
+
+  MemoryEntry entry;
+  entry.type = type;
+  entry.role = rendered.role;
+  entry.content = rendered.content;
+  entry.source_tag = rendered.name;
+  entry.tool_call_id = rendered.tool_call_id;
+  entry.tool_calls_json = rendered.tool_calls_json;
+  if (entry.tool_call_id.empty()) {
+    entry.tool_call_id = FirstToolCallId(item);
+  }
+  entry.item_json = conversation::SerializeConversationItem(item);
+  entry.timestamp = ts;
+  return entry;
+}
+
+nlohmann::json ToolCallsToJson(const ActionCandidate& action) {
+  nlohmann::json arr = nlohmann::json::array();
+  for (const auto& tc : action.tool_calls) {
+    nlohmann::json entry;
+    entry["id"] = tc.id;
+    entry["type"] = "function";
+    entry["function"] = {
+        {"name", tc.name},
+        {"arguments", conversation::ParseJsonOrString(tc.arguments)},
+    };
+    arr.push_back(std::move(entry));
+  }
+  return arr;
+}
+
+}  // namespace
+
 // Static transition table — all 24 transitions from the design.
 const std::unordered_map<std::pair<State, Event>, State, PairHash>
     Controller::kTransitionTable = {
@@ -329,12 +411,9 @@ void Controller::RunLoop() {
          current == State::kActing)) {
       HandleInterrupt();
       // Record the interrupting message to context so LLM sees it next time.
-      MemoryEntry barge_entry;
-      barge_entry.type = MemoryEntryType::kUserMessage;
-      barge_entry.role = "user";
-      barge_entry.content = obs.content;
-      barge_entry.source_tag = obs.source;
-      barge_entry.timestamp = obs.timestamp;
+      MemoryEntry barge_entry = MemoryEntryFromItem(
+          MemoryEntryType::kUserMessage, EnsureConversationItem(obs),
+          obs.timestamp);
       context_.RecordTurn(session_id_, barge_entry);
       // Set a short cooldown so the next RunLoop iteration waits for more
       // input instead of immediately processing.
@@ -385,12 +464,9 @@ void Controller::RunLoop() {
       // The message is recorded to context so the LLM sees it when we
       // eventually think.
       if (post_interrupt_cooldown_) {
-        MemoryEntry cooldown_entry;
-        cooldown_entry.type = MemoryEntryType::kUserMessage;
-        cooldown_entry.role = "user";
-        cooldown_entry.content = aggregated->content;
-        cooldown_entry.source_tag = aggregated->source;
-        cooldown_entry.timestamp = aggregated->timestamp;
+        MemoryEntry cooldown_entry = MemoryEntryFromItem(
+            MemoryEntryType::kUserMessage, EnsureConversationItem(*aggregated),
+            aggregated->timestamp);
         context_.RecordTurn(session_id_, cooldown_entry);
         LOG_INFO("[{}] Post-interrupt cooldown: buffered \"{}\"",
                  MODULE_NAME, aggregated->content);
@@ -455,20 +531,9 @@ void Controller::HandleThinking(const Observation& obs) {
   // in this turn (including after tool denial) sees the original question.
   // Re-enter via kContinuation so BuildContext does not duplicate it.
   if (obs.type == ObservationType::kUserMessage) {
-    MemoryEntry user_entry;
-    user_entry.type = MemoryEntryType::kUserMessage;
-    if (obs.item.has_value()) {
-      auto rendered = conversation::RenderForLlm(*obs.item);
-      user_entry.role = rendered.role;
-      user_entry.content = rendered.content;
-      user_entry.source_tag = rendered.name;
-      user_entry.item_json = conversation::SerializeConversationItem(*obs.item);
-    } else {
-      user_entry.role = "user";
-      user_entry.content = obs.content;
-      user_entry.source_tag = obs.source;  // "user", "voice", etc.
-    }
-    user_entry.timestamp = obs.timestamp;
+    MemoryEntry user_entry = MemoryEntryFromItem(
+        MemoryEntryType::kUserMessage, EnsureConversationItem(obs),
+        obs.timestamp);
     context_.RecordTurn(session_id_, user_entry);
 
     Observation cont;
@@ -483,20 +548,9 @@ void Controller::HandleThinking(const Observation& obs) {
   // with source_tag set so the LLM sees name="scheduler" (or other source)
   // in the context window and can distinguish them from real user input.
   if (obs.type == ObservationType::kSystemEvent) {
-    MemoryEntry event_entry;
-    event_entry.type = MemoryEntryType::kUserMessage;
-    if (obs.item.has_value()) {
-      auto rendered = conversation::RenderForLlm(*obs.item);
-      event_entry.role = rendered.role;
-      event_entry.content = rendered.content;
-      event_entry.source_tag = rendered.name;
-      event_entry.item_json = conversation::SerializeConversationItem(*obs.item);
-    } else {
-      event_entry.role = "user";
-      event_entry.content = obs.content;
-      event_entry.source_tag = obs.source;  // "scheduler", "followup", etc.
-    }
-    event_entry.timestamp = obs.timestamp;
+    MemoryEntry event_entry = MemoryEntryFromItem(
+        MemoryEntryType::kUserMessage, EnsureConversationItem(obs),
+        obs.timestamp);
     context_.RecordTurn(session_id_, event_entry);
 
     Observation cont;
@@ -799,25 +853,11 @@ void Controller::HandleActing(ActionCandidate ac) {
   pending_results_.clear();
   tool_call_start_ = std::chrono::steady_clock::now();
 
-  // Build the tool_calls JSON array for memory recording.
-  std::string tc_json = "[";
-  for (size_t i = 0; i < ac.tool_calls.size(); ++i) {
-    const auto& tc = ac.tool_calls[i];
-    if (i > 0) tc_json += ",";
-    tc_json += R"({"id":")" + tc.id + R"(","type":"function",)";
-    tc_json += R"("function":{"name":")" + tc.name + R"(",)";
-    tc_json += R"("arguments":)" + tc.arguments + R"(}})";
-  }
-  tc_json += "]";
-
   // Record the assistant's tool call decision in memory (single entry for all calls).
-  MemoryEntry call_entry;
-  call_entry.type = MemoryEntryType::kToolCall;
-  call_entry.role = "assistant";
-  call_entry.content = "";
-  call_entry.tool_call_id = ac.tool_calls.empty() ? "" : ac.tool_calls[0].id;
-  call_entry.tool_calls_json = tc_json;
-  call_entry.timestamp = std::chrono::steady_clock::now();
+  auto item = conversation::MakeToolCallItem(
+      "assistant", "", ToolCallsToJson(ac));
+  MemoryEntry call_entry = MemoryEntryFromItem(
+      MemoryEntryType::kToolCall, item, std::chrono::steady_clock::now());
   context_.RecordTurn(session_id_, call_entry);
 
   // Emit one action frame per tool call.
@@ -834,9 +874,14 @@ void Controller::HandleActing(ActionCandidate ac) {
       EmitActivity(ActivityKind::kToolDispatched, std::move(detail));
     }
 
-    const std::string payload_str = tc.name + ":" + tc.arguments;
+    nlohmann::json request = {
+        {"tool_call_id", tc.id},
+        {"tool_name", tc.name},
+        {"arguments", conversation::ParseJsonOrString(tc.arguments)},
+    };
     io::DataFrame frame;
     frame.type = "action/tool_call";
+    const auto payload_str = request.dump();
     frame.payload = std::vector<uint8_t>(payload_str.begin(), payload_str.end());
     frame.metadata["tool_call_id"] = tc.id;
     frame.metadata["tool_name"] = tc.name;
@@ -854,15 +899,17 @@ void Controller::HandleActing(ActionCandidate ac) {
 // Process tool result received while in kActing state.
 // Collects results for parallel tool calls; re-enters thinking only when all are in.
 void Controller::HandleActingResult(const Observation& obs) {
-  // Try to extract tool_call_id from the result JSON.
   std::string tool_call_id;
-  auto id_pos = obs.content.find(R"("tool_call_id":")");
-  if (id_pos != std::string::npos) {
-    auto val_start = id_pos + 16;
-    auto val_end = obs.content.find('"', val_start);
-    if (val_end != std::string::npos) {
-      tool_call_id = obs.content.substr(val_start, val_end - val_start);
-    }
+  std::string tool_name;
+  bool success = false;
+
+  try {
+    const auto json = nlohmann::json::parse(obs.content);
+    tool_call_id = json.value("tool_call_id", "");
+    tool_name = json.value("tool_name", "");
+    success = json.value("success", false);
+  } catch (...) {
+    // Fall through to compatibility parsing below.
   }
 
   // If no tool_call_id in result, match by order (fallback for simple dispatchers).
@@ -876,30 +923,29 @@ void Controller::HandleActingResult(const Observation& obs) {
   }
 
   pending_results_[tool_call_id] = obs.content;
-
-  const bool success = obs.content.find(R"("success":true)") != std::string::npos;
-  std::string tool_name;
-  for (const auto& tc : pending_tool_calls_) {
-    if (tc.id == tool_call_id) {
-      tool_name = tc.name;
-      break;
+  if (!success) {
+    try {
+      success = nlohmann::json::parse(obs.content).value("success", false);
+    } catch (...) {
+      success = false;
+    }
+  }
+  if (tool_name.empty()) {
+    for (const auto& tc : pending_tool_calls_) {
+      if (tc.id == tool_call_id) {
+        tool_name = tc.name;
+        break;
+      }
     }
   }
 
   // Record this tool result in memory.
-  MemoryEntry result_entry;
-  result_entry.type        = MemoryEntryType::kToolResult;
-  result_entry.role        = "tool";
   auto item = conversation::MakeToolResultItem(
       tool_name.empty() ? "tool" : tool_name,
       tool_call_id,
       conversation::ParseJsonOrString(obs.content));
-  auto rendered = conversation::RenderForLlm(item);
-  result_entry.content = rendered.content;
-  result_entry.source_tag = rendered.name;
-  result_entry.tool_call_id = tool_call_id;
-  result_entry.item_json = conversation::SerializeConversationItem(item);
-  result_entry.timestamp   = std::chrono::steady_clock::now();
+  MemoryEntry result_entry = MemoryEntryFromItem(
+      MemoryEntryType::kToolResult, item, std::chrono::steady_clock::now());
   context_.RecordTurn(session_id_, result_entry);
   last_activity_ = result_entry.timestamp;
   conversation_active_ = true;
@@ -935,7 +981,13 @@ void Controller::HandleActingResult(const Observation& obs) {
   // All results collected — audit and transition.
   bool all_success = true;
   for (const auto& [id, result_json] : pending_results_) {
-    if (result_json.find(R"("success":true)") == std::string::npos) {
+    bool item_success = false;
+    try {
+      item_success = nlohmann::json::parse(result_json).value("success", false);
+    } catch (...) {
+      item_success = false;
+    }
+    if (!item_success) {
       all_success = false;
     }
   }
@@ -979,16 +1031,11 @@ void Controller::HandleResponding(ActionCandidate ac) {
   }
 
   // Record response as MemoryEntry.
-  MemoryEntry response_entry;
-  response_entry.type = MemoryEntryType::kAssistantMessage;
   auto item = conversation::MakeAssistantMessageItem(
       "assistant", "", ac.response_text);
-  auto rendered = conversation::RenderForLlm(item);
-  response_entry.role = rendered.role;
-  response_entry.content = rendered.content;
-  response_entry.source_tag = rendered.name;
-  response_entry.item_json = conversation::SerializeConversationItem(item);
-  response_entry.timestamp = std::chrono::steady_clock::now();
+  MemoryEntry response_entry = MemoryEntryFromItem(
+      MemoryEntryType::kAssistantMessage, item,
+      std::chrono::steady_clock::now());
   context_.RecordTurn(session_id_, response_entry);
   last_activity_ = response_entry.timestamp;
   conversation_active_ = true;

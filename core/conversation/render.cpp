@@ -98,6 +98,15 @@ ContextMessage RenderForLlm(const ConversationItem& item) {
       msg.content = item.payload.value("text", "");
       return msg;
 
+    case ItemKind::kToolCall:
+      msg.role = "assistant";
+      if (item.payload.contains("tool_calls")) {
+        msg.tool_calls_json = item.payload["tool_calls"].dump();
+      } else {
+        msg.tool_calls_json = "[]";
+      }
+      return msg;
+
     case ItemKind::kSystemEvent: {
       msg.role = "user";
       std::ostringstream oss;

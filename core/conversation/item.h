@@ -18,6 +18,7 @@ enum class ActorKind {
 enum class ItemKind {
   kHumanMessage,
   kAssistantMessage,
+  kToolCall,
   kSystemEvent,
   kToolResult,
 };
@@ -52,6 +53,10 @@ ConversationItem MakeHumanMessageItem(std::string actor_id,
 ConversationItem MakeAssistantMessageItem(std::string actor_id,
                                           std::string actor_name,
                                           std::string text);
+
+ConversationItem MakeToolCallItem(std::string actor_id,
+                                  std::string actor_name,
+                                  nlohmann::json tool_calls);
 
 ConversationItem MakeSystemEventItem(std::string actor_id,
                                      std::string actor_name,

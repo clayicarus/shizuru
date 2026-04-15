@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -14,6 +16,7 @@
 
 #include "context/config.h"
 #include "context/context_strategy.h"
+#include "conversation/item.h"
 #include "controller/config.h"
 #include "controller/controller.h"
 #include "controller/types.h"
@@ -78,6 +81,7 @@ class ControllerTest : public ::testing::Test {
     obs.content = content;
     obs.source = "user";
     obs.timestamp = std::chrono::steady_clock::now();
+    obs.item = conversation::MakeHumanMessageItem("user", "", content);
     return obs;
   }
 
@@ -114,6 +118,60 @@ TEST_F(ControllerTest, SessionLifecycle_CreateStartShutdown) {
 
   ctrl->Shutdown();
   EXPECT_EQ(ctrl->GetState(), State::kTerminated);
+}
+
+TEST_F(ControllerTest, UserObservationRecordedAsConversationItem) {
+  auto ctrl = MakeController(DefaultConfig());
+
+  ctrl->Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl->GetState() == State::kListening; }));
+
+  ctrl->EnqueueObservation(MakeUserObs("hello"));
+  ASSERT_TRUE(WaitFor([&] {
+    auto entries = memory_store_.GetAll("test-session");
+    return !entries.empty();
+  }));
+
+  auto entries = memory_store_.GetAll("test-session");
+  ASSERT_FALSE(entries.empty());
+  EXPECT_FALSE(entries.front().item_json.empty());
+  auto item = conversation::TryParseConversationItem(entries.front().item_json);
+  ASSERT_TRUE(item.has_value());
+  EXPECT_EQ(item->kind, conversation::ItemKind::kHumanMessage);
+  EXPECT_EQ(item->payload.value("text", ""), "hello");
+
+  ctrl->Shutdown();
+}
+
+TEST_F(ControllerTest, SystemEventRecordedAsConversationItem) {
+  auto ctrl = MakeController(DefaultConfig());
+
+  ctrl->Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl->GetState() == State::kListening; }));
+
+  Observation sys_obs;
+  sys_obs.type = ObservationType::kSystemEvent;
+  sys_obs.content = "system ping";
+  sys_obs.source = "system";
+  sys_obs.timestamp = std::chrono::steady_clock::now();
+  sys_obs.item = conversation::MakeSystemEventItem(
+      "system:system", "", "event", "system", "system ping");
+  ctrl->EnqueueObservation(std::move(sys_obs));
+
+  ASSERT_TRUE(WaitFor([&] {
+    auto entries = memory_store_.GetAll("test-session");
+    return !entries.empty();
+  }));
+
+  auto entries = memory_store_.GetAll("test-session");
+  ASSERT_FALSE(entries.empty());
+  EXPECT_FALSE(entries.front().item_json.empty());
+  auto item = conversation::TryParseConversationItem(entries.front().item_json);
+  ASSERT_TRUE(item.has_value());
+  EXPECT_EQ(item->kind, conversation::ItemKind::kSystemEvent);
+  EXPECT_EQ(item->payload.value("source", ""), "system");
+
+  ctrl->Shutdown();
 }
 
 // ---------------------------------------------------------------------------
@@ -205,13 +263,20 @@ TEST_F(ControllerTest, TransitionSequence_ToolCallCycle) {
 
   // EmitFrameCallback: when action_out fires, enqueue a kToolResult observation.
   Controller::EmitFrameCallback emit_frame = [&](const std::string& port,
-                                                  io::DataFrame /*frame*/) {
+                                                  io::DataFrame frame) {
     if (port == "action_out") {
       std::lock_guard<std::mutex> lock(ctrl_mu);
       if (ctrl_ptr) {
+        const std::string payload(frame.payload.begin(), frame.payload.end());
+        const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = R"({"success":true,"output":"tool output"})";
+        result_obs.content = nlohmann::json({
+            {"success", true},
+            {"tool_name", json.value("tool_name", "my_tool")},
+            {"tool_call_id", json.value("tool_call_id", "")},
+            {"output", "tool output"},
+        }).dump();
         result_obs.source = "tool:my_tool";
         result_obs.timestamp = std::chrono::steady_clock::now();
         ctrl_ptr->EnqueueObservation(std::move(result_obs));
@@ -401,13 +466,20 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
   std::mutex ctrl_mu2;
 
   Controller::EmitFrameCallback emit_frame2 = [&](const std::string& port,
-                                                    io::DataFrame /*frame*/) {
+                                                    io::DataFrame frame) {
     if (port == "action_out") {
       std::lock_guard<std::mutex> lock(ctrl_mu2);
       if (ctrl_ptr2) {
+        const std::string payload(frame.payload.begin(), frame.payload.end());
+        const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = R"({"success":true,"output":"ok"})";
+        result_obs.content = nlohmann::json({
+            {"success", true},
+            {"tool_name", json.value("tool_name", "tool")},
+            {"tool_call_id", json.value("tool_call_id", "")},
+            {"output", "ok"},
+        }).dump();
         result_obs.source = "tool";
         result_obs.timestamp = std::chrono::steady_clock::now();
         ctrl_ptr2->EnqueueObservation(std::move(result_obs));
@@ -761,6 +833,8 @@ TEST_F(ControllerTest, DiagnosticOnInvalidTransition) {
   sys_obs.content = "system ping";
   sys_obs.source = "system";
   sys_obs.timestamp = std::chrono::steady_clock::now();
+  sys_obs.item = conversation::MakeSystemEventItem(
+      "system:system", "", "event", "system", "system ping");
   ctrl->EnqueueObservation(std::move(sys_obs));
 
   // Brief wait for the observation to be consumed, then shut down.

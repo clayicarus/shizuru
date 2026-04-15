@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <nlohmann/json.hpp>
+
 #include <chrono>
 #include <string>
 #include <vector>
@@ -177,7 +179,7 @@ TEST(ContextStrategyTest, ToolCallResultPairing) {
   EXPECT_EQ(result_idx, call_idx + 1);
 }
 
- TEST(ContextStrategyTest, ToolCallJsonConsumesBudget) {
+TEST(ContextStrategyTest, ToolCallJsonConsumesBudget) {
   ContextConfig config;
   config.max_context_tokens = 2;
 
@@ -205,6 +207,44 @@ TEST(ContextStrategyTest, ToolCallResultPairing) {
   EXPECT_EQ(window.messages[1].content, "obs!");
   EXPECT_LE(window.estimated_tokens, 2);
  }
+
+TEST(ContextStrategyTest, ToolCallItemRendersAssistantToolCallMessage) {
+  ContextConfig config;
+  config.max_context_tokens = 100000;
+
+  testing::MockMemoryStore store;
+  ContextStrategy strategy(config, store);
+
+  std::string sid = "s1";
+  strategy.InitSession(sid, "sys");
+
+  nlohmann::json tool_calls = nlohmann::json::array({
+      {
+          {"id", "call_1"},
+          {"type", "function"},
+          {"function",
+           {
+               {"name", "search"},
+               {"arguments", {{"q", "weather"}}},
+           }},
+      },
+  });
+
+  MemoryEntry entry;
+  entry.type = MemoryEntryType::kToolCall;
+  entry.timestamp = std::chrono::steady_clock::now();
+  entry.item_json = conversation::SerializeConversationItem(
+      conversation::MakeToolCallItem("assistant", "", tool_calls));
+  store.Append(sid, entry);
+
+  auto window = strategy.BuildContext(sid, MakeObservation("next"));
+
+  ASSERT_GE(window.messages.size(), 3u);
+  EXPECT_EQ(window.messages[1].role, "assistant");
+  EXPECT_TRUE(window.messages[1].tool_calls_json.find("\"search\"") !=
+              std::string::npos);
+  EXPECT_TRUE(window.messages[1].content.empty());
+}
 
 // ---------------------------------------------------------------------------
 // Test: Summarization trigger at exact threshold

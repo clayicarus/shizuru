@@ -136,6 +136,14 @@ void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
     obs.content = content;
     obs.source = "tool";
     obs.timestamp = std::chrono::steady_clock::now();
+    auto json = core::conversation::ParseJsonOrString(content);
+    if (json.is_object()) {
+      const std::string tool_name = json.value("tool_name", "tool");
+      const std::string tool_call_id = json.value("tool_call_id", "");
+      obs.item = core::conversation::MakeToolResultItem(
+          tool_name, tool_call_id, std::move(json));
+      obs.source = "tool:" + tool_name;
+    }
     session_->EnqueueObservation(std::move(obs));
   } else if (port_name == kVadIn) {
     const std::string event_name(frame.payload.begin(), frame.payload.end());

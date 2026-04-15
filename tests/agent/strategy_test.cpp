@@ -15,6 +15,7 @@
 
 #include "context/config.h"
 #include "context/context_strategy.h"
+#include "conversation/item.h"
 #include "controller/config.h"
 #include "controller/controller.h"
 #include "controller/types.h"
@@ -47,6 +48,7 @@ Observation MakeUserObs(const std::string& content) {
   obs.content = content;
   obs.source = "user";
   obs.timestamp = std::chrono::steady_clock::now();
+  obs.item = conversation::MakeHumanMessageItem("user", "", content);
   return obs;
 }
 

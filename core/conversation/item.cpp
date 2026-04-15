@@ -19,6 +19,7 @@ const char* ItemKindName(ItemKind kind) {
   switch (kind) {
     case ItemKind::kHumanMessage: return "human_message";
     case ItemKind::kAssistantMessage: return "assistant_message";
+    case ItemKind::kToolCall: return "tool_call";
     case ItemKind::kSystemEvent: return "system_event";
     case ItemKind::kToolResult: return "tool_result";
     default: return "unknown";
@@ -36,6 +37,7 @@ ActorKind ActorKindFromString(const std::string& value) {
 ItemKind ItemKindFromString(const std::string& value) {
   if (value == "human_message") { return ItemKind::kHumanMessage; }
   if (value == "assistant_message") { return ItemKind::kAssistantMessage; }
+  if (value == "tool_call") { return ItemKind::kToolCall; }
   if (value == "system_event") { return ItemKind::kSystemEvent; }
   if (value == "tool_result") { return ItemKind::kToolResult; }
   throw std::invalid_argument("Unknown ItemKind: " + value);
@@ -60,6 +62,17 @@ ConversationItem MakeAssistantMessageItem(std::string actor_id,
   item.actor = Actor{std::move(actor_id), ActorKind::kAssistant,
                      std::move(actor_name)};
   item.payload["text"] = std::move(text);
+  return item;
+}
+
+ConversationItem MakeToolCallItem(std::string actor_id,
+                                  std::string actor_name,
+                                  nlohmann::json tool_calls) {
+  ConversationItem item;
+  item.kind = ItemKind::kToolCall;
+  item.actor = Actor{std::move(actor_id), ActorKind::kAssistant,
+                     std::move(actor_name)};
+  item.payload["tool_calls"] = std::move(tool_calls);
   return item;
 }
 

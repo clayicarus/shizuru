@@ -3,6 +3,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include "interfaces/llm_client.h"
@@ -52,6 +53,7 @@ class LlmObservationAggregator : public ObservationAggregator {
   std::chrono::steady_clock::time_point last_input_time_;
   bool has_pending_{false};
   std::string source_;
+  std::optional<conversation::ConversationItem> pending_item_;
 };
 
 }  // namespace shizuru::core

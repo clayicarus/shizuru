@@ -5,6 +5,8 @@
 #include <rapidcheck.h>
 #include <rapidcheck/gtest.h>
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -309,13 +311,20 @@ RC_GTEST_PROP(ControllerPropTest, prop_action_routing_by_type, (void)) {
   std::mutex ctrl_holder_mu;
 
   Controller::EmitFrameCallback emit_frame = [ctrl_holder, &ctrl_holder_mu](
-      const std::string& port, io::DataFrame /*frame*/) {
+      const std::string& port, io::DataFrame frame) {
     if (port == "action_out") {
       std::lock_guard<std::mutex> lock(ctrl_holder_mu);
       if (*ctrl_holder) {
+        const std::string payload(frame.payload.begin(), frame.payload.end());
+        const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = R"({"success":true,"output":"ok"})";
+        result_obs.content = nlohmann::json({
+            {"success", true},
+            {"tool_name", json.value("tool_name", "test_tool")},
+            {"tool_call_id", json.value("tool_call_id", "")},
+            {"output", "ok"},
+        }).dump();
         result_obs.source = "tool";
         result_obs.timestamp = std::chrono::steady_clock::now();
         (*ctrl_holder)->EnqueueObservation(std::move(result_obs));
@@ -656,13 +665,20 @@ RC_GTEST_PROP(ControllerPropTest, prop_io_failure_feeds_thinking, (void)) {
   std::mutex ctrl_holder_mu2;
 
   Controller::EmitFrameCallback emit_frame_fail = [ctrl_holder2, &ctrl_holder_mu2](
-      const std::string& port, io::DataFrame /*frame*/) {
+      const std::string& port, io::DataFrame frame) {
     if (port == "action_out") {
       std::lock_guard<std::mutex> lock(ctrl_holder_mu2);
       if (*ctrl_holder2) {
+        const std::string payload(frame.payload.begin(), frame.payload.end());
+        const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = R"({"success":false,"error":"tool execution failed"})";
+        result_obs.content = nlohmann::json({
+            {"success", false},
+            {"tool_name", json.value("tool_name", "test_tool")},
+            {"tool_call_id", json.value("tool_call_id", "")},
+            {"error", "tool execution failed"},
+        }).dump();
         result_obs.source = "tool";
         result_obs.timestamp = std::chrono::steady_clock::now();
         (*ctrl_holder2)->EnqueueObservation(std::move(result_obs));
@@ -1002,9 +1018,16 @@ RC_GTEST_PROP(ControllerPropTest,
     if (port == "action_out") {
       std::lock_guard<std::mutex> lock(ctrl_holder_mu);
       if (*ctrl_holder) {
+        const std::string payload(frame.payload.begin(), frame.payload.end());
+        const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = R"({"success":true,"output":"ok"})";
+        result_obs.content = nlohmann::json({
+            {"success", true},
+            {"tool_name", json.value("tool_name", "test_tool")},
+            {"tool_call_id", json.value("tool_call_id", "")},
+            {"output", "ok"},
+        }).dump();
         result_obs.source = "tool";
         result_obs.timestamp = std::chrono::steady_clock::now();
         (*ctrl_holder)->EnqueueObservation(std::move(result_obs));
@@ -1098,10 +1121,19 @@ RC_GTEST_PROP(ControllerPropTest,
   for (const auto& [port, frame] : emitted_frames) {
     if (port == "action_out" && frame.type == "action/tool_call") {
       ++action_out_count;
-      // Verify payload is "<name>:<args>".
       const std::string payload(frame.payload.begin(), frame.payload.end());
-      const std::string expected = captured_name + ":" + captured_args;
-      RC_ASSERT(payload == expected);
+      const auto json = nlohmann::json::parse(payload);
+      RC_ASSERT(json.value("tool_name", "") == captured_name);
+      if (json.contains("arguments")) {
+        const auto& args = json["arguments"];
+        if (args.is_string()) {
+          RC_ASSERT(args.get<std::string>() == captured_args);
+        } else {
+          RC_ASSERT(args.dump() == captured_args);
+        }
+      } else {
+        RC_FAIL("tool call payload missing arguments");
+      }
     }
   }
   RC_ASSERT(action_out_count == 1);
@@ -1142,16 +1174,28 @@ RC_GTEST_PROP(ControllerPropTest,
 
   Controller::EmitFrameCallback emit_cb = [ctrl_holder, &ctrl_holder_mu,
                                             &captured_content](
-      const std::string& port, io::DataFrame /*frame*/) {
+      const std::string& port, io::DataFrame frame) {
     if (port == "action_out") {
       std::lock_guard<std::mutex> lock(ctrl_holder_mu);
       if (*ctrl_holder) {
         // Determine success from content: if it contains "success:true" → success.
         // For this property we always send a valid result (success or failure).
         const bool has_success = captured_content.find("success") != std::string::npos;
+        const std::string payload(frame.payload.begin(), frame.payload.end());
+        const auto json = nlohmann::json::parse(payload);
         std::string result_json = has_success
-            ? R"({"success":true,"output":")" + captured_content + R"("})"
-            : R"({"success":false,"error":")" + captured_content + R"("})";
+            ? nlohmann::json({
+                  {"success", true},
+                  {"tool_name", json.value("tool_name", "test_tool")},
+                  {"tool_call_id", json.value("tool_call_id", "")},
+                  {"output", captured_content},
+              }).dump()
+            : nlohmann::json({
+                  {"success", false},
+                  {"tool_name", json.value("tool_name", "test_tool")},
+                  {"tool_call_id", json.value("tool_call_id", "")},
+                  {"error", captured_content},
+              }).dump();
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
         result_obs.content = result_json;
