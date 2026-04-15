@@ -202,15 +202,15 @@ int main(int argc, char* argv[]) {
   // Register tools.
   shizuru::runtime::ToolRegistry tools;
   tools.Register("get_weather",
-                 [](const std::string& args) -> shizuru::runtime::ToolResult {
-                   auto j = nlohmann::json::parse(args);
+                 [](const nlohmann::json& args) -> shizuru::runtime::ToolResult {
+                   auto j = args.is_object() ? args : nlohmann::json::object();
                    std::string city = j.value("city", "unknown");
                    std::printf("[tool]  get_weather(city=%s)\n", city.c_str());
                    nlohmann::json result;
                    result["city"]        = city;
                    result["temperature"] = "22 degrees";
                    result["condition"]   = "sunny";
-                   return {true, result.dump(), ""};
+                   return {true, std::move(result), ""};
                  });
 
   // Configure the LLM.

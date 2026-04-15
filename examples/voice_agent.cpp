@@ -44,6 +44,8 @@
 #include <string>
 #include <unistd.h>
 
+#include <nlohmann/json.hpp>
+
 #include <spdlog/spdlog.h>
 #include "async_logger.h"
 #include "io/data_frame.h"
@@ -298,7 +300,7 @@ int main(int argc, char* argv[]) {
 
   // ── Builtin tools ─────────────────────────────────────────────────────────
   tools.Register("get_current_time",
-                 [](const std::string& /*args*/) -> runtime::ToolResult {
+                 [](const nlohmann::json& /*args*/) -> runtime::ToolResult {
                    auto now = std::chrono::system_clock::now();
                    auto t = std::chrono::system_clock::to_time_t(now);
                    char buf[64];
@@ -308,7 +310,7 @@ int main(int argc, char* argv[]) {
                  });
 
   tools.Register("get_system_info",
-                 [](const std::string& /*args*/) -> runtime::ToolResult {
+                 [](const nlohmann::json& /*args*/) -> runtime::ToolResult {
                    char hostname[256] = {};
                    gethostname(hostname, sizeof(hostname));
 #if defined(__APPLE__)
@@ -320,25 +322,22 @@ int main(int argc, char* argv[]) {
 #else
                    const char* os = "Unknown";
 #endif
-                   std::string info = std::string(R"({"os":")") + os +
-                                      R"(","hostname":")" + hostname + R"("})";
-                   return {true, info, ""};
+                   nlohmann::json info = {
+                       {"os", os},
+                       {"hostname", hostname},
+                   };
+                   return {true, std::move(info), ""};
                  });
 
   tools.Register("calculate",
-                 [](const std::string& args) -> runtime::ToolResult {
+                 [](const nlohmann::json& args) -> runtime::ToolResult {
                    // Simple eval: parse "expression" field, support +,-,*,/
                    // For safety, only handle a op b format.
-                   auto expr_pos = args.find(R"("expression":")");
-                   if (expr_pos == std::string::npos) {
+                   if (!args.contains("expression") ||
+                       !args["expression"].is_string()) {
                      return {false, "", "Missing 'expression' parameter"};
                    }
-                   auto val_start = expr_pos + 15;
-                   auto val_end = args.find('"', val_start);
-                   if (val_end == std::string::npos) {
-                     return {false, "", "Malformed expression"};
-                   }
-                   std::string expr = args.substr(val_start, val_end - val_start);
+                   std::string expr = args["expression"].get<std::string>();
 
                    // Parse: number op number
                    double a = 0, b = 0;
@@ -364,24 +363,21 @@ int main(int argc, char* argv[]) {
                  });
 
   tools.Register("set_reminder",
-                 [](const std::string& args) -> runtime::ToolResult {
-                   // Parse message and minutes fields.
-                   auto msg_pos = args.find(R"("message":")");
-                   auto min_pos = args.find(R"("minutes":)");
+                 [](const nlohmann::json& args) -> runtime::ToolResult {
                    std::string message = "reminder";
                    int minutes = 0;
-                   if (msg_pos != std::string::npos) {
-                     auto s = msg_pos + 11;
-                     auto e = args.find('"', s);
-                     if (e != std::string::npos) message = args.substr(s, e - s);
+                   if (args.contains("message") && args["message"].is_string()) {
+                     message = args["message"].get<std::string>();
                    }
-                   if (min_pos != std::string::npos) {
-                     std::sscanf(args.c_str() + min_pos + 10, "%d", &minutes);
+                   if (args.contains("minutes") && args["minutes"].is_number_integer()) {
+                     minutes = args["minutes"].get<int>();
                    }
-                   std::string result = R"({"status":"set","message":")" +
-                                        message + R"(","minutes":)" +
-                                        std::to_string(minutes) + "}";
-                   return {true, result, ""};
+                   nlohmann::json result = {
+                       {"status", "set"},
+                       {"message", message},
+                       {"minutes", minutes},
+                   };
+                   return {true, std::move(result), ""};
                  });
 
   // ── Create CoreDevice ─────────────────────────────────────────────────────

@@ -4,6 +4,8 @@
 #include <string>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 #include "io/data_frame.h"
 
 namespace shizuru::runtime {
@@ -74,66 +76,122 @@ void ToolDispatchDevice::WorkerLoop() {
 
 void ToolDispatchDevice::Dispatch(io::DataFrame frame) {
   const std::string payload(frame.payload.begin(), frame.payload.end());
-  const auto colon_pos = payload.find(':');
-  const std::string tool_name =
-      (colon_pos == std::string::npos) ? payload : payload.substr(0, colon_pos);
-  const std::string arguments =
-      (colon_pos == std::string::npos) ? "" : payload.substr(colon_pos + 1);
 
   std::string tool_call_id;
-  auto it = frame.metadata.find("tool_call_id");
-  if (it != frame.metadata.end()) { tool_call_id = it->second; }
+  std::string tool_name;
+  nlohmann::json arguments = nlohmann::json::object();
 
-  std::string result_json;
+  try {
+    const auto request = nlohmann::json::parse(payload);
+    tool_call_id = request.value("tool_call_id", "");
+    tool_name = request.value("tool_name", "");
+    if (request.contains("arguments")) {
+      arguments = request["arguments"];
+    }
+  } catch (const std::exception& e) {
+    nlohmann::json error = {
+        {"success", false},
+        {"error", std::string("Malformed tool call payload: ") + e.what()},
+    };
+    if (!tool_call_id.empty()) {
+      error["tool_call_id"] = tool_call_id;
+    }
+    io::DataFrame result_frame;
+    result_frame.type = "action/tool_result";
+    const auto body = error.dump();
+    result_frame.payload = std::vector<uint8_t>(body.begin(), body.end());
+    result_frame.source_device = device_id_;
+    result_frame.source_port = kResultOut;
+    result_frame.timestamp = std::chrono::steady_clock::now();
+
+    io::OutputCallback cb;
+    {
+      std::lock_guard<std::mutex> lock(output_cb_mutex_);
+      cb = output_cb_;
+    }
+    if (cb) { cb(device_id_, kResultOut, std::move(result_frame)); }
+    return;
+  }
+
+  if (tool_call_id.empty()) {
+    auto it = frame.metadata.find("tool_call_id");
+    if (it != frame.metadata.end()) { tool_call_id = it->second; }
+  }
+  if (tool_name.empty()) {
+    auto it = frame.metadata.find("tool_name");
+    if (it != frame.metadata.end()) { tool_name = it->second; }
+  }
+
+  if (tool_name.empty()) {
+    nlohmann::json error = {
+        {"success", false},
+        {"error", "Missing tool_name"},
+    };
+    if (!tool_call_id.empty()) {
+      error["tool_call_id"] = tool_call_id;
+    }
+    io::DataFrame result_frame;
+    result_frame.type = "action/tool_result";
+    const auto body = error.dump();
+    result_frame.payload = std::vector<uint8_t>(body.begin(), body.end());
+    result_frame.source_device = device_id_;
+    result_frame.source_port = kResultOut;
+    result_frame.timestamp = std::chrono::steady_clock::now();
+
+    io::OutputCallback cb;
+    {
+      std::lock_guard<std::mutex> lock(output_cb_mutex_);
+      cb = output_cb_;
+    }
+    if (cb) { cb(device_id_, kResultOut, std::move(result_frame)); }
+    return;
+  }
+
+  nlohmann::json result_json;
 
   try {
     const auto* fn = registry_.Find(tool_name);
     if (fn == nullptr) {
-      result_json = R"({"success":false,"error":"Unknown tool: )" + tool_name + R"("})";
+      result_json = {
+          {"success", false},
+          {"tool_name", tool_name},
+          {"error", "Unknown tool: " + tool_name},
+      };
     } else {
       const ToolResult result = (*fn)(arguments);
       if (result.success) {
-        std::string escaped;
-        escaped.reserve(result.output.size());
-        for (char c : result.output) {
-          if (c == '"') { escaped += "\\\""; }
-          else if (c == '\\') { escaped += "\\\\"; }
-          else { escaped += c; }
-        }
-        result_json = R"({"success":true,"output":")" + escaped + R"("})";
+        result_json["success"] = true;
+        result_json["tool_name"] = tool_name;
+        result_json["output"] = result.output;
       } else {
-        std::string escaped;
-        escaped.reserve(result.error_message.size());
-        for (char c : result.error_message) {
-          if (c == '"') { escaped += "\\\""; }
-          else if (c == '\\') { escaped += "\\\\"; }
-          else { escaped += c; }
-        }
-        result_json = R"({"success":false,"error":")" + escaped + R"("})";
+        result_json["success"] = false;
+        result_json["tool_name"] = tool_name;
+        result_json["error"] = result.error_message;
       }
     }
   } catch (const std::exception& e) {
-    std::string msg = e.what();
-    std::string escaped;
-    for (char c : msg) {
-      if (c == '"') { escaped += "\\\""; }
-      else if (c == '\\') { escaped += "\\\\"; }
-      else { escaped += c; }
-    }
-    result_json = R"({"success":false,"error":")" + escaped + R"("})";
+    result_json = {
+        {"success", false},
+        {"tool_name", tool_name},
+        {"error", e.what()},
+    };
   } catch (...) {
-    result_json = R"({"success":false,"error":"unknown exception"})";
+    result_json = {
+        {"success", false},
+        {"tool_name", tool_name},
+        {"error", "unknown exception"},
+    };
   }
 
   if (!tool_call_id.empty()) {
-    result_json.pop_back();
-    result_json += R"(,"tool_call_id":")" + tool_call_id + R"("})";
+    result_json["tool_call_id"] = tool_call_id;
   }
 
   io::DataFrame result_frame;
   result_frame.type = "action/tool_result";
+  const auto result_body = result_json.dump();
   result_frame.payload =
-      std::vector<uint8_t>(result_json.begin(), result_json.end());
+      std::vector<uint8_t>(result_body.begin(), result_body.end());
   result_frame.source_device = device_id_;
   result_frame.source_port = kResultOut;
   result_frame.timestamp = std::chrono::steady_clock::now();

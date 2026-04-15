@@ -4,19 +4,21 @@
 #include <string>
 #include <unordered_map>
 
+#include <nlohmann/json.hpp>
+
 namespace shizuru::runtime {
 
 // Result of a tool execution.
 struct ToolResult {
   bool success = false;
-  std::string output;        // Serialized result data
+  nlohmann::json output;     // Structured result data
   std::string error_message; // Non-empty on failure
 };
 
 // A registered tool's execution function.
-// Takes JSON arguments string, returns ToolResult.
+// Takes structured JSON arguments, returns ToolResult.
 using ToolFunction =
-    std::function<ToolResult(const std::string& arguments)>;
+    std::function<ToolResult(const nlohmann::json& arguments)>;
 
 // Registry of available tools that the agent can invoke.
 class ToolRegistry {

@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <nlohmann/json.hpp>
+
 #include <string>
 
 #include "runtime/tool_registry.h"
@@ -15,7 +17,7 @@ namespace {
 
 TEST(ToolRegistryTest, RegisterAndFind) {
   ToolRegistry registry;
-  registry.Register("echo", [](const std::string& args) -> ToolResult {
+  registry.Register("echo", [](const nlohmann::json& args) -> ToolResult {
     return {true, args, ""};
   });
 
@@ -32,8 +34,8 @@ TEST(ToolRegistryTest, RegisterAndFind) {
 
 TEST(ToolRegistryTest, Unregister) {
   ToolRegistry registry;
-  registry.Register("tool", [](const std::string&) -> ToolResult {
-    return {true, "", ""};
+  registry.Register("tool", [](const nlohmann::json&) -> ToolResult {
+    return {true, nlohmann::json(), ""};
   });
 
   EXPECT_TRUE(registry.Has("tool"));

@@ -9,6 +9,8 @@
 #include <ctime>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #ifdef _WIN32
 #define NOMINMAX
 #include <winsock2.h>
@@ -21,7 +23,7 @@ namespace shizuru::app {
 void RegisterBuiltinTools(runtime::ToolRegistry& registry,
                           SchedulerDevice* scheduler) {
   registry.Register("get_current_time",
-                    [](const std::string& /*args*/) -> runtime::ToolResult {
+                    [](const nlohmann::json& /*args*/) -> runtime::ToolResult {
                       auto now = std::chrono::system_clock::now();
                       auto t = std::chrono::system_clock::to_time_t(now);
                       char buf[64];
@@ -31,7 +33,7 @@ void RegisterBuiltinTools(runtime::ToolRegistry& registry,
                     });
 
   registry.Register("get_system_info",
-                    [](const std::string& /*args*/) -> runtime::ToolResult {
+                    [](const nlohmann::json& /*args*/) -> runtime::ToolResult {
                       char hostname[256] = {};
                       gethostname(hostname, sizeof(hostname));
 #if defined(__APPLE__)
@@ -43,23 +45,20 @@ void RegisterBuiltinTools(runtime::ToolRegistry& registry,
 #else
                       const char* os = "Unknown";
 #endif
-                      std::string info = std::string(R"({"os":")") + os +
-                                         R"(","hostname":")" + hostname + R"("})";
-                      return {true, info, ""};
+                      nlohmann::json info = {
+                          {"os", os},
+                          {"hostname", hostname},
+                      };
+                      return {true, std::move(info), ""};
                     });
 
   registry.Register("calculate",
-                    [](const std::string& args) -> runtime::ToolResult {
-                      auto expr_pos = args.find(R"("expression":")");
-                      if (expr_pos == std::string::npos) {
+                    [](const nlohmann::json& args) -> runtime::ToolResult {
+                      if (!args.contains("expression") ||
+                          !args["expression"].is_string()) {
                         return {false, "", "Missing 'expression' parameter"};
                       }
-                      auto val_start = expr_pos + 15;
-                      auto val_end = args.find('"', val_start);
-                      if (val_end == std::string::npos) {
-                        return {false, "", "Malformed expression"};
-                      }
-                      std::string expr = args.substr(val_start, val_end - val_start);
+                      std::string expr = args["expression"].get<std::string>();
                       double a = 0, b = 0;
                       char op = 0;
                       if (std::sscanf(expr.c_str(), "%lf %c %lf", &a, &op, &b) != 3) {
@@ -85,20 +84,15 @@ void RegisterBuiltinTools(runtime::ToolRegistry& registry,
   // set_reminder: schedule a real reminder via SchedulerDevice.
   // If scheduler is null, the tool still works but returns a "not available" message.
   registry.Register("set_reminder",
-                    [scheduler](const std::string& args) -> runtime::ToolResult {
-                      // Parse "message" and "minutes" from JSON args.
+                    [scheduler](const nlohmann::json& args) -> runtime::ToolResult {
                       std::string message = "reminder";
                       int minutes = 0;
 
-                      auto msg_pos = args.find(R"("message":")");
-                      if (msg_pos != std::string::npos) {
-                        auto s = msg_pos + 11;
-                        auto e = args.find('"', s);
-                        if (e != std::string::npos) { message = args.substr(s, e - s); }
+                      if (args.contains("message") && args["message"].is_string()) {
+                        message = args["message"].get<std::string>();
                       }
-                      auto min_pos = args.find(R"("minutes":)");
-                      if (min_pos != std::string::npos) {
-                        std::sscanf(args.c_str() + min_pos + 10, "%d", &minutes);
+                      if (args.contains("minutes") && args["minutes"].is_number_integer()) {
+                        minutes = args["minutes"].get<int>();
                       }
 
                       if (scheduler == nullptr) {
@@ -113,48 +107,47 @@ void RegisterBuiltinTools(runtime::ToolRegistry& registry,
                       // Build the payload — pure structured data.
                       // CoreDevice wraps it in <event> tags; persona prompt
                       // tells the LLM how to handle reminder events.
-                      std::string payload =
-                          R"({"message":")" + message + R"("})";
+                      nlohmann::json payload = {
+                          {"message", message},
+                      };
                       // Calculate trigger time.
                       auto trigger = now + std::chrono::minutes(minutes);
 
                       ScheduledItem item;
                       item.id = id;
-                      item.payload = payload;
+                      item.payload = payload.dump();
                       item.trigger_time = trigger;
 
                       scheduler->Schedule(std::move(item));
 
                       // Return confirmation to the LLM.
-                      std::string result =
-                          R"({"status":"scheduled","id":")" + id +
-                          R"(","message":")" + message +
-                          R"(","minutes":)" + std::to_string(minutes) + "}";
-                      return {true, result, ""};
+                      nlohmann::json result = {
+                          {"status", "scheduled"},
+                          {"id", id},
+                          {"message", message},
+                          {"minutes", minutes},
+                      };
+                      return {true, std::move(result), ""};
                     });
 
   // save_note: persist a quick note in the conversation context.
   // Currently stored in-memory (visible to LLM in current session).
   // Will be persisted to SQLite when SqliteMemoryStore is implemented.
   registry.Register("save_note",
-                    [](const std::string& args) -> runtime::ToolResult {
-                      auto content_pos = args.find(R"("content":")");
-                      if (content_pos == std::string::npos) {
+                    [](const nlohmann::json& args) -> runtime::ToolResult {
+                      if (!args.contains("content") || !args["content"].is_string()) {
                         return {false, "", "Missing 'content' parameter"};
                       }
-                      auto s = content_pos + 11;
-                      auto e = args.find('"', s);
-                      if (e == std::string::npos) {
-                        return {false, "", "Malformed content"};
-                      }
-                      std::string content = args.substr(s, e - s);
+                      std::string content = args["content"].get<std::string>();
 
                       // The note is returned as the tool result, which gets
                       // recorded in ContextStrategy as a tool_result message.
                       // This means the LLM will see it in subsequent turns.
-                      std::string result =
-                          R"({"status":"saved","content":")" + content + R"("})";
-                      return {true, result, ""};
+                      nlohmann::json result = {
+                          {"status", "saved"},
+                          {"content", content},
+                      };
+                      return {true, std::move(result), ""};
                     });
 }
 
