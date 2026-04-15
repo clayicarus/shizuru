@@ -147,3 +147,41 @@ The architecture draws from operating system concepts:
 5. **Tool side effects** (scheduler writes, DB writes) are executed
    directly by tool functions — they do NOT flow through the bus.
    The Controller authorizes these indirectly via the tool call mechanism.
+
+## Context Window Source Identification
+
+Non-user inputs in the LLM context window are distinguished using the
+OpenAI API's native `name` field on `role: "user"` messages.  This is
+preferred over in-content markup (XML tags, etc.) because:
+- It's a structured API field, not text the LLM has to parse
+- LLMs natively understand `name` as a speaker identifier
+- Zero overhead for the most common case (plain user text)
+
+### How it works
+
+1. `Observation.source` is set by CoreDevice based on the input port
+2. `Controller::HandleThinking` copies `obs.source` → `MemoryEntry.source_tag`
+3. `ContextStrategy::BuildContext` maps `source_tag` → `ContextMessage.name`
+4. `MessageToJson` serializes `name` into the API request
+
+### Defined source names
+
+| name | Origin | Notes |
+|------|--------|-------|
+| (empty) | User text input | Default — no name field sent |
+| `user` | User text input | Explicit user attribution |
+| `voice` | ASR transcript | May have recognition errors |
+| `scheduler` | Reminder / followup trigger | Payload is JSON data, not user speech |
+| `tool` | Tool result | Already uses `role: "tool"` |
+
+### Design Principles
+
+1. **Event payloads are structured data (JSON)** — the LLM decides how
+   to express them based on persona prompt guidance.  Never hard-code
+   natural language instructions in payloads.
+2. **Persona prompt explains name semantics** — tells the LLM how to
+   handle messages from different sources (e.g., scheduler events should
+   be brought up naturally, not announced as system notifications).
+3. **The `name` field pipeline is already fully wired** — Observation.source
+   → MemoryEntry.source_tag → ContextMessage.name → API `name` field.
+
