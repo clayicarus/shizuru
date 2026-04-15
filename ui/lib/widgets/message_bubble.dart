@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../providers/conversation_provider.dart';
 
 class MessageBubble extends StatefulWidget {
@@ -58,26 +59,28 @@ class _MessageBubbleState extends State<MessageBubble>
 
     final timeStr = _formatTime(widget.message.timestamp);
 
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.75,
-        ),
-        decoration: BoxDecoration(
-          color: bubbleColor,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          crossAxisAlignment:
-              isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-          children: [
-            Text(
-              '${isUser ? 'you' : 'assistant'}  $timeStr',
-              style: Theme.of(context).textTheme.labelSmall,
-            ),
+    return GestureDetector(
+      onLongPress: () => _copyToClipboard(context),
+      child: Align(
+        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.75,
+          ),
+          decoration: BoxDecoration(
+            color: bubbleColor,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment:
+                isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${isUser ? 'you' : 'assistant'}  $timeStr',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
             const SizedBox(height: 4),
             if (isStreaming && !hasText)
               _DotsIndicator(controller: _dotsController)
@@ -88,6 +91,20 @@ class _MessageBubbleState extends State<MessageBubble>
           ],
         ),
       ),
+    ),
+    );
+  }
+
+  void _copyToClipboard(BuildContext context) {
+    final text = widget.message.text
+        .replaceAll(RegExp(r'<think>.*?</think>', dotAll: true), '')
+        .replaceAll(RegExp(r'<tool_call>.*?</tool_call>', dotAll: true), '')
+        .replaceAll(RegExp(r'<tool_result>.*?</tool_result>', dotAll: true), '')
+        .trim();
+    if (text.isEmpty) { return; }
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Copied'), duration: Duration(seconds: 1)),
     );
   }
 

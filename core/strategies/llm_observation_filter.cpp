@@ -59,19 +59,20 @@ bool LlmObservationFilter::ShouldProcess(const Observation& obs) {
 
 std::string LlmObservationFilter::DefaultPrompt() {
   return
-      "You are a voice input classifier. The user is speaking to a voice "
-      "assistant. You will receive a transcript from speech recognition.\n\n"
-      "Determine if this transcript is a meaningful message that the "
-      "assistant should respond to.\n\n"
+      "You are a voice input classifier for a companion assistant. "
+      "You will receive a transcript from speech recognition.\n\n"
+      "Determine if this transcript is something the assistant should respond to.\n\n"
       "Reply ONLY \"yes\" or \"no\".\n\n"
-      "Answer \"no\" for:\n"
-      "- Filler words, interjections, or meaningless sounds "
-      "(e.g., \"啊\", \"嗯\", \"哦\", \"呃\", \"um\", \"uh\", \"hmm\")\n"
-      "- Background noise transcription artifacts\n"
-      "- Incomplete fragments that are clearly not directed at the assistant\n\n"
       "Answer \"yes\" for:\n"
-      "- Questions, requests, or statements directed at the assistant\n"
-      "- Even short but meaningful messages (e.g., \"好的\", \"停\", \"yes\", \"help\")";
+      "- Questions, requests, or statements\n"
+      "- Emotional expressions (sighs, complaints, frustration, tiredness)\n"
+      "- Short but meaningful messages (\"好的\", \"停\", \"help\", \"烦死了\", \"唉\")\n"
+      "- Anything that sounds like the user is talking to the assistant\n\n"
+      "Answer \"no\" ONLY for:\n"
+      "- Clear background noise artifacts (random syllables, TV audio)\n"
+      "- Obvious speech recognition errors (garbled text)\n\n"
+      "When in doubt, answer \"yes\". It is better to respond to noise "
+      "than to ignore a user who needs support.";
 }
 
 }  // namespace shizuru::core

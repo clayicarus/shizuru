@@ -9,9 +9,7 @@ if(APPLE)
 endif()
 
 target_link_libraries(shizuru_bridge PRIVATE
-  shizuru_runtime
-  shizuru_llm_openai
-  shizuru_io_tool
+  shizuru_app
   shizuru_asr_baidu_device
   shizuru_tts_elevenlabs_device
   shizuru_audio

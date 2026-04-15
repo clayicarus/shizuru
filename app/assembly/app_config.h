@@ -34,8 +34,13 @@ struct AppConfig {
   std::string db_path;  // SQLite database path.  Empty = in-memory fallback.
 
   // ── Persona ────────────────────────────────────────────────────────────
-  // If empty, the default Shizuru persona is used.
   std::string persona_id;
+
+  // ── User custom instruction ────────────────────────────────────────────
+  // Appended after the persona prompt.  Allows the user to add custom
+  // directives (e.g., "always reply in English") without overriding the
+  // persona.  Empty = no custom instruction.
+  std::string user_instruction;
 };
 
 }  // namespace shizuru::app

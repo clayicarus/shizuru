@@ -40,3 +40,6 @@ ui/ui/
 ui/macos/Runner/Frameworks/*.dylib
 ui/macos/Runner/Frameworks/*.so
 ui/macos/Runner/Frameworks/*.dll
+
+# temp
+benchmarks/

@@ -28,10 +28,8 @@ AppRuntime::AppRuntime(AppConfig config) : config_(std::move(config)) {
   // Initialize logger.
   core::InitLogger(config_.logger);
 
-  // Register builtin tools.
-  RegisterBuiltinTools(tools_, nullptr);  // scheduler not created yet
-
   // Append builtin tool definitions to LLM config.
+  // Tool functions are registered later in Start() when scheduler is available.
   auto defs = BuiltinToolDefinitions();
   for (auto& d : defs) {
     config_.llm.tools.push_back(std::move(d));
@@ -65,6 +63,13 @@ void AppRuntime::Start() {
   // ── Build system prompt with persona ─────────────────────────────────────
   // TODO: Load user preferences and active followups from persistent memory.
   std::string system_prompt = BuildSystemPrompt({}, {});
+
+  // Append user's custom instruction if provided.
+  if (!config_.user_instruction.empty()) {
+    system_prompt += "\n\n## Additional instructions from user\n";
+    system_prompt += config_.user_instruction;
+  }
+
   config_.context.default_system_instruction = system_prompt;
 
   // ── Build strategy instances ─────────────────────────────────────────────
@@ -171,6 +176,9 @@ void AppRuntime::Start() {
   auto scheduler = std::make_unique<SchedulerDevice>();
   scheduler_ = scheduler.get();
 
+  // ── Register builtin tool functions (now that scheduler is available) ────
+  RegisterBuiltinTools(tools_, scheduler_);
+
   // ── Register core devices on bus ─────────────────────────────────────────
   bus_.RegisterDevice(std::move(core));
   bus_.RegisterDevice(std::move(tool_dispatch));
@@ -245,9 +253,9 @@ void AppRuntime::WireRoutes() {
   bus_.AddRoute({"core", "control_out"}, {"elevenlabs_tts", "control_in"}, kCtrl);
   bus_.AddRoute({"core", "control_out"}, {"audio_playout", "control_in"}, kCtrl);
 
-  // Scheduler event → core text_in (proactive conversation).
+  // Scheduler event → core scheduler_in (proactive conversation, bypasses filter).
   bus_.AddRoute({"scheduler", SchedulerDevice::kEventOut},
-                {"core", "text_in"}, kDma);
+                {"core", "scheduler_in"}, kDma);
 }
 
 }  // namespace shizuru::app

@@ -1,6 +1,8 @@
 # Shizuru
 
-A cross-platform voice conversation agent built in C++17, with a Flutter UI and OpenAI-compatible LLM backend.
+A cross-platform companion assistant built in C++17, with a Flutter UI and OpenAI-compatible LLM backend.
+
+Shizuru remembers what matters to you, follows up naturally over time, and helps you take the next small step.
 
 ## Requirements
 
@@ -42,13 +44,6 @@ ctest --test-dir build
 ./build/examples/tool_call_example https://api.openai.com sk-your-key gpt-4o
 ```
 
-**Voice echo pipeline** — microphone → VAD → Baidu ASR → Baidu TTS → speaker:
-```bash
-export BAIDU_API_KEY=...
-export BAIDU_SECRET_KEY=...
-./build/examples/asr_tts_echo_pipeline
-```
-
 **Full voice agent** — microphone → VAD → ASR → LLM → TTS → speaker:
 ```bash
 export BAIDU_API_KEY=...
@@ -58,17 +53,17 @@ export ELEVENLABS_API_KEY=...
 ./build/examples/voice_agent [--base-url <url>] [--model <model>] [--voice-id <id>] [--debug]
 ```
 
-PCM dumps are written to the working directory: `capture.pcm`, `vad_dump.pcm`, `playout_dump.pcm` (raw s16le 16 kHz mono).
-
-## Project structure
+## Project Structure
 
 ```
-core/        Agent framework: controller, context strategy, policy, session
-services/    Vendor clients: LLM (OpenAI), ASR (Baidu), TTS (Baidu, ElevenLabs)
-io/          IoDevice abstraction, audio capture/playout, VAD, ASR/TTS device wrappers
-runtime/     AgentRuntime (device bus), CoreDevice, RouteTable
-examples/    Runnable examples
-tests/       Unit and property-based tests
+app/          Product layer: persona, scheduler, tools, memory, AppRuntime
+core/         Agent framework: controller state machine, context, policy, strategies
+io/           IoDevice implementations: audio, ASR, TTS, VAD, probes
+runtime/      Device bus: AgentRuntime, CoreDevice, ToolDispatchDevice, RouteTable
+services/     Vendor clients: OpenAI LLM, Baidu ASR/TTS, ElevenLabs TTS
+ui/           Flutter app + C bridge (dart:ffi)
+examples/     Runnable examples
+tests/        Unit, property-based, and integration tests
 ```
 
 ## Architecture
@@ -76,43 +71,24 @@ tests/       Unit and property-based tests
 The runtime is a device bus. Every component — including the agent session — is an `IoDevice`. Data flows as typed `DataFrame` packets routed by a `RouteTable`.
 
 ```
-Microphone
-    │  audio/pcm (DMA)
-    ▼
-PcmDumpDevice (capture.pcm)
-    │  audio/pcm (DMA)
-    ▼
-EnergyVadDevice ──vad/event──► VadEventDevice ──vad/event──► CoreDevice:vad_in
-    │  audio/pcm (speech frames only, with pre-roll)                │
-    ▼                                                               │ control/command (flush → ASR, cancel → TTS/playout)
-PcmDumpDevice (vad_dump.pcm)                                        ▼
-    │  audio/pcm (DMA)                              ┌─────────────────────────────┐
-    ▼                                               │  CoreDevice (AgentSession)  │
-BaiduAsrDevice ──text/plain──────────────────────► │  LLM reasoning loop         │
-                                                    │  action_out ──► ToolDispatch│
-                                                    └──────┬──────────────────────┘
-                                                           │  text/plain
-                                                           ▼
-                                                   ElevenLabsTtsDevice
-                                                           │  audio/pcm (DMA)
-                                                           ▼
-                                                   PcmDumpDevice (playout_dump.pcm)
-                                                           │  audio/pcm (DMA)
-                                                           ▼
-                                                        Speaker
+Microphone → VAD → ASR → CoreDevice (LLM reasoning) → TTS → Speaker
+                              ↕
+                     ToolDispatchDevice (tool execution)
+                              ↕
+                     SchedulerDevice (reminders, followups)
 ```
 
-DMA routes (`requires_control_plane = false`) bypass the LLM loop for low-latency audio. Control commands (`cancel`, `flush`) flow from `CoreDevice:control_out` to `BaiduAsrDevice`, `ElevenLabsTtsDevice`, and `AudioPlayoutDevice` via the control plane. On VAD `speech_start`, TTS and playout are cancelled immediately; on `speech_end`, ASR is flushed.
+The app layer (`app/`) sits above the infrastructure and handles product-specific logic: persona prompt assembly, tool registration, scheduler wiring, and session lifecycle.
 
-The agent core is modeled after an OS: controller as state machine, LLM as CPU, context strategy as memory manager, policy layer as permission boundary.
+See `.kiro/steering/architecture.md` for the full architecture guide.
 
 ## Cross-platform
 
-| Platform      | Audio backend      | UI      |
-|---------------|--------------------|---------|
-| macOS / Linux | PortAudio          | Flutter |
-| Windows       | PortAudio / WASAPI | Flutter |
-| Android       | Oboe               | Flutter |
-| iOS           | CoreAudio          | Flutter |
+| Platform      | Audio backend | UI      |
+|---------------|---------------|---------|
+| macOS / Linux | PortAudio     | Flutter |
+| Windows       | PortAudio     | Flutter |
+| Android       | Oboe          | Flutter |
+| iOS           | CoreAudio     | Flutter |
 
 C++ core is shared across all platforms. Platform-specific code lives behind abstract interfaces.
