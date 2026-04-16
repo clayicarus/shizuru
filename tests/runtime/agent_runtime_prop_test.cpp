@@ -24,6 +24,7 @@
 #include "runtime/agent_runtime.h"
 #include "runtime/core_device.h"
 #include "runtime/route_table.h"
+#include "conversation/item.h"
 #include "services/audit/log_audit_sink.h"
 #include "services/llm/openai/openai_client.h"
 #include "services/memory/in_memory_store.h"
@@ -140,8 +141,6 @@ CoreDevice* AssembleAgent(AgentRuntime& runtime,
                    PortAddress{"tool_dispatch", "action_in"});
   runtime.AddRoute(PortAddress{"tool_dispatch", "result_out"},
                    PortAddress{"core", "tool_result_in"});
-  runtime.AddRoute(PortAddress{"core", "text_out"},
-                   PortAddress{"app_output", "in"});
 
   return core_ptr;
 }
@@ -299,10 +298,13 @@ RC_GTEST_PROP(AgentRuntimePropTest, prop_send_message_routes_to_core_device,
 
   std::mutex mu;
   std::string received_text;
-  runtime.OnFrameSink([&](io::DataFrame frame) {
-    std::lock_guard<std::mutex> lock(mu);
-    received_text = std::string(frame.payload.begin(), frame.payload.end());
-  });
+  core->Session().GetController().OnConversationItem(
+      [&](const core::conversation::ConversationItem& item, bool is_delta) {
+        if (!is_delta && item.kind == core::conversation::ItemKind::kAssistantMessage) {
+          std::lock_guard<std::mutex> lock(mu);
+          received_text = item.payload.value("text", "");
+        }
+      });
 
   runtime.StartAll();
 

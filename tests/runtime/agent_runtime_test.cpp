@@ -19,6 +19,7 @@
 #include "runtime/agent_runtime.h"
 #include "runtime/core_device.h"
 #include "runtime/route_table.h"
+#include "conversation/item.h"
 #include "services/audit/log_audit_sink.h"
 #include "services/llm/openai/openai_client.h"
 #include "services/memory/in_memory_store.h"
@@ -153,9 +154,6 @@ CoreDevice* AssembleAgent(AgentRuntime& runtime,
   // tool_dispatch result_out → core tool_result_in
   runtime.AddRoute(PortAddress{"tool_dispatch", "result_out"},
                    PortAddress{"core", "tool_result_in"});
-  // core text_out → app_output (virtual sink)
-  runtime.AddRoute(PortAddress{"core", "text_out"},
-                   PortAddress{"app_output", "in"});
 
   return core_ptr;
 }
@@ -171,7 +169,7 @@ bool WaitFor(std::function<bool()> pred, int timeout_ms = 5000) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: Assembled agent pipeline — send message → output callback fires
+// Test 1: Assembled agent pipeline — send message → OnConversationItem fires
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeTest, StartSessionSendMessageOutputCallbackFires) {
   MockLlmServer mock;
@@ -180,12 +178,16 @@ TEST(AgentRuntimeTest, StartSessionSendMessageOutputCallbackFires) {
 
   CoreDevice* core = AssembleAgent(runtime, mock.BaseUrl(), tools);
 
+  // Register OnConversationItem on the controller BEFORE StartAll().
   std::mutex mu;
   std::string received;
-  runtime.OnFrameSink([&](io::DataFrame frame) {
-    std::lock_guard<std::mutex> lock(mu);
-    received = std::string(frame.payload.begin(), frame.payload.end());
-  });
+  core->Session().GetController().OnConversationItem(
+      [&](const core::conversation::ConversationItem& item, bool is_delta) {
+        if (!is_delta && item.kind == core::conversation::ItemKind::kAssistantMessage) {
+          std::lock_guard<std::mutex> lock(mu);
+          received = item.payload.value("text", "");
+        }
+      });
 
   runtime.StartAll();
 
@@ -204,7 +206,7 @@ TEST(AgentRuntimeTest, StartSessionSendMessageOutputCallbackFires) {
 
   runtime.Shutdown();
 
-  ASSERT_TRUE(got) << "Output callback never fired";
+  ASSERT_TRUE(got) << "OnConversationItem callback never fired";
   std::lock_guard<std::mutex> lock(mu);
   EXPECT_FALSE(received.empty());
 }

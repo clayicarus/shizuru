@@ -380,9 +380,11 @@ TEST(ResponseFilterIntegrationTest, ThinkingTagsStrippedFromResponse) {
                   nullptr,  // tts_segment
                   std::make_unique<StripThinkingFilter>());
 
-  ctrl.OnResponse([&](const ActionCandidate& ac) {
-    std::lock_guard<std::mutex> lock(mu);
-    responses.push_back(ac.response_text);
+  ctrl.OnConversationItem([&](const conversation::ConversationItem& item, bool is_delta) {
+    if (!is_delta && item.kind == conversation::ItemKind::kAssistantMessage) {
+      std::lock_guard<std::mutex> lock(mu);
+      responses.push_back(item.payload.value("text", ""));
+    }
   });
 
   ctrl.Start();
@@ -435,9 +437,11 @@ TEST(ResponseFilterIntegrationTest, EmptyResponseSuppressed) {
                   nullptr, nullptr, nullptr,
                   std::make_unique<StripThinkingFilter>());
 
-  ctrl.OnResponse([&](const ActionCandidate& ac) {
-    std::lock_guard<std::mutex> lock(mu);
-    responses.push_back(ac.response_text);
+  ctrl.OnConversationItem([&](const conversation::ConversationItem& item, bool is_delta) {
+    if (!is_delta && item.kind == conversation::ItemKind::kAssistantMessage) {
+      std::lock_guard<std::mutex> lock(mu);
+      responses.push_back(item.payload.value("text", ""));
+    }
   });
 
   ctrl.Start();
@@ -456,7 +460,7 @@ TEST(ResponseFilterIntegrationTest, EmptyResponseSuppressed) {
   ctrl.Shutdown();
 
   std::lock_guard<std::mutex> lock(mu);
-  // OnResponse should NOT have been called (response was empty after filtering).
+  // OnConversationItem should NOT have been called with an assistant message (response was empty after filtering).
   EXPECT_TRUE(responses.empty());
 }
 

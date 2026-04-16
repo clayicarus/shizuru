@@ -647,9 +647,11 @@ TEST_F(ControllerTest, IdleStateCanWakeOnNewUserObservation) {
     std::lock_guard<std::mutex> lock(mu);
     transitions.push_back({from, to, event});
   });
-  ctrl.OnResponse([&](const ActionCandidate& ac) {
-    std::lock_guard<std::mutex> lock(mu);
-    responses.push_back(ac.response_text);
+  ctrl.OnConversationItem([&](const conversation::ConversationItem& item, bool is_delta) {
+    if (!is_delta && item.kind == conversation::ItemKind::kAssistantMessage) {
+      std::lock_guard<std::mutex> lock(mu);
+      responses.push_back(item.payload.value("text", ""));
+    }
   });
 
   ctrl.Start();

@@ -21,6 +21,7 @@
 #include "runtime/agent_runtime.h"
 #include "runtime/core_device.h"
 #include "runtime/route_table.h"
+#include "conversation/item.h"
 #include "policy/types.h"
 #include "services/audit/log_audit_sink.h"
 #include "services/llm/openai/openai_client.h"
@@ -125,9 +126,6 @@ CoreDevice* AssembleAgent(AgentRuntime& runtime,
   // tool_dispatch result_out → core tool_result_in
   runtime.AddRoute(PortAddress{"tool_dispatch", "result_out"},
                    PortAddress{"core", "tool_result_in"});
-  // core text_out → app_output (virtual sink)
-  runtime.AddRoute(PortAddress{"core", "text_out"},
-                   PortAddress{"app_output", "in"});
 
   return core_ptr;
 }
@@ -239,7 +237,7 @@ bool WaitFor(std::function<bool()> pred, int timeout_ms = 8000) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: Full Pipeline — Assemble → StartAll → OnInput → OnFrameSink → Shutdown
+// Test 1: Full Pipeline — Assemble → StartAll → OnInput → OnConversationItem → Shutdown
 // ---------------------------------------------------------------------------
 TEST(AgentRuntimeIntegrationTest, FullPipeline) {
   MockLlmServer mock([](const httplib::Request&, httplib::Response& res) {
@@ -253,10 +251,13 @@ TEST(AgentRuntimeIntegrationTest, FullPipeline) {
 
   std::mutex mu;
   std::string received_text;
-  runtime.OnFrameSink([&](io::DataFrame frame) {
-    std::lock_guard<std::mutex> lock(mu);
-    received_text = std::string(frame.payload.begin(), frame.payload.end());
-  });
+  core->Session().GetController().OnConversationItem(
+      [&](const core::conversation::ConversationItem& item, bool is_delta) {
+        if (!is_delta && item.kind == core::conversation::ItemKind::kAssistantMessage) {
+          std::lock_guard<std::mutex> lock(mu);
+          received_text = item.payload.value("text", "");
+        }
+      });
 
   runtime.StartAll();
 
@@ -273,7 +274,7 @@ TEST(AgentRuntimeIntegrationTest, FullPipeline) {
     return !received_text.empty();
   });
 
-  ASSERT_TRUE(got_output) << "OnFrameSink callback never fired with final response";
+  ASSERT_TRUE(got_output) << "OnConversationItem callback never fired with final response";
   {
     std::lock_guard<std::mutex> lock(mu);
     EXPECT_EQ(received_text, "hello from agent");
@@ -365,11 +366,13 @@ TEST(AgentRuntimeIntegrationTest, InterruptPath) {
   // Track output — we expect NO final response for the interrupted turn.
   std::mutex mu;
   std::vector<std::string> final_outputs;
-  runtime.OnFrameSink([&](io::DataFrame frame) {
-    std::lock_guard<std::mutex> lock(mu);
-    final_outputs.push_back(
-        std::string(frame.payload.begin(), frame.payload.end()));
-  });
+  core->Session().GetController().OnConversationItem(
+      [&](const core::conversation::ConversationItem& item, bool is_delta) {
+        if (!is_delta && item.kind == core::conversation::ItemKind::kAssistantMessage) {
+          std::lock_guard<std::mutex> lock(mu);
+          final_outputs.push_back(item.payload.value("text", ""));
+        }
+      });
 
   runtime.StartAll();
 
@@ -458,10 +461,13 @@ TEST(AgentRuntimeIntegrationTest, ToolCallRoundTrip) {
 
   std::mutex mu;
   std::string final_response;
-  runtime.OnFrameSink([&](io::DataFrame frame) {
-    std::lock_guard<std::mutex> lock(mu);
-    final_response = std::string(frame.payload.begin(), frame.payload.end());
-  });
+  core->Session().GetController().OnConversationItem(
+      [&](const core::conversation::ConversationItem& item, bool is_delta) {
+        if (!is_delta && item.kind == core::conversation::ItemKind::kAssistantMessage) {
+          std::lock_guard<std::mutex> lock(mu);
+          final_response = item.payload.value("text", "");
+        }
+      });
 
   runtime.StartAll();
 

@@ -18,6 +18,7 @@
 
 #include "context/config.h"
 #include "context/context_strategy.h"
+#include "conversation/item.h"
 #include "controller/config.h"
 #include "controller/controller.h"
 #include "controller/types.h"
@@ -116,9 +117,11 @@ RC_GTEST_PROP(ControllerPreservation,
     std::lock_guard<std::mutex> lock(mu);
     transitions.push_back({from, to, event});
   });
-  ctrl.OnResponse([&](const ActionCandidate& ac) {
-    std::lock_guard<std::mutex> lock(mu);
-    responses.push_back(ac.response_text);
+  ctrl.OnConversationItem([&](const conversation::ConversationItem& item, bool is_delta) {
+    if (!is_delta && item.kind == conversation::ItemKind::kAssistantMessage) {
+      std::lock_guard<std::mutex> lock(mu);
+      responses.push_back(item.payload.value("text", ""));
+    }
   });
 
   ctrl.Start();

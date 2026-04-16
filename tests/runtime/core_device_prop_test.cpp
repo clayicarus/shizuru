@@ -14,6 +14,7 @@
 
 #include "controller/config.h"
 #include "context/config.h"
+#include "conversation/item.h"
 #include "policy/config.h"
 #include "controller/types.h"
 #include "context/types.h"
@@ -166,13 +167,19 @@ RC_GTEST_PROP(CoreDevicePropTest, prop_action_candidate_to_dataframe, ()) {
     return r;
   };
 
+  // Register OnConversationItem to capture the assistant response.
   std::mutex mu;
-  std::vector<io::DataFrame> emitted;
-  device->SetOutputCallback([&](const std::string&, const std::string&,
-                                 io::DataFrame f) {
-    std::lock_guard<std::mutex> lock(mu);
-    emitted.push_back(std::move(f));
-  });
+  std::string received_text;
+  device->Session().GetController().OnConversationItem(
+      [&](const core::conversation::ConversationItem& item, bool is_delta) {
+        if (!is_delta && item.kind == core::conversation::ItemKind::kAssistantMessage) {
+          std::lock_guard<std::mutex> lock(mu);
+          received_text = item.payload.value("text", "");
+        }
+      });
+
+  device->SetOutputCallback([](const std::string&, const std::string&,
+                                io::DataFrame) {});
 
   device->Start();
 
@@ -184,7 +191,7 @@ RC_GTEST_PROP(CoreDevicePropTest, prop_action_candidate_to_dataframe, ()) {
 
   bool got_output = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
-    return !emitted.empty();
+    return !received_text.empty();
   });
 
   device->Stop();
@@ -192,17 +199,7 @@ RC_GTEST_PROP(CoreDevicePropTest, prop_action_candidate_to_dataframe, ()) {
   RC_ASSERT(got_output);
 
   std::lock_guard<std::mutex> lock(mu);
-  bool found = false;
-  for (const auto& f : emitted) {
-    if (f.type == "text/plain") {
-      const std::string payload_str(f.payload.begin(), f.payload.end());
-      if (payload_str == response_text) {
-        found = true;
-        break;
-      }
-    }
-  }
-  RC_ASSERT(found);
+  RC_ASSERT(received_text == response_text);
 }
 
 // ---------------------------------------------------------------------------

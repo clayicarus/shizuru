@@ -14,6 +14,7 @@
 
 #include "controller/config.h"
 #include "context/config.h"
+#include "conversation/item.h"
 #include "policy/config.h"
 #include "controller/types.h"
 #include "context/types.h"
@@ -450,6 +451,17 @@ TEST(CoreDeviceTest, ResponseDeliveredTransitionDoesNotEmitCancel) {
     return r;
   };
 
+  // Register OnConversationItem to detect when the response is delivered.
+  std::mutex conv_mu;
+  std::string conversation_response;
+  device->Session().GetController().OnConversationItem(
+      [&](const core::conversation::ConversationItem& item, bool is_delta) {
+        if (!is_delta && item.kind == core::conversation::ItemKind::kAssistantMessage) {
+          std::lock_guard<std::mutex> lock(conv_mu);
+          conversation_response = item.payload.value("text", "");
+        }
+      });
+
   std::mutex mu;
   std::vector<std::pair<std::string, io::DataFrame>> emitted;
   device->SetOutputCallback([&](const std::string& /*dev*/,
@@ -467,13 +479,10 @@ TEST(CoreDeviceTest, ResponseDeliveredTransitionDoesNotEmitCancel) {
   frame.payload = std::vector<uint8_t>(text.begin(), text.end());
   device->OnInput("text_in", std::move(frame));
 
-  // Wait for the text/plain response to be emitted (confirms the turn completed).
+  // Wait for OnConversationItem to fire (confirms the turn completed).
   bool got_response = WaitFor([&] {
-    std::lock_guard<std::mutex> lock(mu);
-    for (const auto& [port, f] : emitted) {
-      if (port == "text_out" && f.type == "text/plain") return true;
-    }
-    return false;
+    std::lock_guard<std::mutex> lock(conv_mu);
+    return !conversation_response.empty();
   });
 
   // Give a brief window for any spurious cancel to appear.
@@ -481,7 +490,11 @@ TEST(CoreDeviceTest, ResponseDeliveredTransitionDoesNotEmitCancel) {
 
   device->Stop();
 
-  ASSERT_TRUE(got_response) << "text_out response was never emitted";
+  ASSERT_TRUE(got_response) << "OnConversationItem was never called with assistant response";
+  {
+    std::lock_guard<std::mutex> lock(conv_mu);
+    EXPECT_EQ(conversation_response, "hello");
+  }
 
   std::lock_guard<std::mutex> lock(mu);
   bool found_cancel = false;
@@ -653,8 +666,8 @@ TEST(CoreDeviceTest, SchedulerEventSourceTagAlwaysSet) {
 // ---------------------------------------------------------------------------
 // Test: StreamingTokensEmittedWithMetadataFlag
 // With use_streaming=true, SubmitStreaming is called and each token delta
-// arrives on text_out with metadata["streaming"]="1".
-// The final response frame (from OnResponse) must NOT have that flag.
+// arrives via OnConversationItem with is_delta=true.
+// The final response (is_delta=false) must also fire.
 // ---------------------------------------------------------------------------
 TEST(CoreDeviceTest, StreamingTokensEmittedWithMetadataFlag) {
   auto llm = std::make_unique<core::testing::MockLlmClient>();
@@ -716,16 +729,19 @@ TEST(CoreDeviceTest, StreamingTokensEmittedWithMetadataFlag) {
       std::make_unique<core::testing::MockMemoryStore>(),
       std::make_unique<core::testing::MockAuditSink>());
 
+  // Register OnConversationItem to capture streaming deltas and final response.
   std::mutex mu;
-  std::vector<io::DataFrame> text_out_frames;
-  device->SetOutputCallback([&](const std::string& /*dev*/,
-                                const std::string& port,
-                                io::DataFrame f) {
-    if (port == "text_out") {
-      std::lock_guard<std::mutex> lock(mu);
-      text_out_frames.push_back(std::move(f));
-    }
-  });
+  std::vector<std::pair<core::conversation::ConversationItem, bool>> items;
+  device->Session().GetController().OnConversationItem(
+      [&](const core::conversation::ConversationItem& item, bool is_delta) {
+        if (item.kind == core::conversation::ItemKind::kAssistantMessage) {
+          std::lock_guard<std::mutex> lock(mu);
+          items.emplace_back(item, is_delta);
+        }
+      });
+
+  device->SetOutputCallback([](const std::string&, const std::string&,
+                                io::DataFrame) {});
 
   device->Start();
 
@@ -735,34 +751,32 @@ TEST(CoreDeviceTest, StreamingTokensEmittedWithMetadataFlag) {
   in_frame.payload = std::vector<uint8_t>(msg.begin(), msg.end());
   device->OnInput("text_in", std::move(in_frame));
 
-  // Wait for at least one streaming token + the final response frame.
+  // Wait for at least one streaming delta + the final response.
   bool got_all = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
-    // Expect 3 partial frames + 1 final frame.
-    return text_out_frames.size() >= 4;
+    // Expect 3 delta items + 1 final item.
+    return items.size() >= 4;
   }, 500);
 
   device->Stop();
 
-  ASSERT_TRUE(got_all) << "Did not receive expected streaming frames in time";
+  ASSERT_TRUE(got_all) << "Did not receive expected conversation items in time";
 
   std::lock_guard<std::mutex> lock(mu);
 
-  // Collect partial and final frames.
+  // Collect partial (delta) and final items.
   std::vector<std::string> partial_tokens;
   int final_count = 0;
-  for (const auto& f : text_out_frames) {
-    const bool is_partial = f.metadata.count("streaming") &&
-                            f.metadata.at("streaming") == "1";
-    if (is_partial) {
-      partial_tokens.emplace_back(f.payload.begin(), f.payload.end());
+  for (const auto& [item, is_delta] : items) {
+    if (is_delta) {
+      partial_tokens.push_back(item.payload.value("text", ""));
     } else {
       ++final_count;
     }
   }
 
-  EXPECT_EQ(partial_tokens.size(), 3u) << "Expected 3 streaming token frames";
-  EXPECT_EQ(final_count, 1) << "Expected exactly 1 final (non-partial) frame";
+  EXPECT_EQ(partial_tokens.size(), 3u) << "Expected 3 streaming delta items";
+  EXPECT_EQ(final_count, 1) << "Expected exactly 1 final (non-delta) item";
 
   // Verify token content.
   EXPECT_EQ(partial_tokens[0], "hel");
@@ -772,8 +786,8 @@ TEST(CoreDeviceTest, StreamingTokensEmittedWithMetadataFlag) {
 
 // ---------------------------------------------------------------------------
 // Test: NonStreamingPathDoesNotSetMetadataFlag
-// With use_streaming=false (default), Submit is called and the response frame
-// on text_out must NOT have metadata["streaming"].
+// With use_streaming=false (default), Submit is called and the response
+// arrives via OnConversationItem with is_delta=false (no streaming deltas).
 // ---------------------------------------------------------------------------
 TEST(CoreDeviceTest, NonStreamingPathDoesNotSetMetadataFlag) {
   core::testing::MockLlmClient* llm = nullptr;
@@ -788,16 +802,19 @@ TEST(CoreDeviceTest, NonStreamingPathDoesNotSetMetadataFlag) {
     return r;
   };
 
+  // Register OnConversationItem to capture items.
   std::mutex mu;
-  std::vector<io::DataFrame> text_out_frames;
-  device->SetOutputCallback([&](const std::string& /*dev*/,
-                                const std::string& port,
-                                io::DataFrame f) {
-    if (port == "text_out") {
-      std::lock_guard<std::mutex> lock(mu);
-      text_out_frames.push_back(std::move(f));
-    }
-  });
+  std::vector<std::pair<core::conversation::ConversationItem, bool>> items;
+  device->Session().GetController().OnConversationItem(
+      [&](const core::conversation::ConversationItem& item, bool is_delta) {
+        if (item.kind == core::conversation::ItemKind::kAssistantMessage) {
+          std::lock_guard<std::mutex> lock(mu);
+          items.emplace_back(item, is_delta);
+        }
+      });
+
+  device->SetOutputCallback([](const std::string&, const std::string&,
+                                io::DataFrame) {});
 
   device->Start();
 
@@ -809,19 +826,17 @@ TEST(CoreDeviceTest, NonStreamingPathDoesNotSetMetadataFlag) {
 
   bool got_response = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
-    return !text_out_frames.empty();
+    return !items.empty();
   });
 
   device->Stop();
 
-  ASSERT_TRUE(got_response) << "No text_out frame received";
+  ASSERT_TRUE(got_response) << "No conversation item received";
 
   std::lock_guard<std::mutex> lock(mu);
-  for (const auto& f : text_out_frames) {
-    const bool has_streaming_flag = f.metadata.count("streaming") &&
-                                    f.metadata.at("streaming") == "1";
-    EXPECT_FALSE(has_streaming_flag)
-        << "Non-streaming path must not set metadata[\"streaming\"]";
+  for (const auto& [item, is_delta] : items) {
+    EXPECT_FALSE(is_delta)
+        << "Non-streaming path must not produce delta conversation items";
   }
 }
 

@@ -457,12 +457,11 @@ TEST(JsonParserTest, ParseStreamChunk_ToolCallWithReasoningContent) {
                                 is_done));
   EXPECT_TRUE(is_done);
 
-  // Verify accumulated_content contains both thinking and tool_call markers.
+  // Verify accumulated_content keeps reasoning text, but tool calls are carried
+  // in the structured result rather than injected back into content.
   EXPECT_NE(content.find("<think>I need to call a tool</think>"),
             std::string::npos);
-  EXPECT_NE(content.find("<tool_call>"), std::string::npos);
-  EXPECT_NE(content.find("\"name\":\"get_time\""), std::string::npos);
-  EXPECT_NE(content.find("\"id\":\"call_1\""), std::string::npos);
+  EXPECT_EQ(content.find("<tool_call>"), std::string::npos);
 
   // Verify result type and tool call details.
   EXPECT_EQ(result.candidate.type, core::ActionType::kToolCall);

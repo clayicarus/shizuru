@@ -17,6 +17,7 @@
 
 #include "context/config.h"
 #include "context/context_strategy.h"
+#include "conversation/item.h"
 #include "controller/config.h"
 #include "controller/controller.h"
 #include "controller/types.h"
@@ -195,10 +196,12 @@ TEST(ControllerBugCondition, Bug2_kContinueDeadlock_ResponseNeverArrives) {
   std::atomic<bool> response_received{false};
   std::string response_text;
   std::mutex mu;
-  ctrl.OnResponse([&](const ActionCandidate& ac) {
-    std::lock_guard<std::mutex> lock(mu);
-    response_text = ac.response_text;
-    response_received.store(true);
+  ctrl.OnConversationItem([&](const conversation::ConversationItem& item, bool is_delta) {
+    if (!is_delta && item.kind == conversation::ItemKind::kAssistantMessage) {
+      std::lock_guard<std::mutex> lock(mu);
+      response_text = item.payload.value("text", "");
+      response_received.store(true);
+    }
   });
 
   ctrl.Start();
