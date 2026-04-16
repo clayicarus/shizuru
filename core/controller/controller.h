@@ -90,14 +90,6 @@ class Controller {
   using DiagnosticCallback = std::function<void(const std::string& message)>;
   void OnDiagnostic(DiagnosticCallback cb);
 
-  // Register callback for assistant text responses.
-  using ResponseCallback = std::function<void(const ActionCandidate& response)>;
-  void OnResponse(ResponseCallback cb);
-
-  // Register callback for streaming token deltas (only fires when use_streaming=true).
-  using StreamTokenCallback = std::function<void(const std::string& token)>;
-  void OnStreamToken(StreamTokenCallback cb);
-
   // Register callback for structured activity events (UI consumption).
   using ActivityCallback = std::function<void(const ActivityEvent& event)>;
   void OnActivity(ActivityCallback cb);
@@ -184,8 +176,6 @@ class Controller {
   std::mutex callbacks_mutex_;
   std::vector<TransitionCallback> transition_callbacks_;
   std::vector<DiagnosticCallback> diagnostic_callbacks_;
-  std::vector<ResponseCallback> response_callbacks_;
-  std::vector<StreamTokenCallback> stream_token_callbacks_;
   std::vector<ActivityCallback> activity_callbacks_;
   std::vector<ConversationItemCallback> conversation_item_callbacks_;
 };

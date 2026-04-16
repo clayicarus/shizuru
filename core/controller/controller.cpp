@@ -220,20 +220,6 @@ void Controller::OnDiagnostic(DiagnosticCallback cb) {
   diagnostic_callbacks_.push_back(std::move(cb));
 }
 
-// Register callback for assistant text responses.
-void Controller::OnResponse(ResponseCallback cb) {
-  std::lock_guard<std::mutex> lock(callbacks_mutex_);
-  assert(!loop_thread_.joinable() && "OnResponse must be called before Start()");
-  response_callbacks_.push_back(std::move(cb));
-}
-
-// Register callback for streaming token deltas.
-void Controller::OnStreamToken(StreamTokenCallback cb) {
-  std::lock_guard<std::mutex> lock(callbacks_mutex_);
-  assert(!loop_thread_.joinable() && "OnStreamToken must be called before Start()");
-  stream_token_callbacks_.push_back(std::move(cb));
-}
-
 // Register callback for structured activity events.
 void Controller::OnActivity(ActivityCallback cb) {
   std::lock_guard<std::mutex> lock(callbacks_mutex_);
@@ -621,12 +607,6 @@ void Controller::HandleThinking(const Observation& obs) {
           if (!first_token_logged_) {
             LOG_INFO("[{}] LLM first token received", MODULE_NAME);
             first_token_logged_ = true;
-          }
-          // Always fire raw token callbacks (for display / UI).
-          // UI receives the full stream including <think> tags and decides
-          // how to render them.
-          for (const auto& cb : stream_token_callbacks_) {
-            cb(token);
           }
           // Emit streaming assistant message as ConversationItem delta.
           // The token is a delta; UI accumulates.
@@ -1050,11 +1030,6 @@ void Controller::HandleResponding(ActionCandidate ac) {
 
   LOG_INFO("[{}] Responding: \"{}\"", MODULE_NAME, ac.response_text);
   EmitActivity(ActivityKind::kSpeaking);
-
-  // Notify response callbacks before final state transition.
-  for (const auto& cb : response_callbacks_) {
-    cb(ac);
-  }
 
   // Emit final response as complete ConversationItem for UI.
   {

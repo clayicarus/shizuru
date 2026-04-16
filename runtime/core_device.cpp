@@ -58,35 +58,6 @@ CoreDevice::CoreDevice(std::string device_id,
           EmitFrame(kControlOut, io::ControlFrame::Make("cancel"));
         }
       });
-
-  // Hook Controller::OnResponse to emit DataFrames for kResponse actions.
-  session_->GetController().OnResponse(
-      [this](const core::ActionCandidate& action) {
-        if (action.type == core::ActionType::kResponse) {
-          const std::string& text = action.response_text;
-          io::DataFrame frame;
-          frame.type = "text/plain";
-          frame.payload = std::vector<uint8_t>(text.begin(), text.end());
-          frame.source_device = device_id_;
-          frame.source_port = kTextOut;
-          frame.timestamp = std::chrono::steady_clock::now();
-          EmitFrame(kTextOut, std::move(frame));
-        }
-      });
-
-  // Hook Controller::OnStreamToken to emit partial token DataFrames.
-  // Consumers can distinguish streaming chunks via frame.metadata["streaming"] == "1".
-  session_->GetController().OnStreamToken(
-      [this](const std::string& token) {
-        io::DataFrame frame;
-        frame.type = "text/plain";
-        frame.payload = std::vector<uint8_t>(token.begin(), token.end());
-        frame.source_device = device_id_;
-        frame.source_port = kTextOut;
-        frame.metadata["streaming"] = "1";
-        frame.timestamp = std::chrono::steady_clock::now();
-        EmitFrame(kTextOut, std::move(frame));
-      });
 }
 
 std::string CoreDevice::GetDeviceId() const {
@@ -99,7 +70,6 @@ std::vector<io::PortDescriptor> CoreDevice::GetPortDescriptors() const {
       {kToolResultIn, io::PortDirection::kInput,  "action/tool_result"},
       {kVadIn,        io::PortDirection::kInput,  "vad/event"},
       {kSchedulerIn,  io::PortDirection::kInput,  "scheduler/event"},
-      {kTextOut,      io::PortDirection::kOutput, "text/plain"},
       {kTtsOut,       io::PortDirection::kOutput, "text/plain"},
       {kActionOut,    io::PortDirection::kOutput, "action/tool_call"},
       {kControlOut,   io::PortDirection::kOutput, "control/command"},

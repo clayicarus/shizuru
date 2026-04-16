@@ -34,7 +34,6 @@ namespace shizuru::app {
 
 class AppRuntime {
  public:
-  using OutputCallback = std::function<void(const std::string& text, bool is_partial)>;
   using DiagnosticCallback = std::function<void(const std::string& message)>;
   using ActivityCallback = std::function<void(const core::ActivityEvent& event)>;
   using ConversationItemCallback =
@@ -56,7 +55,6 @@ class AppRuntime {
   SchedulerDevice* Scheduler();
 
   // Register callbacks BEFORE calling Start().
-  void OnOutput(OutputCallback cb);
   void OnDiagnostic(DiagnosticCallback cb);
   void OnActivity(ActivityCallback cb);
   void OnConversationItem(ConversationItemCallback cb);
@@ -86,7 +84,6 @@ class AppRuntime {
   SchedulerDevice* scheduler_ = nullptr;         // non-owning, into bus_
 
   std::mutex cb_mutex_;
-  OutputCallback output_cb_;
   DiagnosticCallback diagnostic_cb_;
   ActivityCallback activity_cb_;
   ConversationItemCallback conversation_item_cb_;

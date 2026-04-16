@@ -44,11 +44,6 @@ runtime::ToolRegistry& AppRuntime::Tools() { return tools_; }
 
 SchedulerDevice* AppRuntime::Scheduler() { return scheduler_; }
 
-void AppRuntime::OnOutput(OutputCallback cb) {
-  std::lock_guard<std::mutex> lock(cb_mutex_);
-  output_cb_ = std::move(cb);
-}
-
 void AppRuntime::OnDiagnostic(DiagnosticCallback cb) {
   std::lock_guard<std::mutex> lock(cb_mutex_);
   diagnostic_cb_ = std::move(cb);
@@ -202,20 +197,6 @@ void AppRuntime::Start() {
   // ── Wire core routes ─────────────────────────────────────────────────────
   WireRoutes();
 
-  // ── Wire frame sink for output callback ──────────────────────────────────
-  bus_.OnFrameSink([this](io::DataFrame frame) {
-    if (frame.type != "text/plain") { return; }
-    std::string text(frame.payload.begin(), frame.payload.end());
-    bool is_partial = (frame.metadata.count("streaming") != 0 &&
-                       frame.metadata.at("streaming") == "1");
-    OutputCallback cb;
-    {
-      std::lock_guard<std::mutex> lock(cb_mutex_);
-      cb = output_cb_;
-    }
-    if (cb) { cb(text, is_partial); }
-  });
-
   // ── Start all auto_start devices ─────────────────────────────────────────
   bus_.StartAll();
 }
@@ -247,9 +228,6 @@ void AppRuntime::WireRoutes() {
   using runtime::RouteOptions;
   constexpr RouteOptions kDma{.requires_control_plane = false};
   constexpr RouteOptions kCtrl{.requires_control_plane = true};
-
-  // Core text output → app_output virtual sink.
-  bus_.AddRoute({"core", "text_out"}, {"app_output", "text_in"}, kDma);
 
   // TTS segment route: core streaming chunks → TTS device.
   bus_.AddRoute({"core", "tts_out"}, {"elevenlabs_tts", "text_in"}, kDma);
