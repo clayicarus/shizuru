@@ -59,6 +59,11 @@ void AppRuntime::OnActivity(ActivityCallback cb) {
   activity_cb_ = std::move(cb);
 }
 
+void AppRuntime::OnConversationItem(ConversationItemCallback cb) {
+  std::lock_guard<std::mutex> lock(cb_mutex_);
+  conversation_item_cb_ = std::move(cb);
+}
+
 void AppRuntime::Start() {
   // ── Build system prompt with persona ─────────────────────────────────────
   // TODO: Load user preferences and active followups from persistent memory.
@@ -167,6 +172,16 @@ void AppRuntime::Start() {
           cb = activity_cb_;
         }
         if (cb) { cb(event); }
+      });
+
+  core->Session().GetController().OnConversationItem(
+      [this](const core::conversation::ConversationItem& item, bool is_delta) {
+        ConversationItemCallback cb;
+        {
+          std::lock_guard<std::mutex> lock(cb_mutex_);
+          cb = conversation_item_cb_;
+        }
+        if (cb) { cb(item, is_delta); }
       });
 
   // ── Create ToolDispatchDevice ────────────────────────────────────────────

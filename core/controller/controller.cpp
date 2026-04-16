@@ -241,6 +241,12 @@ void Controller::OnActivity(ActivityCallback cb) {
   activity_callbacks_.push_back(std::move(cb));
 }
 
+void Controller::OnConversationItem(ConversationItemCallback cb) {
+  std::lock_guard<std::mutex> lock(callbacks_mutex_);
+  assert(!loop_thread_.joinable() && "OnConversationItem must be called before Start()");
+  conversation_item_callbacks_.push_back(std::move(cb));
+}
+
 // Validate + execute transition.
 bool Controller::TryTransition(Event event) {
   State current = state_.load();
@@ -286,6 +292,13 @@ void Controller::EmitActivity(ActivityKind kind, std::string detail) {
   ActivityEvent event{kind, std::move(detail)};
   for (const auto& cb : activity_callbacks_) {
     cb(event);
+  }
+}
+
+void Controller::EmitConversationItem(const conversation::ConversationItem& item,
+                                      bool is_delta) {
+  for (const auto& cb : conversation_item_callbacks_) {
+    cb(item, is_delta);
   }
 }
 
@@ -615,9 +628,15 @@ void Controller::HandleThinking(const Observation& obs) {
           for (const auto& cb : stream_token_callbacks_) {
             cb(token);
           }
+          // Emit streaming assistant message as ConversationItem delta.
+          // The token is a delta; UI accumulates.
+          {
+            auto item = conversation::MakeAssistantMessageItem(
+                "assistant", "Shizuru", token);
+            EmitConversationItem(item, /*is_delta=*/true);
+          }
           // TTS segmentation: filter out structured blocks before feeding to TTS.
-          // Strips <think>...</think>, <tool_call>...</tool_call>, and
-          // <tool_result>...</tool_result> from the token stream.
+          // Strips <think>...</think> and any stray legacy blocks from the token stream.
           if (tts_segment_) {
             std::string tts_clean;
             for (char ch : token) {
@@ -649,7 +668,7 @@ void Controller::HandleThinking(const Observation& obs) {
                   thinking_tag_buf_.clear();
                   matched = true;
                 }
-                // Check <tool_call> (11 chars)
+                // Check <tool_call> (11 chars) for backward compatibility.
                 if (!matched && thinking_tag_buf_.size() >= 11 &&
                     thinking_tag_buf_.substr(thinking_tag_buf_.size() - 11) == "<tool_call>") {
                   in_thinking_block_ = true;
@@ -658,7 +677,7 @@ void Controller::HandleThinking(const Observation& obs) {
                   thinking_tag_buf_.clear();
                   matched = true;
                 }
-                // Check <tool_result> (13 chars)
+                // Check <tool_result> (13 chars) for backward compatibility.
                 if (!matched && thinking_tag_buf_.size() >= 13 &&
                     thinking_tag_buf_.substr(thinking_tag_buf_.size() - 13) == "<tool_result>") {
                   in_thinking_block_ = true;
@@ -873,6 +892,17 @@ void Controller::HandleActing(ActionCandidate ac) {
                            R"(","arguments":)" + tc.arguments + "}";
       EmitActivity(ActivityKind::kToolDispatched, std::move(detail));
     }
+    // Emit tool call as ConversationItem for UI.
+    {
+      auto item = conversation::MakeToolCallItem(
+          "assistant", "Shizuru",
+          nlohmann::json::array({
+              {{"id", tc.id}, {"type", "function"},
+               {"function", {{"name", tc.name},
+                             {"arguments", conversation::ParseJsonOrString(tc.arguments)}}}}
+          }));
+      EmitConversationItem(item, /*is_delta=*/false);
+    }
 
     nlohmann::json request = {
         {"tool_call_id", tc.id},
@@ -954,23 +984,19 @@ void Controller::HandleActingResult(const Observation& obs) {
            MODULE_NAME, tool_call_id, success,
            pending_results_.size(), pending_tool_calls_.size());
 
-  // Inject <tool_result> marker into the streaming text flow so the UI
-  // can render it inline within the same assistant bubble.
   {
-    std::string marker = "<tool_result>{\"id\":\"" + tool_call_id +
-                         "\",\"name\":\"" + tool_name +
-                         "\",\"success\":" + (success ? "true" : "false") +
-                         ",\"output\":" + obs.content +
-                         "}</tool_result>";
-    for (const auto& cb : stream_token_callbacks_) {
-      cb(marker);
-    }
-
     std::string detail = R"({"id":")" + tool_call_id +
                          R"(","name":")" + tool_name +
                          R"(","success":)" + (success ? "true" : "false") +
                          R"(,"result":)" + obs.content + "}";
     EmitActivity(ActivityKind::kToolResultReceived, std::move(detail));
+  }
+  // Emit tool result as ConversationItem for UI.
+  {
+    auto result_item = conversation::MakeToolResultItem(
+        tool_name, tool_call_id,
+        conversation::ParseJsonOrString(obs.content));
+    EmitConversationItem(result_item, /*is_delta=*/false);
   }
 
   // Check if all results are in.
@@ -1028,6 +1054,13 @@ void Controller::HandleResponding(ActionCandidate ac) {
   // Notify response callbacks before final state transition.
   for (const auto& cb : response_callbacks_) {
     cb(ac);
+  }
+
+  // Emit final response as complete ConversationItem for UI.
+  {
+    auto resp_item = conversation::MakeAssistantMessageItem(
+        "assistant", "Shizuru", ac.response_text);
+    EmitConversationItem(resp_item, /*is_delta=*/false);
   }
 
   // Record response as MemoryEntry.

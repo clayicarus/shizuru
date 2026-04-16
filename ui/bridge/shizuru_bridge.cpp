@@ -60,6 +60,7 @@
 
 // Core types
 #include "core/controller/types.h"
+#include "core/conversation/item.h"
 #include "core/policy/types.h"
 #include "runtime/route_table.h"
 
@@ -172,7 +173,6 @@ struct ShizuruContext {
   ShizuruActivityCallback activity_cb = nullptr;
   void* activity_ud = nullptr;
   std::mutex cb_mutex;
-  std::string accumulated_text;
 
   // State polling thread.
   std::thread state_poll_thread;
@@ -382,29 +382,20 @@ int32_t shizuru_start(ShizuruHandle handle) {
   auto* ctx = static_cast<ShizuruContext*>(handle);
   ShizuruContext* raw = ctx;
 
-  // Wire AppRuntime callbacks → C callbacks (heap-allocate strings for Dart).
-  ctx->app->OnOutput([raw](const std::string& text, bool is_partial) {
+  // Wire ConversationItem callback → C output callback.
+  // Serializes ConversationItem to JSON at the bridge boundary.
+  ctx->app->OnConversationItem(
+      [raw](const core::conversation::ConversationItem& item, bool is_delta) {
     ShizuruOutputCallback cb; void* ud;
-    char* heap = nullptr; int32_t flag = 0;
     {
       std::lock_guard<std::mutex> lock(raw->cb_mutex);
       cb = raw->output_cb; ud = raw->output_ud;
-      if (cb) {
-        if (is_partial) {
-          raw->accumulated_text += text;
-          const auto& snap = raw->accumulated_text;
-          heap = static_cast<char*>(std::malloc(snap.size() + 1));
-          std::memcpy(heap, snap.c_str(), snap.size() + 1);
-          flag = 1;
-        } else {
-          raw->accumulated_text.clear();
-          heap = static_cast<char*>(std::malloc(text.size() + 1));
-          std::memcpy(heap, text.c_str(), text.size() + 1);
-          flag = 0;
-        }
-      }
     }
-    if (cb && heap) { cb(heap, flag, ud); }
+    if (!cb) { return; }
+    std::string json = core::conversation::SerializeConversationItem(item);
+    auto* heap = static_cast<char*>(std::malloc(json.size() + 1));
+    std::memcpy(heap, json.c_str(), json.size() + 1);
+    cb(heap, is_delta ? 1 : 0, ud);
   });
 
   ctx->app->OnDiagnostic([raw](const std::string& msg) {

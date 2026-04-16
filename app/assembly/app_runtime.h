@@ -37,6 +37,8 @@ class AppRuntime {
   using OutputCallback = std::function<void(const std::string& text, bool is_partial)>;
   using DiagnosticCallback = std::function<void(const std::string& message)>;
   using ActivityCallback = std::function<void(const core::ActivityEvent& event)>;
+  using ConversationItemCallback =
+      std::function<void(const core::conversation::ConversationItem& item, bool is_delta)>;
 
   explicit AppRuntime(AppConfig config);
   ~AppRuntime();
@@ -57,6 +59,7 @@ class AppRuntime {
   void OnOutput(OutputCallback cb);
   void OnDiagnostic(DiagnosticCallback cb);
   void OnActivity(ActivityCallback cb);
+  void OnConversationItem(ConversationItemCallback cb);
 
   // Create CoreDevice + ToolDispatchDevice + SchedulerDevice, wire core
   // routes, register builtin tools, call bus.StartAll().
@@ -86,6 +89,7 @@ class AppRuntime {
   OutputCallback output_cb_;
   DiagnosticCallback diagnostic_cb_;
   ActivityCallback activity_cb_;
+  ConversationItemCallback conversation_item_cb_;
 };
 
 }  // namespace shizuru::app

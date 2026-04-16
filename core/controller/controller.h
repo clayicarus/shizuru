@@ -102,6 +102,14 @@ class Controller {
   using ActivityCallback = std::function<void(const ActivityEvent& event)>;
   void OnActivity(ActivityCallback cb);
 
+  // Register callback for conversation items (unified UI data source).
+  // Fires for every item that should appear in the conversation view:
+  // streaming token deltas, tool calls, tool results, final responses.
+  // is_delta=true means this is a partial update to the current item.
+  using ConversationItemCallback =
+      std::function<void(const conversation::ConversationItem& item, bool is_delta)>;
+  void OnConversationItem(ConversationItemCallback cb);
+
  private:
   static constexpr char MODULE_NAME[] = "Controller";
 
@@ -119,6 +127,7 @@ class Controller {
   void HandleInterrupt();                    // Cancel in-progress work
   void EmitDiagnostic(const std::string& message); // Notify diagnostic callbacks
   void EmitActivity(ActivityKind kind, std::string detail = {}); // Notify activity callbacks
+  void EmitConversationItem(const conversation::ConversationItem& item, bool is_delta);
 
   // Static transition table
   static const std::unordered_map<std::pair<State, Event>, State, PairHash>
@@ -178,6 +187,7 @@ class Controller {
   std::vector<ResponseCallback> response_callbacks_;
   std::vector<StreamTokenCallback> stream_token_callbacks_;
   std::vector<ActivityCallback> activity_callbacks_;
+  std::vector<ConversationItemCallback> conversation_item_callbacks_;
 };
 
 }  // namespace shizuru::core
