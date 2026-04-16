@@ -130,6 +130,10 @@ class _AppStartupState extends State<_AppStartup> {
         agent.setTranscriptCallback((text) {
           conv.addUserMessage(text);
         });
+
+        agent.setActivityCallback((kind, detail) {
+          conv.onToolActivity(kind, detail);
+        });
       }
     }
 

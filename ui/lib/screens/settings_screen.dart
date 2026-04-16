@@ -105,6 +105,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         conv.addUserMessage(text);
       });
 
+      agent.setActivityCallback((kind, detail) {
+        conv.onToolActivity(kind, detail);
+      });
+
       try {
         await agent.initialize(config);
         setState(() => _saving = false);

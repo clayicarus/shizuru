@@ -22,6 +22,7 @@ class AgentProvider extends ChangeNotifier {
   double _audioLevel = 0.0;
   void Function(String text, bool isPartial)? _outputCallback;
   void Function(String text)? _transcriptCallback;
+  void Function(int kind, String detail)? _activityCallback;
 
   // Activity tracking for fine-grained UI status.
   String _activity = '';
@@ -68,6 +69,10 @@ class AgentProvider extends ChangeNotifier {
   void setTranscriptCallback(void Function(String text) cb) {
     _transcriptCallback = cb;
     _bridge?.onTranscript(cb);
+  }
+
+  void setActivityCallback(void Function(int kind, String detail) cb) {
+    _activityCallback = cb;
   }
 
   Future<void> initialize(BridgeConfig config) async {
@@ -213,6 +218,7 @@ class AgentProvider extends ChangeNotifier {
         _activity = 'Turn limit reached';
         break;
     }
+    _activityCallback?.call(kind, detail);
     notifyListeners();
   }
 
