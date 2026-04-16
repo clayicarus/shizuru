@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../providers/conversation_provider.dart';
@@ -52,6 +53,7 @@ class _MessageBubbleState extends State<MessageBubble>
     final isUser = widget.message.role == 'user';
     final isStreaming = widget.message.isStreaming;
     final hasText = widget.message.text.isNotEmpty;
+    final hasEvents = widget.message.events.isNotEmpty;
 
     final bubbleColor = isUser
         ? Theme.of(context).colorScheme.primaryContainer
@@ -82,7 +84,7 @@ class _MessageBubbleState extends State<MessageBubble>
                 style: Theme.of(context).textTheme.labelSmall,
               ),
             const SizedBox(height: 4),
-            if (isStreaming && !hasText)
+            if (isStreaming && !hasText && !hasEvents)
               _DotsIndicator(controller: _dotsController)
             else if (!isUser)
               ..._buildAssistantContent(context)
@@ -98,8 +100,6 @@ class _MessageBubbleState extends State<MessageBubble>
   void _copyToClipboard(BuildContext context) {
     final text = widget.message.text
         .replaceAll(RegExp(r'<think>.*?</think>', dotAll: true), '')
-        .replaceAll(RegExp(r'<tool_call>.*?</tool_call>', dotAll: true), '')
-        .replaceAll(RegExp(r'<tool_result>.*?</tool_result>', dotAll: true), '')
         .trim();
     if (text.isEmpty) { return; }
     Clipboard.setData(ClipboardData(text: text));
@@ -108,19 +108,41 @@ class _MessageBubbleState extends State<MessageBubble>
     );
   }
 
-  // Parse assistant text into segments: plain text, <think>, <tool_call>, <tool_result>.
+  // Parse assistant text into segments: plain text and <think>.
   static final _segmentRegex = RegExp(
-    r'<think>(.*?)</think>|<tool_call>(.*?)</tool_call>|<tool_result>(.*?)</tool_result>',
+    r'<think>(.*?)</think>',
     dotAll: true,
   );
 
   List<Widget> _buildAssistantContent(BuildContext context) {
-    final text = widget.message.text;
+    final widgets = <Widget>[];
+
+    for (final event in widget.message.events) {
+      switch (event.kind) {
+        case ConversationToolEventKind.toolCall:
+          widgets.add(_buildToolCallInline(context, event.data));
+          widgets.add(const SizedBox(height: 4));
+          break;
+        case ConversationToolEventKind.toolResult:
+          widgets.add(_buildToolResultInline(context, event.data));
+          widgets.add(const SizedBox(height: 4));
+          break;
+      }
+    }
+
+    widgets.addAll(_buildAssistantTextContent(context, widget.message.text));
+    if (widgets.isNotEmpty && widgets.last is SizedBox) {
+      widgets.removeLast();
+    }
+
+    return widgets;
+  }
+
+  List<Widget> _buildAssistantTextContent(BuildContext context, String text) {
     final widgets = <Widget>[];
     int lastEnd = 0;
 
     for (final match in _segmentRegex.allMatches(text)) {
-      // Plain text before this match.
       if (match.start > lastEnd) {
         final plain = text.substring(lastEnd, match.start).trim();
         if (plain.isNotEmpty) {
@@ -131,31 +153,22 @@ class _MessageBubbleState extends State<MessageBubble>
       lastEnd = match.end;
 
       if (match.group(1) != null) {
-        // <think> block
         widgets.add(_buildThinkingBlock(context, match.group(1)!));
-        widgets.add(const SizedBox(height: 4));
-      } else if (match.group(2) != null) {
-        // <tool_call> block
-        widgets.add(_buildToolCallInline(context, match.group(2)!));
-        widgets.add(const SizedBox(height: 4));
-      } else if (match.group(3) != null) {
-        // <tool_result> block
-        widgets.add(_buildToolResultInline(context, match.group(3)!));
         widgets.add(const SizedBox(height: 4));
       }
     }
 
-    // Remaining plain text after last match.
     if (lastEnd < text.length) {
       final plain = text.substring(lastEnd).trim();
       if (plain.isNotEmpty) {
         widgets.add(Text(plain));
+        widgets.add(const SizedBox(height: 4));
       }
     }
 
-    // If no segments matched at all, just show the raw text.
     if (widgets.isEmpty && text.isNotEmpty) {
       widgets.add(Text(text));
+      widgets.add(const SizedBox(height: 4));
     }
 
     return widgets;
@@ -205,14 +218,10 @@ class _MessageBubbleState extends State<MessageBubble>
     );
   }
 
-  Widget _buildToolCallInline(BuildContext context, String jsonStr) {
-    String name = 'tool';
-    String args = '';
-    try {
-      final json = jsonDecode(jsonStr) as Map<String, dynamic>;
-      name = json['name'] as String? ?? 'tool';
-      args = json['arguments']?.toString() ?? '';
-    } catch (_) {}
+  Widget _buildToolCallInline(BuildContext context, Map<String, dynamic> json) {
+    final String name = json['name'] as String? ?? 'tool';
+    final dynamic argsValue = json['arguments'];
+    final String args = _formatValue(argsValue);
 
     return Container(
       width: double.infinity,
@@ -242,14 +251,21 @@ class _MessageBubbleState extends State<MessageBubble>
     );
   }
 
-  Widget _buildToolResultInline(BuildContext context, String jsonStr) {
-    bool success = false;
+  Widget _buildToolResultInline(BuildContext context, Map<String, dynamic> json) {
+    final bool success = json['success'] as bool? ?? false;
+    final dynamic result = json['result'];
     String output = '';
-    try {
-      final json = jsonDecode(jsonStr) as Map<String, dynamic>;
-      success = json['success'] as bool? ?? false;
-      output = json['output']?.toString() ?? '';
-    } catch (_) {}
+    if (result is Map<String, dynamic>) {
+      if (result.containsKey('output')) {
+        output = _formatValue(result['output']);
+      } else if (result.containsKey('error')) {
+        output = _formatValue(result['error']);
+      } else {
+        output = _formatValue(result);
+      }
+    } else {
+      output = _formatValue(result);
+    }
 
     return Container(
       width: double.infinity,
@@ -282,6 +298,12 @@ class _MessageBubbleState extends State<MessageBubble>
         ],
       ),
     );
+  }
+
+  String _formatValue(dynamic value) {
+    if (value == null) { return ''; }
+    if (value is String) { return value; }
+    return const JsonEncoder().convert(value);
   }
 }
 
