@@ -1,30 +1,45 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-import 'package:ui/main.dart';
+import 'package:shizuru_ui/providers/conversation_provider.dart';
+import 'package:shizuru_ui/widgets/message_bubble.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('MessageBubble renders structured tool events without inline tags',
+      (WidgetTester tester) async {
+    final message = ConversationMessage(
+      role: 'assistant',
+      text: 'Final answer',
+      timestamp: DateTime(2026, 4, 16, 12, 0, 0),
+      events: [
+        ConversationToolEvent(
+          kind: ConversationToolEventKind.toolCall,
+          data: {
+            'id': 'call_1',
+            'name': 'search',
+            'arguments': {'q': 'weather'},
+          },
+        ),
+        ConversationToolEvent(
+          kind: ConversationToolEventKind.toolResult,
+          data: {
+            'id': 'call_1',
+            'name': 'search',
+            'success': true,
+            'result': {'success': true, 'output': 'sunny'},
+          },
+        ),
+      ],
+    );
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: MessageBubble(message: message),
+      ),
+    ));
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    expect(find.textContaining('search'), findsOneWidget);
+    expect(find.text('Final answer'), findsOneWidget);
+    expect(find.textContaining('<tool_call>'), findsNothing);
+    expect(find.textContaining('<tool_result>'), findsNothing);
   });
 }
