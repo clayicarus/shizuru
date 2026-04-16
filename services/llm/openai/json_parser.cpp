@@ -259,14 +259,6 @@ bool ParseStreamChunk(const std::string& data_line,
         result.candidate.tool_calls.push_back(std::move(call));
       }
 
-      // Append <tool_call> markers to accumulated_content so the streaming
-      // callback delivers them to the UI as part of the text flow.
-      for (const auto& tc : result.candidate.tool_calls) {
-        accumulated_content += "<tool_call>{\"name\":\"" + tc.name +
-                               "\",\"id\":\"" + tc.id +
-                               "\",\"arguments\":" + tc.arguments +
-                               "}</tool_call>";
-      }
     } else if (!accumulated_content.empty()) {
       result.candidate.type = core::ActionType::kResponse;
       result.candidate.response_text = accumulated_content;
