@@ -2,58 +2,87 @@ import 'dart:convert';
 
 import 'package:flutter/widgets.dart';
 
-enum ConversationToolEventKind {
-  toolCall,
-  toolResult,
-}
+// ---------------------------------------------------------------------------
+// Data model
+// ---------------------------------------------------------------------------
 
-class ConversationToolEvent {
-  final ConversationToolEventKind kind;
-  final Map<String, dynamic> data;
+enum SegmentKind { text, thinking, toolCall, toolResult }
 
-  ConversationToolEvent({
-    required this.kind,
-    required this.data,
-  });
+class BubbleSegment {
+  final SegmentKind kind;
+  final String? itemId;
+  String text; // text / thinking content (mutable for streaming append)
+  Map<String, dynamic>? data; // toolCall / toolResult structured data
+
+  BubbleSegment.text(this.text, {this.itemId})
+    : kind = SegmentKind.text,
+      data = null;
+  BubbleSegment.thinking(this.text, {this.itemId})
+    : kind = SegmentKind.thinking,
+      data = null;
+  BubbleSegment.toolCall(this.data, {this.itemId})
+    : kind = SegmentKind.toolCall,
+      text = '';
+  BubbleSegment.toolResult(this.data, {this.itemId})
+    : kind = SegmentKind.toolResult,
+      text = '';
 }
 
 class ConversationMessage {
   final String role; // 'user' | 'assistant'
-  String text;
   final DateTime timestamp;
+  final String? turnGroupId;
   bool isStreaming;
-  final List<ConversationToolEvent> events;
+  final List<BubbleSegment> segments;
+  final Set<String> finalizedTextItemIds;
 
   ConversationMessage({
     required this.role,
-    required this.text,
     required this.timestamp,
+    this.turnGroupId,
     this.isStreaming = false,
-    List<ConversationToolEvent>? events,
-  }) : events = events ?? <ConversationToolEvent>[];
+    List<BubbleSegment>? segments,
+    Set<String>? finalizedTextItemIds,
+  }) : segments = segments ?? <BubbleSegment>[],
+       finalizedTextItemIds = finalizedTextItemIds ?? <String>{};
+
+  /// Convenience: concatenated plain text (for clipboard, accessibility).
+  String get plainText => segments
+      .where((s) => s.kind == SegmentKind.text)
+      .map((s) => s.text)
+      .join();
 }
+
+// ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
 
 class ConversationProvider extends ChangeNotifier {
   final List<ConversationMessage> _messages = [];
   final ScrollController scrollController = ScrollController();
 
-  int _streamingIndex = -1;
+  int _fallbackStreamingIndex = -1;
+
+  /// Streaming state for <think> tag detection across token boundaries.
+  bool _inThinkBlock = false;
+  String _tagBuf = '';
 
   List<ConversationMessage> get messages => List.unmodifiable(_messages);
 
   void addUserMessage(String text) {
-    _messages.add(ConversationMessage(
-      role: 'user',
-      text: text,
-      timestamp: DateTime.now(),
-    ));
+    _closeStreamingAssistantBubbles();
+    _messages.add(
+      ConversationMessage(
+        role: 'user',
+        timestamp: DateTime.now(),
+        segments: [BubbleSegment.text(text)],
+      ),
+    );
     notifyListeners();
     _scrollToBottom(animate: true);
   }
 
   /// Single entry point for all conversation items from C++.
-  /// [itemJson] is a serialized ConversationItem.
-  /// [isDelta] is true for streaming token deltas.
   void onConversationItem(String itemJson, bool isDelta) {
     Map<String, dynamic> item;
     try {
@@ -63,20 +92,26 @@ class ConversationProvider extends ChangeNotifier {
     }
 
     final kind = item['kind'] as String? ?? '';
+    final itemId = item['item_id'] as String? ?? '';
+    final turnGroupId = item['turn_group_id'] as String? ?? '';
     final payload = item['payload'] as Map<String, dynamic>? ?? {};
 
     switch (kind) {
       case 'assistant_message':
-        _handleAssistantMessage(payload, isDelta);
+        _handleAssistantMessage(
+          payload,
+          isDelta,
+          itemId: itemId,
+          turnGroupId: turnGroupId,
+        );
         break;
       case 'tool_call':
-        _handleToolCall(payload);
+        _handleToolCall(payload, itemId: itemId, turnGroupId: turnGroupId);
         break;
       case 'tool_result':
-        _handleToolResult(payload);
+        _handleToolResult(payload, itemId: itemId, turnGroupId: turnGroupId);
         break;
       default:
-        // Ignore unknown kinds (human_message, system_event, etc.)
         break;
     }
 
@@ -84,99 +119,275 @@ class ConversationProvider extends ChangeNotifier {
     _scrollToBottom(animate: !isDelta);
   }
 
-  void _handleAssistantMessage(Map<String, dynamic> payload, bool isDelta) {
+  // ── Streaming delta handling ───────────────────────────────────────────
+
+  void _handleAssistantMessage(
+    Map<String, dynamic> payload,
+    bool isDelta, {
+    required String itemId,
+    required String turnGroupId,
+  }) {
     final text = payload['text'] as String? ?? '';
     if (isDelta) {
-      // Streaming token delta — append to current bubble.
-      final bubble = _ensureAssistantBubble();
-      bubble.text += text;
+      final bubble = _ensureAssistantBubble(
+        turnGroupId: turnGroupId,
+        streaming: true,
+      );
+      _appendStreamingText(bubble, text, itemId: itemId);
     } else {
-      // Final complete response.
-      if (_streamingIndex >= 0 && _streamingIndex < _messages.length) {
-        final bubble = _messages[_streamingIndex];
-        bubble.isStreaming = false;
-        // Preserve <think> blocks from streaming, append final text.
-        final thinkRegex = RegExp(r'<think>.*?</think>', dotAll: true);
-        final blocks = thinkRegex.allMatches(bubble.text)
-            .map((m) => m.group(0)!)
-            .join();
-        bubble.text = blocks.isNotEmpty ? '$blocks$text' : text;
-        _streamingIndex = -1;
+      _finalizeBubble(text, itemId: itemId, turnGroupId: turnGroupId);
+    }
+  }
+
+  /// Append streaming tokens to the current bubble, splitting <think> blocks
+  /// into separate segments in real time.
+  void _appendStreamingText(
+    ConversationMessage bubble,
+    String token, {
+    required String itemId,
+  }) {
+    for (int i = 0; i < token.length; i++) {
+      final ch = token[i];
+      _tagBuf += ch;
+
+      if (_inThinkBlock) {
+        // Inside <think> — accumulate into the thinking segment.
+        _lastThinkingSegment(bubble, itemId: itemId).text += ch;
+        // Check for </think> closing tag.
+        if (_tagBuf.endsWith('</think>')) {
+          // Remove the closing tag text from the segment content.
+          final seg = _lastThinkingSegment(bubble, itemId: itemId);
+          seg.text = seg.text.substring(0, seg.text.length - '</think>'.length);
+          _inThinkBlock = false;
+          _tagBuf = '';
+        }
       } else {
-        _messages.add(ConversationMessage(
-          role: 'assistant',
-          text: text,
-          timestamp: DateTime.now(),
-        ));
+        // Outside <think> — accumulate into the text segment.
+        _lastTextSegment(bubble, itemId: itemId).text += ch;
+        // Check for <think> opening tag.
+        if (_tagBuf.endsWith('<think>')) {
+          // Remove the opening tag text from the segment content.
+          final seg = _lastTextSegment(bubble, itemId: itemId);
+          seg.text = seg.text.substring(0, seg.text.length - '<think>'.length);
+          // If the text segment is now empty, remove it.
+          if (seg.text.isEmpty) {
+            bubble.segments.remove(seg);
+          }
+          // Start a new thinking segment.
+          bubble.segments.add(BubbleSegment.thinking('', itemId: itemId));
+          _inThinkBlock = true;
+          _tagBuf = '';
+        }
       }
     }
   }
 
-  void _handleToolCall(Map<String, dynamic> payload) {
-    final bubble = _ensureAssistantBubble();
+  BubbleSegment _lastTextSegment(
+    ConversationMessage bubble, {
+    required String itemId,
+  }) {
+    if (bubble.segments.isNotEmpty &&
+        bubble.segments.last.kind == SegmentKind.text &&
+        bubble.segments.last.itemId == itemId) {
+      return bubble.segments.last;
+    }
+    final seg = BubbleSegment.text('', itemId: itemId);
+    bubble.segments.add(seg);
+    return seg;
+  }
+
+  BubbleSegment _lastThinkingSegment(
+    ConversationMessage bubble, {
+    required String itemId,
+  }) {
+    if (bubble.segments.isNotEmpty &&
+        bubble.segments.last.kind == SegmentKind.thinking &&
+        bubble.segments.last.itemId == itemId) {
+      return bubble.segments.last;
+    }
+    final seg = BubbleSegment.thinking('', itemId: itemId);
+    bubble.segments.add(seg);
+    return seg;
+  }
+
+  // ── Final response handling ────────────────────────────────────────────
+
+  void _finalizeBubble(
+    String finalText, {
+    required String itemId,
+    required String turnGroupId,
+  }) {
+    final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId);
+    bubble.isStreaming = false;
+
+    _replaceTextSegments(bubble, itemId: itemId, finalText: finalText);
+
+    if (_fallbackStreamingIndex >= 0 &&
+        _fallbackStreamingIndex < _messages.length &&
+        identical(_messages[_fallbackStreamingIndex], bubble)) {
+      _fallbackStreamingIndex = -1;
+    }
+    _inThinkBlock = false;
+    _tagBuf = '';
+  }
+
+  /// Replace only the text segments emitted for the same assistant stream item,
+  /// preserving every other segment in place.
+  void _replaceTextSegments(
+    ConversationMessage bubble, {
+    required String itemId,
+    required String finalText,
+  }) {
+    final replacement = <BubbleSegment>[];
+    bool inserted = false;
+
+    for (final seg in bubble.segments) {
+      final provisionalTextFromEarlierStream =
+          seg.kind == SegmentKind.text &&
+          seg.itemId != null &&
+          seg.itemId != itemId &&
+          !bubble.finalizedTextItemIds.contains(seg.itemId);
+      if (provisionalTextFromEarlierStream) {
+        continue;
+      }
+
+      final sameStreamText =
+          seg.kind == SegmentKind.text && seg.itemId == itemId;
+      if (sameStreamText) {
+        if (!inserted && finalText.isNotEmpty) {
+          replacement.add(BubbleSegment.text(finalText, itemId: itemId));
+        }
+        inserted = true;
+        continue;
+      }
+      replacement.add(seg);
+    }
+
+    if (!inserted && finalText.isNotEmpty) {
+      replacement.add(BubbleSegment.text(finalText, itemId: itemId));
+    }
+
+    bubble.segments
+      ..clear()
+      ..addAll(replacement);
+    bubble.finalizedTextItemIds.add(itemId);
+  }
+
+  // ── Tool call / result handling ────────────────────────────────────────
+
+  void _handleToolCall(
+    Map<String, dynamic> payload, {
+    required String itemId,
+    required String turnGroupId,
+  }) {
+    final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId);
+    bubble.isStreaming = false;
     final toolCalls = payload['tool_calls'] as List<dynamic>? ?? [];
     for (final tc in toolCalls) {
       if (tc is Map<String, dynamic>) {
         final fn = tc['function'] as Map<String, dynamic>? ?? {};
-        bubble.events.add(ConversationToolEvent(
-          kind: ConversationToolEventKind.toolCall,
-          data: {
+        bubble.segments.add(
+          BubbleSegment.toolCall({
             'id': tc['id'] ?? '',
             'name': fn['name'] ?? 'tool',
             'arguments': fn['arguments'],
-          },
-        ));
+          }, itemId: itemId),
+        );
       }
     }
   }
 
-  void _handleToolResult(Map<String, dynamic> payload) {
-    final bubble = _ensureAssistantBubble();
+  void _handleToolResult(
+    Map<String, dynamic> payload, {
+    required String itemId,
+    required String turnGroupId,
+  }) {
+    final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId);
     final content = payload['content'];
     bool success = false;
     if (content is Map<String, dynamic>) {
       success = content['success'] as bool? ?? false;
     }
-    bubble.events.add(ConversationToolEvent(
-      kind: ConversationToolEventKind.toolResult,
-      data: {
+    bubble.segments.add(
+      BubbleSegment.toolResult({
         'tool_name': payload['tool_name'] ?? '',
         'tool_call_id': payload['tool_call_id'] ?? '',
         'success': success,
         'result': content,
-      },
-    ));
+      }, itemId: itemId),
+    );
   }
 
-  ConversationMessage _ensureAssistantBubble() {
-    if (_streamingIndex >= 0 && _streamingIndex < _messages.length) {
-      return _messages[_streamingIndex];
+  // ── Helpers ────────────────────────────────────────────────────────────
+
+  ConversationMessage _ensureAssistantBubble({
+    required String turnGroupId,
+    bool streaming = false,
+  }) {
+    if (turnGroupId.isNotEmpty) {
+      final existingIndex = _messages.indexWhere(
+        (m) => m.role == 'assistant' && m.turnGroupId == turnGroupId,
+      );
+      if (existingIndex >= 0) {
+        final bubble = _messages[existingIndex];
+        if (streaming) {
+          bubble.isStreaming = true;
+        }
+        return bubble;
+      }
     }
-    _messages.add(ConversationMessage(
-      role: 'assistant',
-      text: '',
-      timestamp: DateTime.now(),
-      isStreaming: true,
-    ));
-    _streamingIndex = _messages.length - 1;
-    return _messages[_streamingIndex];
+
+    if (turnGroupId.isEmpty &&
+        _fallbackStreamingIndex >= 0 &&
+        _fallbackStreamingIndex < _messages.length) {
+      final bubble = _messages[_fallbackStreamingIndex];
+      if (streaming) {
+        bubble.isStreaming = true;
+      }
+      return bubble;
+    }
+
+    _messages.add(
+      ConversationMessage(
+        role: 'assistant',
+        timestamp: DateTime.now(),
+        turnGroupId: turnGroupId.isEmpty ? null : turnGroupId,
+        isStreaming: streaming,
+      ),
+    );
+    if (turnGroupId.isEmpty) {
+      _fallbackStreamingIndex = _messages.length - 1;
+    }
+    _inThinkBlock = false;
+    _tagBuf = '';
+    return _messages.last;
   }
 
-  /// Legacy callback adapter — routes to onConversationItem.
-  /// Used by existing onOutput bridge callback.
+  void _closeStreamingAssistantBubbles() {
+    for (final message in _messages) {
+      if (message.role == 'assistant' && message.isStreaming) {
+        message.isStreaming = false;
+      }
+    }
+    _fallbackStreamingIndex = -1;
+    _inThinkBlock = false;
+    _tagBuf = '';
+  }
+
+  /// Legacy callback adapter.
   void onOutputChunk(String text, bool isPartial) {
     onConversationItem(text, isPartial);
   }
 
   void onToolActivity(int kind, String detail) {
-    // No longer used for bubble construction — activity events are
-    // now delivered as ConversationItems through the output callback.
-    // Keep for debug panel only.
+    // Not used for bubble construction — kept for debug panel.
   }
 
   void clearMessages() {
     _messages.clear();
-    _streamingIndex = -1;
+    _fallbackStreamingIndex = -1;
+    _inThinkBlock = false;
+    _tagBuf = '';
     notifyListeners();
   }
 

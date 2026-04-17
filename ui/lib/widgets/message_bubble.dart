@@ -52,8 +52,7 @@ class _MessageBubbleState extends State<MessageBubble>
   Widget build(BuildContext context) {
     final isUser = widget.message.role == 'user';
     final isStreaming = widget.message.isStreaming;
-    final hasText = widget.message.text.isNotEmpty;
-    final hasEvents = widget.message.events.isNotEmpty;
+    final hasSegments = widget.message.segments.isNotEmpty;
 
     final bubbleColor = isUser
         ? Theme.of(context).colorScheme.primaryContainer
@@ -76,103 +75,74 @@ class _MessageBubbleState extends State<MessageBubble>
             borderRadius: BorderRadius.circular(12),
           ),
           child: Column(
-            crossAxisAlignment:
-                isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            crossAxisAlignment: isUser
+                ? CrossAxisAlignment.end
+                : CrossAxisAlignment.start,
             children: [
               Text(
                 '${isUser ? 'you' : 'assistant'}  $timeStr',
                 style: Theme.of(context).textTheme.labelSmall,
               ),
-            const SizedBox(height: 4),
-            if (isStreaming && !hasText && !hasEvents)
-              _DotsIndicator(controller: _dotsController)
-            else if (!isUser)
-              ..._buildAssistantContent(context)
-            else
-              Text(widget.message.text),
-          ],
+              const SizedBox(height: 4),
+              if (isStreaming && !hasSegments)
+                _DotsIndicator(controller: _dotsController)
+              else if (isUser)
+                Text(widget.message.plainText)
+              else
+                ..._buildSegments(context),
+            ],
+          ),
         ),
       ),
-    ),
     );
   }
 
   void _copyToClipboard(BuildContext context) {
-    final text = widget.message.text
-        .replaceAll(RegExp(r'<think>.*?</think>', dotAll: true), '')
-        .trim();
-    if (text.isEmpty) { return; }
+    final text = widget.message.plainText.trim();
+    if (text.isEmpty) {
+      return;
+    }
     Clipboard.setData(ClipboardData(text: text));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Copied'), duration: Duration(seconds: 1)),
     );
   }
 
-  // Parse assistant text into segments: plain text and <think>.
-  static final _segmentRegex = RegExp(
-    r'<think>(.*?)</think>',
-    dotAll: true,
-  );
+  // ── Segment rendering (time-ordered) ─────────────────────────────────
 
-  List<Widget> _buildAssistantContent(BuildContext context) {
+  List<Widget> _buildSegments(BuildContext context) {
     final widgets = <Widget>[];
-
-    for (final event in widget.message.events) {
-      switch (event.kind) {
-        case ConversationToolEventKind.toolCall:
-          widgets.add(_buildToolCallInline(context, event.data));
+    for (final seg in widget.message.segments) {
+      switch (seg.kind) {
+        case SegmentKind.text:
+          final trimmed = seg.text.trim();
+          if (trimmed.isNotEmpty) {
+            widgets.add(Text(trimmed));
+            widgets.add(const SizedBox(height: 4));
+          }
+          break;
+        case SegmentKind.thinking:
+          widgets.add(_buildThinkingBlock(context, seg.text));
           widgets.add(const SizedBox(height: 4));
           break;
-        case ConversationToolEventKind.toolResult:
-          widgets.add(_buildToolResultInline(context, event.data));
+        case SegmentKind.toolCall:
+          widgets.add(_buildToolCallInline(context, seg.data!));
+          widgets.add(const SizedBox(height: 4));
+          break;
+        case SegmentKind.toolResult:
+          widgets.add(_buildToolResultInline(context, seg.data!));
           widgets.add(const SizedBox(height: 4));
           break;
       }
     }
-
-    widgets.addAll(_buildAssistantTextContent(context, widget.message.text));
+    // Remove trailing spacer.
     if (widgets.isNotEmpty && widgets.last is SizedBox) {
       widgets.removeLast();
     }
-
     return widgets;
   }
 
-  List<Widget> _buildAssistantTextContent(BuildContext context, String text) {
-    final widgets = <Widget>[];
-    int lastEnd = 0;
-
-    for (final match in _segmentRegex.allMatches(text)) {
-      if (match.start > lastEnd) {
-        final plain = text.substring(lastEnd, match.start).trim();
-        if (plain.isNotEmpty) {
-          widgets.add(Text(plain));
-          widgets.add(const SizedBox(height: 4));
-        }
-      }
-      lastEnd = match.end;
-
-      if (match.group(1) != null) {
-        widgets.add(_buildThinkingBlock(context, match.group(1)!));
-        widgets.add(const SizedBox(height: 4));
-      }
-    }
-
-    if (lastEnd < text.length) {
-      final plain = text.substring(lastEnd).trim();
-      if (plain.isNotEmpty) {
-        widgets.add(Text(plain));
-        widgets.add(const SizedBox(height: 4));
-      }
-    }
-
-    if (widgets.isEmpty && text.isNotEmpty) {
-      widgets.add(Text(text));
-      widgets.add(const SizedBox(height: 4));
-    }
-
-    return widgets;
-  }
+  // ── Individual segment widgets ────────────────────────────────────────
 
   Widget _buildThinkingBlock(BuildContext context, String content) {
     return GestureDetector(
@@ -196,9 +166,9 @@ class _MessageBubbleState extends State<MessageBubble>
                 const SizedBox(width: 4),
                 Text(
                   'Thinking...',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        fontStyle: FontStyle.italic,
-                      ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.labelSmall?.copyWith(fontStyle: FontStyle.italic),
                 ),
               ],
             ),
@@ -206,10 +176,9 @@ class _MessageBubbleState extends State<MessageBubble>
               const SizedBox(height: 4),
               Text(
                 content.trim(),
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall
-                    ?.copyWith(color: Colors.grey[600]),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
               ),
             ],
           ],
@@ -239,9 +208,9 @@ class _MessageBubbleState extends State<MessageBubble>
             child: Text(
               name + (args.isNotEmpty && args != '{}' ? '($args)' : ''),
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Colors.blue[700],
-                    fontFamily: 'monospace',
-                  ),
+                color: Colors.blue[700],
+                fontFamily: 'monospace',
+              ),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
             ),
@@ -251,7 +220,10 @@ class _MessageBubbleState extends State<MessageBubble>
     );
   }
 
-  Widget _buildToolResultInline(BuildContext context, Map<String, dynamic> json) {
+  Widget _buildToolResultInline(
+    BuildContext context,
+    Map<String, dynamic> json,
+  ) {
     final bool success = json['success'] as bool? ?? false;
     final dynamic result = json['result'];
     String output = '';
@@ -288,9 +260,9 @@ class _MessageBubbleState extends State<MessageBubble>
           Expanded(
             child: Text(
               output.isNotEmpty ? output : (success ? 'Done' : 'Failed'),
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    fontFamily: 'monospace',
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
               maxLines: 3,
               overflow: TextOverflow.ellipsis,
             ),
@@ -301,15 +273,19 @@ class _MessageBubbleState extends State<MessageBubble>
   }
 
   String _formatValue(dynamic value) {
-    if (value == null) { return ''; }
-    if (value is String) { return value; }
+    if (value == null) {
+      return '';
+    }
+    if (value is String) {
+      return value;
+    }
     return const JsonEncoder().convert(value);
   }
 }
 
 class _DotsIndicator extends AnimatedWidget {
   const _DotsIndicator({required AnimationController controller})
-      : super(listenable: controller);
+    : super(listenable: controller);
 
   @override
   Widget build(BuildContext context) {
