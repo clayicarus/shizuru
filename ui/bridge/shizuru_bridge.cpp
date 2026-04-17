@@ -484,6 +484,18 @@ void shizuru_destroy(ShizuruHandle handle) {
     ctx->playout_running.store(false);
   }
 
+  // Clear probe callbacks BEFORE Shutdown so no stale function pointers
+  // can fire during bus teardown.
+  if (ctx->level_probe) { ctx->level_probe->SetLevelCallback(nullptr, nullptr); }
+  if (ctx->transcript_probe) { ctx->transcript_probe->SetTranscriptCallback(nullptr, nullptr); }
+  {
+    std::lock_guard<std::mutex> lock(ctx->cb_mutex);
+    ctx->output_cb = nullptr;
+    ctx->state_cb = nullptr;
+    ctx->diagnostic_cb = nullptr;
+    ctx->activity_cb = nullptr;
+  }
+
   ctx->app->Shutdown();
   delete ctx;
 }

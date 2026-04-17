@@ -196,15 +196,23 @@ class ShizuruBridge {
   int start() => _start(_handle);
 
   void destroy() {
+    // Stop all C++ devices and threads FIRST so no PortAudio/Oboe callback
+    // can fire into a NativeCallable after it has been closed.
+    _destroy(_handle);
+
+    // Now safe to release the Dart-side native callbacks.
     _outputCallable?.close();
     _stateCallable?.close();
     _audioLevelCallable?.close();
+    _transcriptCallable?.close();
+    _diagnosticCallable?.close();
     _activityCallable?.close();
     _outputCallable = null;
     _stateCallable = null;
     _audioLevelCallable = null;
+    _transcriptCallable = null;
+    _diagnosticCallable = null;
     _activityCallable = null;
-    _destroy(_handle);
   }
 
   int sendMessage(String text) {
