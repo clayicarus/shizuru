@@ -233,6 +233,39 @@ void Controller::OnConversationItem(ConversationItemCallback cb) {
   conversation_item_callbacks_.push_back(std::move(cb));
 }
 
+std::string Controller::NextConversationItemId() {
+  return session_id_ + ":item:" +
+         std::to_string(++next_conversation_item_seq_);
+}
+
+std::string Controller::EnsureAssistantTurnGroupId() {
+  if (active_assistant_turn_group_id_.empty()) {
+    active_assistant_turn_group_id_ =
+        session_id_ + ":assistant_turn:" +
+        std::to_string(++next_assistant_turn_seq_);
+  }
+  return active_assistant_turn_group_id_;
+}
+
+void Controller::ResetAssistantTurnUiState() {
+  active_assistant_turn_group_id_.clear();
+  current_stream_item_id_.clear();
+  tool_call_item_ids_.clear();
+}
+
+conversation::ConversationItem Controller::StampAssistantTurnItem(
+    conversation::ConversationItem item,
+    std::string item_id,
+    std::string reply_to_item_id) {
+  item.conversation_id = session_id_;
+  item.turn_group_id = EnsureAssistantTurnGroupId();
+  item.item_id = item_id.empty() ? NextConversationItemId() : std::move(item_id);
+  if (!reply_to_item_id.empty()) {
+    item.reply_to_item_id = std::move(reply_to_item_id);
+  }
+  return item;
+}
+
 // Validate + execute transition.
 bool Controller::TryTransition(Event event) {
   State current = state_.load();
@@ -562,6 +595,7 @@ void Controller::HandleThinking(const Observation& obs) {
 
   // Check budget first.
   if (CheckBudget()) {
+    ResetAssistantTurnUiState();
     TryTransition(Event::kStopConditionMet);
     EmitActivity(ActivityKind::kBudgetExhausted);
     return;
@@ -573,6 +607,9 @@ void Controller::HandleThinking(const Observation& obs) {
   if (interrupt_requested_.load()) {
     return;
   }
+
+  EnsureAssistantTurnGroupId();
+  current_stream_item_id_ = NextConversationItemId();
 
   // Build context window.
   auto window = context_.BuildContext(session_id_, obs);
@@ -611,8 +648,10 @@ void Controller::HandleThinking(const Observation& obs) {
           // Emit streaming assistant message as ConversationItem delta.
           // The token is a delta; UI accumulates.
           {
-            auto item = conversation::MakeAssistantMessageItem(
-                "assistant", "Shizuru", token);
+            auto item = StampAssistantTurnItem(
+                conversation::MakeAssistantMessageItem(
+                    "assistant", "Shizuru", token),
+                current_stream_item_id_);
             EmitConversationItem(item, /*is_delta=*/true);
           }
           // TTS segmentation: filter out structured blocks before feeding to TTS.
@@ -738,6 +777,7 @@ void Controller::HandleThinking(const Observation& obs) {
       if (attempt == config_.max_retries) {
         LOG_ERROR("[{}] LLM submit failed after {} attempts",
                   MODULE_NAME, config_.max_retries + 1);
+        ResetAssistantTurnUiState();
         TryTransition(Event::kLlmFailure);
         return;
       }
@@ -853,8 +893,11 @@ void Controller::HandleActing(ActionCandidate ac) {
   tool_call_start_ = std::chrono::steady_clock::now();
 
   // Record the assistant's tool call decision in memory (single entry for all calls).
-  auto item = conversation::MakeToolCallItem(
-      "assistant", "", ToolCallsToJson(ac));
+  auto item = StampAssistantTurnItem(
+      conversation::MakeToolCallItem(
+          "assistant", "Shizuru", ToolCallsToJson(ac)),
+      {},
+      current_stream_item_id_);
   MemoryEntry call_entry = MemoryEntryFromItem(
       MemoryEntryType::kToolCall, item, std::chrono::steady_clock::now());
   context_.RecordTurn(session_id_, call_entry);
@@ -874,13 +917,17 @@ void Controller::HandleActing(ActionCandidate ac) {
     }
     // Emit tool call as ConversationItem for UI.
     {
-      auto item = conversation::MakeToolCallItem(
-          "assistant", "Shizuru",
-          nlohmann::json::array({
-              {{"id", tc.id}, {"type", "function"},
-               {"function", {{"name", tc.name},
-                             {"arguments", conversation::ParseJsonOrString(tc.arguments)}}}}
-          }));
+      auto item = StampAssistantTurnItem(
+          conversation::MakeToolCallItem(
+              "assistant", "Shizuru",
+              nlohmann::json::array({
+                  {{"id", tc.id}, {"type", "function"},
+                   {"function", {{"name", tc.name},
+                                 {"arguments", conversation::ParseJsonOrString(tc.arguments)}}}}
+              })),
+          {},
+          current_stream_item_id_);
+      tool_call_item_ids_[tc.id] = item.item_id;
       EmitConversationItem(item, /*is_delta=*/false);
     }
 
@@ -949,11 +996,19 @@ void Controller::HandleActingResult(const Observation& obs) {
     }
   }
 
+  const std::string reply_to_item_id =
+      tool_call_item_ids_.count(tool_call_id) != 0
+          ? tool_call_item_ids_.at(tool_call_id)
+          : std::string{};
+
   // Record this tool result in memory.
-  auto item = conversation::MakeToolResultItem(
-      tool_name.empty() ? "tool" : tool_name,
-      tool_call_id,
-      conversation::ParseJsonOrString(obs.content));
+  auto item = StampAssistantTurnItem(
+      conversation::MakeToolResultItem(
+          tool_name.empty() ? "tool" : tool_name,
+          tool_call_id,
+          conversation::ParseJsonOrString(obs.content)),
+      {},
+      reply_to_item_id);
   MemoryEntry result_entry = MemoryEntryFromItem(
       MemoryEntryType::kToolResult, item, std::chrono::steady_clock::now());
   context_.RecordTurn(session_id_, result_entry);
@@ -972,12 +1027,7 @@ void Controller::HandleActingResult(const Observation& obs) {
     EmitActivity(ActivityKind::kToolResultReceived, std::move(detail));
   }
   // Emit tool result as ConversationItem for UI.
-  {
-    auto result_item = conversation::MakeToolResultItem(
-        tool_name, tool_call_id,
-        conversation::ParseJsonOrString(obs.content));
-    EmitConversationItem(result_item, /*is_delta=*/false);
-  }
+  EmitConversationItem(item, /*is_delta=*/false);
 
   // Check if all results are in.
   if (pending_results_.size() < pending_tool_calls_.size()) {
@@ -1025,6 +1075,7 @@ void Controller::HandleResponding(ActionCandidate ac) {
   if (ac.response_text.empty()) {
     LOG_INFO("[{}] Response suppressed by filter", MODULE_NAME);
     TryTransition(Event::kResponseDelivered);
+    ResetAssistantTurnUiState();
     return;
   }
 
@@ -1032,17 +1083,15 @@ void Controller::HandleResponding(ActionCandidate ac) {
   EmitActivity(ActivityKind::kSpeaking);
 
   // Emit final response as complete ConversationItem for UI.
-  {
-    auto resp_item = conversation::MakeAssistantMessageItem(
-        "assistant", "Shizuru", ac.response_text);
-    EmitConversationItem(resp_item, /*is_delta=*/false);
-  }
+  auto resp_item = StampAssistantTurnItem(
+      conversation::MakeAssistantMessageItem(
+          "assistant", "Shizuru", ac.response_text),
+      current_stream_item_id_);
+  EmitConversationItem(resp_item, /*is_delta=*/false);
 
   // Record response as MemoryEntry.
-  auto item = conversation::MakeAssistantMessageItem(
-      "assistant", "", ac.response_text);
   MemoryEntry response_entry = MemoryEntryFromItem(
-      MemoryEntryType::kAssistantMessage, item,
+      MemoryEntryType::kAssistantMessage, resp_item,
       std::chrono::steady_clock::now());
   context_.RecordTurn(session_id_, response_entry);
   last_activity_ = response_entry.timestamp;
@@ -1064,6 +1113,7 @@ void Controller::HandleResponding(ActionCandidate ac) {
     TryTransition(Event::kResponseDelivered);  // → Listening
     EmitActivity(ActivityKind::kTurnComplete);
   }
+  ResetAssistantTurnUiState();
 }
 
 // Enforce budget guardrails. Returns true if any limit is exceeded.
@@ -1135,6 +1185,7 @@ void Controller::HandleInterrupt() {
   context_.RecordTurn(session_id_, interrupt_entry);
   last_activity_ = interrupt_entry.timestamp;
   conversation_active_ = true;
+  ResetAssistantTurnUiState();
 
   TryTransition(Event::kInterrupt);  // → Listening
   EmitActivity(ActivityKind::kInterrupted);

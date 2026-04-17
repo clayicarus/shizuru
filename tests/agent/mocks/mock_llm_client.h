@@ -16,6 +16,8 @@ class MockLlmClient : public LlmClient {
  public:
   // Configurable behavior for Submit calls.
   std::function<LlmResult(const ContextWindow&)> submit_fn;
+  std::function<LlmResult(const ContextWindow&, StreamCallback)>
+      submit_streaming_fn;
 
   // Recorded Submit calls (each is the ContextWindow that was passed).
   std::vector<ContextWindow> submit_calls;
@@ -43,6 +45,9 @@ class MockLlmClient : public LlmClient {
     {
       std::lock_guard<std::mutex> lock(mu_);
       submit_streaming_calls.push_back(context);
+    }
+    if (submit_streaming_fn) {
+      return submit_streaming_fn(context, std::move(on_token));
     }
     if (submit_fn) {
       return submit_fn(context);

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -327,6 +328,211 @@ TEST_F(ControllerTest, TransitionSequence_ToolCallCycle) {
   }
   EXPECT_TRUE(found_acting);
   EXPECT_TRUE(found_action_complete);
+}
+
+TEST_F(ControllerTest, ConversationItemsShareTurnGroupAcrossToolCycle) {
+  PolicyConfig pol_cfg;
+  PolicyRule allow_rule;
+  allow_rule.priority = 0;
+  allow_rule.action_pattern = "my_tool";
+  allow_rule.required_capability = "tool_cap";
+  allow_rule.outcome = PolicyOutcome::kAllow;
+  pol_cfg.initial_rules = {allow_rule};
+
+  testing::MockAuditSink audit2;
+  PolicyLayer policy2(pol_cfg, audit2);
+  policy2.InitSession("test-session");
+  policy2.GrantCapability("test-session", "tool_cap");
+
+  auto llm = std::make_unique<testing::MockLlmClient>();
+  auto* llm_ptr = llm.get();
+
+  std::atomic<int> call_count{0};
+  llm_ptr->submit_fn = [&](const ContextWindow&) -> LlmResult {
+    int c = call_count.fetch_add(1);
+    LlmResult r;
+    if (c == 0) {
+      r.candidate.type = ActionType::kToolCall;
+      {
+        ToolCall tc;
+        tc.id = "call_test_1";
+        tc.name = "my_tool";
+        tc.arguments = "{}";
+        tc.required_capability = "tool_cap";
+        r.candidate.tool_calls.push_back(std::move(tc));
+      }
+    } else {
+      r.candidate.type = ActionType::kResponse;
+      r.candidate.response_text = "final";
+    }
+    r.prompt_tokens = 1;
+    r.completion_tokens = 1;
+    return r;
+  };
+
+  Controller* ctrl_ptr = nullptr;
+  std::mutex ctrl_mu;
+  Controller::EmitFrameCallback emit_frame = [&](const std::string& port,
+                                                 io::DataFrame frame) {
+    if (port != "action_out") {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(ctrl_mu);
+    if (!ctrl_ptr) {
+      return;
+    }
+
+    const std::string payload(frame.payload.begin(), frame.payload.end());
+    const auto json = nlohmann::json::parse(payload);
+    Observation result_obs;
+    result_obs.type = ObservationType::kToolResult;
+    result_obs.content = nlohmann::json({
+        {"success", true},
+        {"tool_name", json.value("tool_name", "my_tool")},
+        {"tool_call_id", json.value("tool_call_id", "")},
+        {"output", "tool output"},
+    }).dump();
+    result_obs.source = "tool:my_tool";
+    result_obs.timestamp = std::chrono::steady_clock::now();
+    ctrl_ptr->EnqueueObservation(std::move(result_obs));
+  };
+
+  Controller ctrl("test-session", DefaultConfig(), std::move(llm),
+                  std::move(emit_frame), nullptr,
+                  *context_, policy2);
+  {
+    std::lock_guard<std::mutex> lock(ctrl_mu);
+    ctrl_ptr = &ctrl;
+  }
+
+  std::mutex mu;
+  std::vector<conversation::ConversationItem> items;
+  ctrl.OnConversationItem(
+      [&](const conversation::ConversationItem& item, bool /*is_delta*/) {
+        std::lock_guard<std::mutex> lock(mu);
+        items.push_back(item);
+      });
+
+  ctrl.Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  ctrl.EnqueueObservation(MakeUserObs("use tool"));
+
+  ASSERT_TRUE(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& item : items) {
+      if (item.kind == conversation::ItemKind::kAssistantMessage &&
+          item.payload.value("text", "") == "final") {
+        return true;
+      }
+    }
+    return false;
+  }));
+
+  ctrl.Shutdown();
+
+  std::lock_guard<std::mutex> lock(mu);
+  std::optional<conversation::ConversationItem> tool_call_item;
+  std::optional<conversation::ConversationItem> tool_result_item;
+  std::optional<conversation::ConversationItem> final_item;
+  for (const auto& item : items) {
+    if (item.kind == conversation::ItemKind::kToolCall && !tool_call_item) {
+      tool_call_item = item;
+    } else if (item.kind == conversation::ItemKind::kToolResult &&
+               !tool_result_item) {
+      tool_result_item = item;
+    } else if (item.kind == conversation::ItemKind::kAssistantMessage &&
+               item.payload.value("text", "") == "final" && !final_item) {
+      final_item = item;
+    }
+  }
+
+  ASSERT_TRUE(tool_call_item.has_value());
+  ASSERT_TRUE(tool_result_item.has_value());
+  ASSERT_TRUE(final_item.has_value());
+  ASSERT_TRUE(tool_call_item->turn_group_id.has_value());
+  ASSERT_TRUE(tool_result_item->turn_group_id.has_value());
+  ASSERT_TRUE(final_item->turn_group_id.has_value());
+  EXPECT_FALSE(tool_call_item->item_id.empty());
+  EXPECT_FALSE(tool_result_item->item_id.empty());
+  EXPECT_FALSE(final_item->item_id.empty());
+  EXPECT_EQ(tool_call_item->turn_group_id, tool_result_item->turn_group_id);
+  EXPECT_EQ(tool_call_item->turn_group_id, final_item->turn_group_id);
+  ASSERT_TRUE(tool_result_item->reply_to_item_id.has_value());
+  EXPECT_EQ(tool_result_item->reply_to_item_id.value(), tool_call_item->item_id);
+}
+
+TEST_F(ControllerTest, StreamingAndFinalAssistantMessagesShareItemId) {
+  ControllerConfig cfg = DefaultConfig();
+  cfg.use_streaming = true;
+
+  auto llm = std::make_unique<testing::MockLlmClient>();
+  auto* llm_ptr = llm.get();
+  llm_ptr->submit_streaming_fn =
+      [](const ContextWindow&, StreamCallback on_token) -> LlmResult {
+    on_token("<think>reason</think>");
+    on_token("draft");
+
+    LlmResult r;
+    r.candidate.type = ActionType::kResponse;
+    r.candidate.response_text = "final";
+    r.prompt_tokens = 1;
+    r.completion_tokens = 1;
+    return r;
+  };
+
+  Controller ctrl("test-session", cfg, std::move(llm), nullptr, nullptr,
+                  *context_, *policy_);
+
+  std::mutex mu;
+  std::vector<std::pair<conversation::ConversationItem, bool>> items;
+  ctrl.OnConversationItem(
+      [&](const conversation::ConversationItem& item, bool is_delta) {
+        std::lock_guard<std::mutex> lock(mu);
+        items.emplace_back(item, is_delta);
+      });
+
+  ctrl.Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  ctrl.EnqueueObservation(MakeUserObs("stream"));
+
+  ASSERT_TRUE(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& [item, is_delta] : items) {
+      if (!is_delta &&
+          item.kind == conversation::ItemKind::kAssistantMessage &&
+          item.payload.value("text", "") == "final") {
+        return true;
+      }
+    }
+    return false;
+  }));
+
+  ctrl.Shutdown();
+
+  std::lock_guard<std::mutex> lock(mu);
+  std::optional<conversation::ConversationItem> delta_item;
+  std::optional<conversation::ConversationItem> final_item;
+  for (const auto& [item, is_delta] : items) {
+    if (item.kind != conversation::ItemKind::kAssistantMessage) {
+      continue;
+    }
+    if (is_delta && !delta_item) {
+      delta_item = item;
+    }
+    if (!is_delta && item.payload.value("text", "") == "final" && !final_item) {
+      final_item = item;
+    }
+  }
+
+  ASSERT_TRUE(delta_item.has_value());
+  ASSERT_TRUE(final_item.has_value());
+  ASSERT_TRUE(delta_item->turn_group_id.has_value());
+  ASSERT_TRUE(final_item->turn_group_id.has_value());
+  EXPECT_EQ(delta_item->item_id, final_item->item_id);
+  EXPECT_EQ(delta_item->turn_group_id, final_item->turn_group_id);
 }
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -120,6 +121,13 @@ class Controller {
   void EmitDiagnostic(const std::string& message); // Notify diagnostic callbacks
   void EmitActivity(ActivityKind kind, std::string detail = {}); // Notify activity callbacks
   void EmitConversationItem(const conversation::ConversationItem& item, bool is_delta);
+  std::string NextConversationItemId();
+  std::string EnsureAssistantTurnGroupId();
+  void ResetAssistantTurnUiState();
+  conversation::ConversationItem StampAssistantTurnItem(
+      conversation::ConversationItem item,
+      std::string item_id = {},
+      std::string reply_to_item_id = {});
 
   // Static transition table
   static const std::unordered_map<std::pair<State, Event>, State, PairHash>
@@ -162,6 +170,11 @@ class Controller {
   bool first_token_logged_ = false;
   bool in_thinking_block_ = false;  // Tracks <think>...</think> for TTS filtering
   std::string thinking_tag_buf_;    // Partial tag accumulator
+  uint64_t next_conversation_item_seq_ = 0;
+  uint64_t next_assistant_turn_seq_ = 0;
+  std::string active_assistant_turn_group_id_;
+  std::string current_stream_item_id_;
+  std::unordered_map<std::string, std::string> tool_call_item_ids_;
   std::chrono::steady_clock::time_point session_start_;
   std::chrono::steady_clock::time_point last_activity_;
   bool conversation_active_ = false;
