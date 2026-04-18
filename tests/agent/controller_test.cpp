@@ -28,6 +28,7 @@
 #include "policy/config.h"
 #include "policy/policy_layer.h"
 #include "policy/types.h"
+#include "strategies/observation_aggregator.h"
 
 namespace shizuru::core {
 namespace {
@@ -1212,6 +1213,247 @@ TEST_F(ControllerTest, HandleInterrupt_WhileActing_InvokesCancelCallback) {
 
   EXPECT_GE(cancel_invoked.load(), 1)
       << "CancelCallback must be invoked when interrupt fires during kActing";
+}
+
+// ---------------------------------------------------------------------------
+// Barge-in regression: full reducer-wired barge-in/debounce path
+// Scenario: A → thinking → acting (tool call) → barge-in B → cancel + record
+//           → C during cooldown → cooldown expires → continuation with A+B+C
+// ---------------------------------------------------------------------------
+
+// Aggregator that always reports HasPending so the RunLoop uses a short
+// wait duration (500ms), allowing cooldown expiry to fire quickly in tests.
+class ShortWaitAggregator : public ObservationAggregator {
+ public:
+  std::optional<Observation> Feed(const Observation& obs) override {
+    return obs;
+  }
+  std::optional<Observation> CheckTimeout() override { return std::nullopt; }
+  bool HasPending() const override { return true; }
+  void Reset() override {}
+};
+
+TEST_F(ControllerTest, BargeInDebounce_FullReducerPath) {
+  ControllerConfig cfg = DefaultConfig();
+  cfg.max_turns = 100;
+
+  PolicyConfig pol_cfg;
+  PolicyRule allow_rule;
+  allow_rule.priority = 0;
+  allow_rule.action_pattern = "slow_tool";
+  allow_rule.required_capability = "tool_cap";
+  allow_rule.outcome = PolicyOutcome::kAllow;
+  pol_cfg.initial_rules = {allow_rule};
+
+  testing::MockAuditSink audit2;
+  testing::MockMemoryStore memory2;
+  ContextConfig ctx_cfg;
+  ctx_cfg.max_context_tokens = 100000;
+  ContextStrategy context2(ctx_cfg, memory2);
+  context2.InitSession("test-session");
+
+  PolicyLayer policy2(pol_cfg, audit2);
+  policy2.InitSession("test-session");
+  policy2.GrantCapability("test-session", "tool_cap");
+
+  auto llm = std::make_unique<testing::MockLlmClient>();
+  auto* llm_ptr = llm.get();
+
+  // Track LLM calls and the context windows they receive.
+  std::mutex llm_mu;
+  std::atomic<int> llm_call_count{0};
+  std::vector<ContextWindow> captured_windows;
+
+  llm_ptr->submit_fn = [&](const ContextWindow& ctx) -> LlmResult {
+    int c = llm_call_count.fetch_add(1);
+    {
+      std::lock_guard<std::mutex> lock(llm_mu);
+      captured_windows.push_back(ctx);
+    }
+    LlmResult r;
+    if (c == 0) {
+      // First call: return a tool call to put controller in kActing.
+      r.candidate.type = ActionType::kToolCall;
+      r.candidate.action_name = "slow_tool";
+      r.candidate.required_capability = "tool_cap";
+      ToolCall tc;
+      tc.id = "call_barge_1";
+      tc.name = "slow_tool";
+      tc.arguments = "{}";
+      tc.required_capability = "tool_cap";
+      r.candidate.tool_calls.push_back(std::move(tc));
+    } else {
+      // Continuation call after cooldown expires: return a real response.
+      r.candidate.type = ActionType::kResponse;
+      r.candidate.response_text = "continuation_response";
+    }
+    r.prompt_tokens = 10;
+    r.completion_tokens = 5;
+    return r;
+  };
+
+  // Track cancel invocations.
+  std::atomic<int> cancel_invoked{0};
+  Controller::CancelCallback cancel_cb = [&]() {
+    cancel_invoked.fetch_add(1);
+  };
+
+  // EmitFrameCallback: do NOT enqueue tool result — leave controller in kActing
+  // so we can barge-in.
+  Controller::EmitFrameCallback emit_frame = [](const std::string&,
+                                                io::DataFrame) {};
+
+  // Use ShortWaitAggregator so the RunLoop wait is 500ms instead of 60s,
+  // allowing cooldown expiry to fire quickly.
+  Controller ctrl("test-session", cfg, std::move(llm),
+                  std::move(emit_frame), std::move(cancel_cb),
+                  context2, policy2,
+                  std::make_unique<ShortWaitAggregator>());
+
+  std::mutex mu;
+  std::vector<std::tuple<State, State, Event>> transitions;
+  ctrl.OnTransition([&](State from, State to, Event event) {
+    std::lock_guard<std::mutex> lock(mu);
+    transitions.push_back({from, to, event});
+  });
+
+  ctrl.Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  // --- Step 1: Send message A → wait for kActing (tool call in flight) ---
+  Observation obs_a;
+  obs_a.type = ObservationType::kUserMessage;
+  obs_a.content = "message_A";
+  obs_a.source = "user";
+  obs_a.timestamp = std::chrono::steady_clock::now();
+  obs_a.item = conversation::MakeHumanMessageItem("user", "", "message_A");
+  ctrl.EnqueueObservation(std::move(obs_a));
+
+  // Wait for kActing (LLM returned tool call, emit_frame fired, no result).
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kActing; }));
+
+  // --- Step 2: Send barge-in message B while in kActing ---
+  Observation obs_b;
+  obs_b.type = ObservationType::kUserMessage;
+  obs_b.content = "message_B";
+  obs_b.source = "user";
+  obs_b.timestamp = std::chrono::steady_clock::now();
+  obs_b.item = conversation::MakeHumanMessageItem("user", "", "message_B");
+  ctrl.EnqueueObservation(std::move(obs_b));
+
+  // Wait for interrupt transition (→ kListening via kInterrupt).
+  ASSERT_TRUE(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& [from, to, ev] : transitions) {
+      if (to == State::kListening && ev == Event::kInterrupt) return true;
+    }
+    return false;
+  }));
+
+  // Verify: cancel callback was invoked.
+  EXPECT_GE(cancel_invoked.load(), 1)
+      << "CancelCallback must be invoked on barge-in";
+
+  // Verify: interrupt memory recorded + message B recorded.
+  ASSERT_TRUE(WaitFor([&] {
+    auto entries = memory2.GetAll("test-session");
+    bool has_interrupt = false;
+    bool has_b = false;
+    for (const auto& e : entries) {
+      if (e.content.find("interrupted") != std::string::npos ||
+          e.content.find("Interrupt") != std::string::npos) {
+        has_interrupt = true;
+      }
+      if (e.content.find("message_B") != std::string::npos) {
+        has_b = true;
+      }
+    }
+    return has_interrupt && has_b;
+  }));
+
+  // Verify: controller is in kListening with cooldown active.
+  EXPECT_EQ(ctrl.GetState(), State::kListening);
+
+  // --- Step 3: Send message C during cooldown ---
+  Observation obs_c;
+  obs_c.type = ObservationType::kUserMessage;
+  obs_c.content = "message_C";
+  obs_c.source = "user";
+  obs_c.timestamp = std::chrono::steady_clock::now();
+  obs_c.item = conversation::MakeHumanMessageItem("user", "", "message_C");
+  ctrl.EnqueueObservation(std::move(obs_c));
+
+  // Wait for message C to be recorded in memory.
+  ASSERT_TRUE(WaitFor([&] {
+    auto entries = memory2.GetAll("test-session");
+    for (const auto& e : entries) {
+      if (e.content.find("message_C") != std::string::npos) return true;
+    }
+    return false;
+  }));
+
+  // Verify: still in kListening (cooldown still active, no premature thinking).
+  EXPECT_EQ(ctrl.GetState(), State::kListening);
+
+  // --- Step 4: Let cooldown expire → continuation thinking ---
+  // ShortWaitAggregator makes the RunLoop wait only 500ms. When the queue
+  // is empty and cooldown == kDebouncing, the reducer fires
+  // DebounceCooldownExpired which starts continuation thinking.
+  ASSERT_TRUE(WaitFor([&] { return llm_call_count.load() >= 2; }, 5000));
+
+  // Wait for the response to be delivered (kResponding → kListening).
+  ASSERT_TRUE(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& [from, to, ev] : transitions) {
+      if (from == State::kResponding && to == State::kListening &&
+          ev == Event::kResponseDelivered) return true;
+    }
+    return false;
+  }, 5000));
+
+  ctrl.Shutdown();
+
+  // --- Verify: continuation LLM call had A+B+C in context ---
+  {
+    std::lock_guard<std::mutex> lock(llm_mu);
+    ASSERT_GE(captured_windows.size(), 2u)
+        << "Expected at least 2 LLM calls (initial + continuation)";
+
+    const auto& continuation_window = captured_windows[1];
+    bool found_a = false, found_b = false, found_c = false;
+    for (const auto& msg : continuation_window.messages) {
+      if (msg.content.find("message_A") != std::string::npos) found_a = true;
+      if (msg.content.find("message_B") != std::string::npos) found_b = true;
+      if (msg.content.find("message_C") != std::string::npos) found_c = true;
+    }
+    EXPECT_TRUE(found_a) << "Continuation context must include message A";
+    EXPECT_TRUE(found_b) << "Continuation context must include message B";
+    EXPECT_TRUE(found_c) << "Continuation context must include message C";
+  }
+
+  // Verify transition sequence includes the full barge-in/debounce path.
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    bool found_interrupt = false;
+    bool found_continuation_thinking = false;
+    bool found_response_delivered = false;
+    for (const auto& [from, to, ev] : transitions) {
+      if (to == State::kListening && ev == Event::kInterrupt)
+        found_interrupt = true;
+      if (from == State::kListening && to == State::kThinking &&
+          ev == Event::kUserObservation)
+        found_continuation_thinking = true;
+      if (from == State::kResponding && to == State::kListening &&
+          ev == Event::kResponseDelivered)
+        found_response_delivered = true;
+    }
+    EXPECT_TRUE(found_interrupt)
+        << "Must see transition to kListening via kInterrupt";
+    EXPECT_TRUE(found_continuation_thinking)
+        << "Must see kListening→kThinking via kUserObservation (continuation)";
+    EXPECT_TRUE(found_response_delivered)
+        << "Must see kResponding→kListening via kResponseDelivered";
+  }
 }
 
 // ---------------------------------------------------------------------------

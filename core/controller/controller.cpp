@@ -9,11 +9,17 @@
 #include "async_logger.h"
 #include "conversation/item.h"
 #include "conversation/render.h"
+#include "dialogue/default_reducer.h"
 #include "io/data_frame.h"
 
 namespace shizuru::core {
 
 namespace {
+
+template <class... Ts>
+struct overloaded : Ts... { using Ts::operator()...; };
+template <class... Ts>
+overloaded(Ts...) -> overloaded<Ts...>;
 
 conversation::ConversationItem EnsureConversationItem(const Observation& obs) {
   if (obs.item.has_value()) { return *obs.item; }
@@ -165,7 +171,9 @@ Controller::Controller(std::string session_id,
       tts_segment_(std::move(tts_segment)),
       response_filter_(response_filter
                            ? std::move(response_filter)
-                           : std::make_unique<PassthroughFilter>()) {}
+                           : std::make_unique<PassthroughFilter>()) {
+  reducer_ = std::make_unique<dialogue::DefaultDialogueReducer>(config_);
+}
 
 Controller::~Controller() {
   if (loop_thread_.joinable()) {
@@ -371,22 +379,15 @@ void Controller::RunLoop() {
         // Post-interrupt cooldown expired: all barge-in messages have been
         // recorded to context.  Enter thinking with a continuation so the
         // LLM sees all accumulated messages together.
-        if (post_interrupt_cooldown_) {
-          post_interrupt_cooldown_ = false;
+        if (dialogue_state_.cooldown == dialogue::CooldownPhase::kDebouncing) {
+          auto now = std::chrono::steady_clock::now();
           LOG_INFO("[{}] Post-interrupt cooldown expired, entering thinking",
                    MODULE_NAME);
-          TryTransition(Event::kUserObservation);
-          Observation cont;
-          cont.type = ObservationType::kContinuation;
-          cont.source = "controller";
-          cont.timestamp = std::chrono::steady_clock::now();
+          SyncBudgetToDialogueState();
+          auto decision = reducer_->Reduce(
+              dialogue_state_, dialogue::DebounceCooldownExpired{now});
           lock.unlock();
-          try {
-            HandleThinking(cont);
-          } catch (const std::exception& e) {
-            EmitDiagnostic("Unhandled exception: " + std::string(e.what()));
-            TryTransition(Event::kLlmFailure);
-          }
+          ApplyDialogueDecision(decision);
           continue;
         }
 
@@ -421,13 +422,18 @@ void Controller::RunLoop() {
       observation_queue_.pop_front();
     }
 
-    // Internal interrupt event: cancel the in-flight turn without creating
-    // a synthetic user message or re-entering the loop with empty content.
+    // Internal interrupt event (VAD speech_start or explicit Interrupt()):
+    // route through the reducer so VAD and text barge-in share the same
+    // interrupt semantics (debounce cooldown, CancelLlm effect, etc.).
     State current = state_.load();
     if (obs.type == ObservationType::kInterruption) {
       if (current == State::kThinking || current == State::kRouting ||
           current == State::kActing) {
-        HandleInterrupt();
+        auto now = std::chrono::steady_clock::now();
+        SyncBudgetToDialogueState();
+        auto decision = reducer_->Reduce(
+            dialogue_state_, dialogue::InterruptRequested{now});
+        ApplyDialogueDecision(decision);
       }
       continue;
     }
@@ -441,15 +447,17 @@ void Controller::RunLoop() {
     if (obs.type == ObservationType::kUserMessage &&
         (current == State::kThinking || current == State::kRouting ||
          current == State::kActing)) {
-      HandleInterrupt();
-      // Record the interrupting message to context so LLM sees it next time.
-      MemoryEntry barge_entry = MemoryEntryFromItem(
-          MemoryEntryType::kUserMessage, EnsureConversationItem(obs),
-          obs.timestamp);
-      context_.RecordTurn(session_id_, barge_entry);
-      // Set a short cooldown so the next RunLoop iteration waits for more
-      // input instead of immediately processing.
-      post_interrupt_cooldown_ = true;
+      auto now = std::chrono::steady_clock::now();
+      // Ask reducer to handle interrupt.
+      SyncBudgetToDialogueState();
+      auto interrupt_decision = reducer_->Reduce(
+          dialogue_state_, dialogue::InterruptRequested{now});
+      ApplyDialogueDecision(interrupt_decision);
+      // Ask reducer to record the interrupting message.
+      SyncBudgetToDialogueState();
+      auto record_decision = reducer_->Reduce(
+          dialogue_state_, dialogue::UserMessageReceived{obs, now});
+      ApplyDialogueDecision(record_decision);
       continue;
     }
 
@@ -492,14 +500,13 @@ void Controller::RunLoop() {
       }
 
       // Post-interrupt cooldown: after a barge-in, buffer this message
-      // and wait for more input instead of immediately thinking.
-      // The message is recorded to context so the LLM sees it when we
-      // eventually think.
-      if (post_interrupt_cooldown_) {
-        MemoryEntry cooldown_entry = MemoryEntryFromItem(
-            MemoryEntryType::kUserMessage, EnsureConversationItem(*aggregated),
-            aggregated->timestamp);
-        context_.RecordTurn(session_id_, cooldown_entry);
+      // via the reducer and wait for more input.
+      if (dialogue_state_.cooldown == dialogue::CooldownPhase::kDebouncing) {
+        auto now = std::chrono::steady_clock::now();
+        SyncBudgetToDialogueState();
+        auto decision = reducer_->Reduce(
+            dialogue_state_, dialogue::UserMessageReceived{*aggregated, now});
+        ApplyDialogueDecision(decision);
         LOG_INFO("[{}] Post-interrupt cooldown: buffered \"{}\"",
                  MODULE_NAME, aggregated->content);
         continue;  // Stay in kListening, wait for more or timeout.
@@ -1158,6 +1165,76 @@ void Controller::ResetBudgetWindow() {
   observation_aggregator_->Reset();
   if (tts_segment_) {
     tts_segment_->Reset();
+  }
+}
+
+void Controller::SyncBudgetToDialogueState() {
+  dialogue_state_.turn_count = turn_count_;
+  dialogue_state_.total_prompt_tokens = total_prompt_tokens_;
+  dialogue_state_.total_completion_tokens = total_completion_tokens_;
+  dialogue_state_.action_count = action_count_;
+  dialogue_state_.session_start = session_start_;
+  dialogue_state_.last_activity = last_activity_;
+  dialogue_state_.conversation_active = conversation_active_;
+}
+
+void Controller::ApplyDialogueDecision(
+    const dialogue::DialogueDecision& decision) {
+  dialogue_state_ = decision.next_state;
+
+  for (const auto& effect : decision.effects) {
+    std::visit(overloaded{
+      [&](const dialogue::RecordMemory& e) {
+        MemoryEntry entry = MemoryEntryFromItem(
+            MemoryEntryType::kUserMessage, EnsureConversationItem(e.observation),
+            e.observation.timestamp);
+        context_.RecordTurn(session_id_, entry);
+      },
+      [&](const dialogue::CancelLlm&) {
+        // Inline execution — NOT delegating to HandleInterrupt()
+        interrupt_requested_.store(false);
+        llm_->Cancel();
+        if (cancel_) cancel_();
+        if (tts_segment_) tts_segment_->Reset();
+        observation_aggregator_->Reset();
+        // Record interrupt entry
+        MemoryEntry interrupt_entry;
+        interrupt_entry.type = MemoryEntryType::kAssistantMessage;
+        interrupt_entry.role = "system";
+        interrupt_entry.content = "Turn interrupted";
+        interrupt_entry.timestamp = std::chrono::steady_clock::now();
+        context_.RecordTurn(session_id_, interrupt_entry);
+        last_activity_ = interrupt_entry.timestamp;
+        conversation_active_ = true;
+        ResetAssistantTurnUiState();
+        TryTransition(Event::kInterrupt);
+        EmitActivity(ActivityKind::kInterrupted);
+        EmitDiagnostic("Turn interrupted in state " +
+                       std::to_string(static_cast<int>(state_.load())));
+      },
+      [&](const dialogue::StartLlmContinuation& e) {
+        TryTransition(Event::kUserObservation);
+        Observation cont;
+        cont.type = ObservationType::kContinuation;
+        cont.source = "controller";
+        cont.timestamp = e.now;
+        try {
+          HandleThinking(cont);
+        } catch (const std::exception& ex) {
+          EmitDiagnostic("Unhandled exception: " + std::string(ex.what()));
+          TryTransition(Event::kLlmFailure);
+        }
+      },
+      [&](const dialogue::SignalBudgetExhausted&) {
+        ResetAssistantTurnUiState();
+        TryTransition(Event::kStopConditionMet);
+        EmitActivity(ActivityKind::kBudgetExhausted);
+      },
+      [&](const dialogue::EmitActivityEffect& e) {
+        EmitActivity(e.kind, e.detail);
+      },
+      [&](const dialogue::NoOp&) {},
+    }, effect);
   }
 }
 

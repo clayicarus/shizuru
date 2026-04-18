@@ -1,5 +1,5 @@
 // Unit + property-based tests for VadEventDevice
-// Feature: core-decoupling, Property 6: VadEventDevice pass-through emit
+// Feature: core-decoupling, Property 6: VadEventDevice signal adaptation
 
 #include <gtest/gtest.h>
 #include <rapidcheck.h>
@@ -9,7 +9,9 @@
 #include <string>
 #include <vector>
 
+#include "io/control_frame.h"
 #include "io/data_frame.h"
+#include "io/interrupt_frame.h"
 #include "io/vad/vad_event_device.h"
 
 namespace shizuru::io {
@@ -38,48 +40,86 @@ TEST(VadEventDeviceTest, GetDeviceIdCustom) {
   EXPECT_EQ(dev.GetDeviceId(), "my_vad");
 }
 
-TEST(VadEventDeviceTest, PortDescriptorsContainVadInAndVadOut) {
+TEST(VadEventDeviceTest, PortDescriptorsContainAdaptedOutputs) {
   VadEventDevice dev;
   const auto ports = dev.GetPortDescriptors();
-  bool has_in = false, has_out = false;
+  bool has_in = false;
+  bool has_vad_out = false;
+  bool has_interrupt_out = false;
+  bool has_control_out = false;
   for (const auto& p : ports) {
-    if (p.name == VadEventDevice::kVadIn  && p.direction == PortDirection::kInput)  has_in  = true;
-    if (p.name == VadEventDevice::kVadOut && p.direction == PortDirection::kOutput) has_out = true;
+    if (p.name == VadEventDevice::kVadIn && p.direction == PortDirection::kInput) {
+      has_in = true;
+    }
+    if (p.name == VadEventDevice::kVadOut &&
+        p.direction == PortDirection::kOutput &&
+        p.data_type == "vad/event") {
+      has_vad_out = true;
+    }
+    if (p.name == VadEventDevice::kInterruptOut &&
+        p.direction == PortDirection::kOutput &&
+        p.data_type == InterruptFrame::kType) {
+      has_interrupt_out = true;
+    }
+    if (p.name == VadEventDevice::kControlOut &&
+        p.direction == PortDirection::kOutput &&
+        p.data_type == "control/command") {
+      has_control_out = true;
+    }
   }
   EXPECT_TRUE(has_in);
-  EXPECT_TRUE(has_out);
+  EXPECT_TRUE(has_vad_out);
+  EXPECT_TRUE(has_interrupt_out);
+  EXPECT_TRUE(has_control_out);
 }
 
-TEST(VadEventDeviceTest, SpeechEndEmittedOnVadOut) {
+TEST(VadEventDeviceTest, SpeechEndEmitsFlushOnControlOut) {
   VadEventDevice dev;
 
   std::string emitted_port;
-  std::vector<uint8_t> emitted_payload;
+  std::string emitted_command;
 
   dev.SetOutputCallback([&](const std::string& /*device_id*/,
                             const std::string& port,
                             DataFrame frame) {
-    emitted_port    = port;
-    emitted_payload = frame.payload;
+    if (port != VadEventDevice::kControlOut) { return; }
+    emitted_port = port;
+    emitted_command = ControlFrame::Parse(frame);
   });
 
   dev.OnInput(VadEventDevice::kVadIn, MakeVadFrame("speech_end"));
 
-  EXPECT_EQ(emitted_port, VadEventDevice::kVadOut);
-  const std::string result(emitted_payload.begin(), emitted_payload.end());
-  EXPECT_EQ(result, "speech_end");
+  EXPECT_EQ(emitted_port, VadEventDevice::kControlOut);
+  EXPECT_EQ(emitted_command, ControlFrame::kCommandFlush);
 }
 
-TEST(VadEventDeviceTest, SpeechStartEmittedOnVadOut) {
+TEST(VadEventDeviceTest, SpeechStartEmitsInterruptOnInterruptOut) {
   VadEventDevice dev;
 
-  std::string emitted_event;
+  std::string emitted_reason;
+  std::string emitted_source;
   dev.SetOutputCallback([&](const std::string&, const std::string&, DataFrame frame) {
-    emitted_event = std::string(frame.payload.begin(), frame.payload.end());
+    if (frame.type != InterruptFrame::kType) { return; }
+    emitted_reason = InterruptFrame::ParseReason(frame);
+    emitted_source = InterruptFrame::ParseSource(frame);
   });
 
   dev.OnInput(VadEventDevice::kVadIn, MakeVadFrame("speech_start"));
-  EXPECT_EQ(emitted_event, "speech_start");
+  EXPECT_EQ(emitted_reason, InterruptFrame::kReasonBargeIn);
+  EXPECT_EQ(emitted_source, "voice");
+}
+
+TEST(VadEventDeviceTest, RawVadEventStillEmittedOnVadOut) {
+  VadEventDevice dev;
+
+  std::string emitted_event;
+  dev.SetOutputCallback([&](const std::string&, const std::string& port, DataFrame frame) {
+    if (port != VadEventDevice::kVadOut) { return; }
+    emitted_event = std::string(frame.payload.begin(), frame.payload.end());
+  });
+
+  dev.OnInput(VadEventDevice::kVadIn, MakeVadFrame("speech_active"));
+  EXPECT_EQ(emitted_event, "speech_active");
 }
 
 TEST(VadEventDeviceTest, NoCallbackDoesNotCrash) {
@@ -100,25 +140,27 @@ TEST(VadEventDeviceTest, WrongPortIsIgnored) {
   EXPECT_FALSE(called);
 }
 
-TEST(VadEventDeviceTest, EmittedFrameTypeIsVadEvent) {
+TEST(VadEventDeviceTest, EmittedInterruptFrameTypeIsInterruptRequest) {
   VadEventDevice dev;
 
   std::string emitted_type;
   dev.SetOutputCallback([&](const std::string&, const std::string&, DataFrame frame) {
-    emitted_type = frame.type;
+    if (frame.type == InterruptFrame::kType) {
+      emitted_type = frame.type;
+    }
   });
 
-  dev.OnInput(VadEventDevice::kVadIn, MakeVadFrame("speech_end"));
-  EXPECT_EQ(emitted_type, "vad/event");
+  dev.OnInput(VadEventDevice::kVadIn, MakeVadFrame("speech_start"));
+  EXPECT_EQ(emitted_type, InterruptFrame::kType);
 }
 
 // ---------------------------------------------------------------------------
-// Property 6: VadEventDevice pass-through emit
+// Property 6: VadEventDevice raw passthrough emit
 // Validates: Requirements 8.2
 // ---------------------------------------------------------------------------
 
-RC_GTEST_PROP(VadEventDevicePropTest, prop_passthrough_emit, (void)) {
-  // Feature: core-decoupling, Property 6: VadEventDevice pass-through emit
+RC_GTEST_PROP(VadEventDevicePropTest, prop_raw_passthrough_emit, (void)) {
+  // Feature: core-decoupling, Property 6: VadEventDevice raw passthrough emit
   //
   // For any non-empty event name, delivering a vad/event frame on vad_in must
   // cause vad_out to emit a frame with identical payload bytes.

@@ -47,7 +47,8 @@ struct EnergyVadConfig {
 // Port contract:
 //   Input  "audio_in"  — audio/pcm (s16le)
 //   Output "audio_out" — audio/pcm (speech frames only, with pre-roll)
-//   Output "vad_out"   — vad/event (JSON, optional — connect for observability)
+//   Output "vad_out"   — vad/event (event name payload, optional — connect
+//                        for observability or signal adaptation)
 class EnergyVadDevice : public VadDevice {
  public:
   explicit EnergyVadDevice(EnergyVadConfig config = {},

@@ -20,6 +20,7 @@
 #include "context/types.h"
 #include "io/control_frame.h"
 #include "io/data_frame.h"
+#include "io/interrupt_frame.h"
 #include "io/io_device.h"
 #include "runtime/core_device.h"
 #include "mock_audit_sink.h"
@@ -370,20 +371,20 @@ TEST(CoreDeviceTest, ToolResultInPortCreatesToolResultObservation) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: GetPortDescriptors contains vad_in and control_out with correct types
+// Test: GetPortDescriptors contains interrupt_in and control_out with correct types
 // ---------------------------------------------------------------------------
-TEST(CoreDeviceTest, GetPortDescriptorsContainsVadInAndControlOut) {
+TEST(CoreDeviceTest, GetPortDescriptorsContainsInterruptInAndControlOut) {
   auto device = MakeCoreDevice("core_ports");
 
   const auto ports = device->GetPortDescriptors();
 
-  bool found_vad_in = false;
+  bool found_interrupt_in = false;
   bool found_control_out = false;
   for (const auto& p : ports) {
-    if (p.name == "vad_in") {
+    if (p.name == "interrupt_in") {
       EXPECT_EQ(p.direction, io::PortDirection::kInput);
-      EXPECT_EQ(p.data_type, "vad/event");
-      found_vad_in = true;
+      EXPECT_EQ(p.data_type, io::InterruptFrame::kType);
+      found_interrupt_in = true;
     }
     if (p.name == "control_out") {
       EXPECT_EQ(p.direction, io::PortDirection::kOutput);
@@ -391,14 +392,15 @@ TEST(CoreDeviceTest, GetPortDescriptorsContainsVadInAndControlOut) {
       found_control_out = true;
     }
   }
-  EXPECT_TRUE(found_vad_in) << "vad_in port not found in GetPortDescriptors()";
+  EXPECT_TRUE(found_interrupt_in)
+      << "interrupt_in port not found in GetPortDescriptors()";
   EXPECT_TRUE(found_control_out) << "control_out port not found in GetPortDescriptors()";
 }
 
 // ---------------------------------------------------------------------------
-// Test: vad/event "speech_end" on vad_in → control_out emits "flush"
+// Test: interrupt/request on interrupt_in → control_out emits "cancel"
 // ---------------------------------------------------------------------------
-TEST(CoreDeviceTest, SpeechEndOnVadInEmitsFlushOnControlOut) {
+TEST(CoreDeviceTest, InterruptInEmitsCancelOnControlOut) {
   auto device = MakeCoreDevice("core_vad_unit");
 
   std::mutex mu;
@@ -412,16 +414,15 @@ TEST(CoreDeviceTest, SpeechEndOnVadInEmitsFlushOnControlOut) {
 
   device->Start();
 
-  const std::string event = "speech_end";
-  io::DataFrame vad_frame;
-  vad_frame.type = "vad/event";
-  vad_frame.payload = std::vector<uint8_t>(event.begin(), event.end());
-  device->OnInput("vad_in", std::move(vad_frame));
+  auto interrupt = io::InterruptFrame::Make(
+      io::InterruptFrame::kReasonBargeIn, "voice");
+  device->OnInput("interrupt_in", std::move(interrupt));
 
-  bool got_flush = WaitFor([&] {
+  bool got_cancel = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
     for (const auto& [port, f] : emitted) {
-      if (port == "control_out" && io::ControlFrame::Parse(f) == "flush") {
+      if (port == "control_out" &&
+          io::ControlFrame::Parse(f) == io::ControlFrame::kCommandCancel) {
         return true;
       }
     }
@@ -430,7 +431,8 @@ TEST(CoreDeviceTest, SpeechEndOnVadInEmitsFlushOnControlOut) {
 
   device->Stop();
 
-  EXPECT_TRUE(got_flush) << "control_out did not emit 'flush' after speech_end on vad_in";
+  EXPECT_TRUE(got_cancel)
+      << "control_out did not emit 'cancel' after interrupt_in";
 }
 
 // ---------------------------------------------------------------------------

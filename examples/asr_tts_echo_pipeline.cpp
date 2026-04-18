@@ -154,8 +154,7 @@ int main(int argc, char* argv[]) {
   io::BaiduAsrDevice asr(cfg, token_mgr);
   io::BaiduTtsDevice tts(cfg, token_mgr);
 
-  // VadEventDevice: forwards vad events as DataFrames on vad_out.
-  // speech_end → asr.Flush() is handled by routing vad_out → asr control_in.
+  // VadEventDevice: translates VAD protocol events into ASR control signals.
   io::VadEventDevice asr_flush;
 
   // LogDevices for observability.
@@ -195,11 +194,13 @@ int main(int argc, char* argv[]) {
   bus.AddRoute({"vad_dump", io::PcmDumpDevice::kPassOut},
                {"baidu_asr", "audio_in"});
 
-  // vad vad_out (events) → log → asr_flush (triggers Flush on speech_end)
+  // vad vad_out (events) → log → asr_flush adapter
   bus.AddRoute({"vad",     io::EnergyVadDevice::kVadOut},
                {"log_vad", io::LogDevice::kPassIn});
   bus.AddRoute({"log_vad", io::LogDevice::kPassOut},
                {"vad_event", io::VadEventDevice::kVadIn});
+  bus.AddRoute({"vad_event", io::VadEventDevice::kControlOut},
+               {"baidu_asr", "control_in"});
 
   // asr → [log] → tts
   bus.AddRoute({"baidu_asr",   "text_out"},

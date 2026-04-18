@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "io/data_frame.h"
+#include "io/interrupt_frame.h"
 #include "runtime/tool_registry.h"
 #include "runtime/tool_dispatch_device.h"
 #include "runtime/agent_runtime.h"
@@ -349,19 +350,19 @@ TEST(AgentRuntimeIntegrationTest, InterruptPath) {
   ToolRegistry tools;
   AgentRuntime runtime;
 
-  // Register a VAD event device BEFORE assembling the agent so the route gets wired.
+  // Register an interrupt source BEFORE assembling the agent so the route gets wired.
   auto vad_dev = std::make_unique<MockIoDevice>(
       "vad_event",
       std::vector<io::PortDescriptor>{
-          {"vad_out", io::PortDirection::kOutput, "vad/event"}});
+          {"interrupt_out", io::PortDirection::kOutput, io::InterruptFrame::kType}});
   MockIoDevice* vad_ptr = vad_dev.get();
   runtime.RegisterDevice(std::move(vad_dev), DeviceOptions{.auto_start = true});
 
   CoreDevice* core = AssembleAgent(runtime, mock.BaseUrl(), tools, /*streaming=*/true);
 
-  // Wire VAD → core vad_in route.
-  runtime.AddRoute(PortAddress{"vad_event", "vad_out"},
-                   PortAddress{"core", "vad_in"});
+  // Wire interrupt source → core interrupt_in route.
+  runtime.AddRoute(PortAddress{"vad_event", "interrupt_out"},
+                   PortAddress{"core", "interrupt_in"});
 
   // Track output — we expect NO final response for the interrupted turn.
   std::mutex mu;
@@ -391,13 +392,10 @@ TEST(AgentRuntimeIntegrationTest, InterruptPath) {
   // Wait a bit for the first SSE chunk to be received, then send speech_start.
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-  // Emit speech_start VAD event to trigger interrupt.
-  io::DataFrame vad_frame;
-  vad_frame.type = "vad/event";
-  std::string speech_start = "speech_start";
-  vad_frame.payload = std::vector<uint8_t>(speech_start.begin(), speech_start.end());
-  vad_frame.timestamp = std::chrono::steady_clock::now();
-  vad_ptr->EmitOutput("vad_out", std::move(vad_frame));
+  // Emit a generic interrupt request to trigger barge-in handling.
+  auto interrupt = io::InterruptFrame::Make(
+      io::InterruptFrame::kReasonBargeIn, "voice");
+  vad_ptr->EmitOutput("interrupt_out", std::move(interrupt));
 
   // Wait for controller to transition to kListening after interrupt.
   bool reached_listening = WaitFor([&] {

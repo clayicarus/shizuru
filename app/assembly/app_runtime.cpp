@@ -12,6 +12,7 @@
 #include "runtime/tool_dispatch_device.h"
 #include "runtime/core_device.h"
 #include "runtime/route_table.h"
+#include "io/vad/vad_event_device.h"
 #include "services/audit/log_audit_sink.h"
 #include "services/llm/openai/openai_client.h"
 #include "services/memory/in_memory_store.h"
@@ -238,8 +239,12 @@ void AppRuntime::WireRoutes() {
   bus_.AddRoute({"tool_dispatch", runtime::ToolDispatchDevice::kResultOut},
                 {"core", "tool_result_in"}, kCtrl);
 
-  // VAD event → core (interrupt detection).
-  bus_.AddRoute({"vad_event", "vad_out"}, {"core", "vad_in"}, kDma);
+  // VAD adapter routes: speech_end flushes ASR locally; speech_start becomes
+  // a generic interrupt before entering core.
+  bus_.AddRoute({"vad_event", io::VadEventDevice::kInterruptOut},
+                {"core", "interrupt_in"}, kDma);
+  bus_.AddRoute({"vad_event", io::VadEventDevice::kControlOut},
+                {"baidu_asr", "control_in"}, kCtrl);
 
   // Control plane: core → IO devices.
   bus_.AddRoute({"core", "control_out"}, {"baidu_asr", "control_in"}, kCtrl);

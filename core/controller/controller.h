@@ -16,6 +16,8 @@
 #include "context/context_strategy.h"
 #include "controller/config.h"
 #include "controller/types.h"
+#include "dialogue/reducer.h"
+#include "dialogue/types.h"
 #include "interfaces/llm_client.h"
 #include "io/data_frame.h"
 #include "policy/policy_layer.h"
@@ -118,6 +120,8 @@ class Controller {
   bool CheckBudget();                        // Enforce guardrails
   void ResetBudgetWindow();                  // Re-arm counters after Idle
   void HandleInterrupt();                    // Cancel in-progress work
+  void ApplyDialogueDecision(const dialogue::DialogueDecision& decision);
+  void SyncBudgetToDialogueState();
   void EmitDiagnostic(const std::string& message); // Notify diagnostic callbacks
   void EmitActivity(ActivityKind kind, std::string detail = {}); // Notify activity callbacks
   void EmitConversationItem(const conversation::ConversationItem& item, bool is_delta);
@@ -178,7 +182,10 @@ class Controller {
   std::chrono::steady_clock::time_point session_start_;
   std::chrono::steady_clock::time_point last_activity_;
   bool conversation_active_ = false;
-  bool post_interrupt_cooldown_ = false;  // After barge-in, buffer input before thinking
+
+  // Dialogue reducer (Phase 1: barge-in + debounce only).
+  std::unique_ptr<dialogue::DialogueReducer> reducer_;
+  dialogue::DialogueState dialogue_state_;
 
   // Loop thread
   std::thread loop_thread_;

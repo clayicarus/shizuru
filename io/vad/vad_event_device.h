@@ -3,18 +3,24 @@
 #include <string>
 #include <vector>
 
+#include "io/control_frame.h"
+#include "io/interrupt_frame.h"
 #include "io/io_device.h"
 
 namespace shizuru::io {
 
-// VadEventDevice — forwards VAD events as vad/event DataFrames on vad_out.
+// VadEventDevice — adapts VAD protocol events into runtime-level signals.
 //
 // Port contract:
-//   Input  "vad_in"  — vad/event DataFrames from EnergyVadDevice
-//   Output "vad_out" — vad/event DataFrames (payload = raw event name bytes)
+//   Input  "vad_in"         — vad/event DataFrames from EnergyVadDevice
+//   Output "vad_out"        — raw vad/event passthrough for observability
+//   Output "interrupt_out"  — interrupt/request frames for barge-in handling
+//   Output "control_out"    — control/command frames for device-side actions
 //
-// Every event received on vad_in is re-emitted on vad_out unchanged.
-// Downstream devices (e.g. CoreDevice) decide which events to act on.
+// Mapping:
+//   speech_start → interrupt_out (reason=barge_in, source=voice)
+//   speech_end   → control_out   (command=flush)
+//   other events → vad_out only
 class VadEventDevice : public IoDevice {
  public:
   explicit VadEventDevice(std::string device_id = "vad_event");
@@ -28,8 +34,14 @@ class VadEventDevice : public IoDevice {
 
   static constexpr char kVadIn[]  = "vad_in";
   static constexpr char kVadOut[] = "vad_out";
+  static constexpr char kInterruptOut[] = "interrupt_out";
+  static constexpr char kControlOut[] = "control_out";
 
  private:
+  void EmitRawVadEvent(const DataFrame& frame);
+  void EmitInterrupt();
+  void EmitControl(std::string_view command);
+
   std::string device_id_;
   OutputCallback output_cb_;
 };

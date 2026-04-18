@@ -349,11 +349,14 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
 
     // Voice pipeline DMA routes.
     constexpr runtime::RouteOptions kDma{.requires_control_plane = false};
+    constexpr runtime::RouteOptions kCtrl{.requires_control_plane = true};
     bus.AddRoute({"audio_capture", "audio_out"}, {"capture", "pass_in"}, kDma);
     bus.AddRoute({"capture", io::PcmDumpDevice::kPassOut}, {"vad", io::EnergyVadDevice::kAudioIn}, kDma);
     bus.AddRoute({"vad", io::EnergyVadDevice::kAudioOut}, {"vad_dump", io::PcmDumpDevice::kPassIn}, kDma);
     bus.AddRoute({"vad_dump", io::PcmDumpDevice::kPassOut}, {"baidu_asr", "audio_in"}, kDma);
     bus.AddRoute({"vad", io::EnergyVadDevice::kVadOut}, {"vad_event", io::VadEventDevice::kVadIn}, kDma);
+    bus.AddRoute({"vad_event", io::VadEventDevice::kControlOut}, {"baidu_asr", "control_in"}, kCtrl);
+    bus.AddRoute({"vad_event", io::VadEventDevice::kInterruptOut}, {"core", "interrupt_in"}, kDma);
     bus.AddRoute({"baidu_asr", "text_out"}, {"core", "text_in"}, kDma);
     bus.AddRoute({"elevenlabs_tts", "audio_out"}, {"playout_dump", io::PcmDumpDevice::kPassIn}, kDma);
     bus.AddRoute({"playout_dump", io::PcmDumpDevice::kPassOut}, {"audio_playout", "audio_in"}, kDma);

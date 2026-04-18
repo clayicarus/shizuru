@@ -1,0 +1,306 @@
+# Implementation Plan: Dialogue Kernel Phase 2
+
+## Overview
+
+Phase 2 migrates the remaining post-aggregation turn-taking semantics from Controller inline logic into the dialogue reducer. It expands the event taxonomy, state shape, and effect vocabulary, introduces a generation-safe `TimerBook` for explicit timer management, and replaces the reducer-owned "filter" concept with an async turn-trigger classification effect. After Phase 2, Controller's `RunLoop` becomes a thin event-mapping and effect-execution shell for all post-aggregation paths.
+
+**Hard scope:** Expand types (events, state, effects), implement TimerBook, implement all reducer handlers (normal message, LLM completion/failure, tool result/timeout, system event, continuation, timer expired, turn-trigger classified), wire all Controller branches through the reducer, remove redundant Controller fields, add Phase 2 unit and property tests.
+
+**Not in Phase 2:** ObservationAggregator event-ization (Phase 3), provisional turn workspace (Phase 3), agenda and mixed-initiative behavior (Phase 4). Data-plane noise filtering is also not in Phase 2: VAD/ASR garbage suppression and transcript sanitization remain upstream of `core/`.
+
+**Behavioral continuity:** Meaningful user messages are still recorded to committed history on receipt. The new semantic classifier only decides whether to trigger a turn now (`kRespondNow`) or store the message without responding (`kStoreOnly`).
+
+## Tasks
+
+- [ ] 1. Expand dialogue type definitions (`core/dialogue/types.h`)
+  - [ ] 1.1 Populate Phase 1 stub event structs with real payloads
+    - Add fields to `LlmCompleted`: `candidate` (ActionCandidate), `prompt_tokens` (int), `completion_tokens` (int), `now` (time_point)
+    - Add fields to `LlmFailed`: `reason` (string), `now` (time_point)
+    - Add fields to `ToolResultReceived`: `observation` (Observation), `now` (time_point)
+    - Add fields to `ToolCallTimeout`: `missing_tool_call_ids` (vector of string), `now` (time_point)
+    - Add fields to `ContinuationRequested`: `source` (string), `now` (time_point)
+    - Add fields to `SystemEventReceived`: `observation` (Observation), `now` (time_point)
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6_
+  - [ ] 1.2 Add new event types and enums
+    - Define `TimerKind` enum: `kDebounce`, `kToolCallTimeout`, `kConversationIdle`
+    - Define `TurnTriggerVerdict` enum: `kRespondNow`, `kStoreOnly`
+    - Define `DeliberationPhase` enum: `kIdle`, `kAwaitingTurnTrigger`, `kThinking`, `kAwaitingToolResults`
+    - Add `TimerExpired` struct with `kind`, `timer_id`, `now`
+    - Add `TurnTriggerClassified` struct with `obs_id`, `verdict`, `now`
+    - Update `DialogueEvent` variant to include `TimerExpired` and `TurnTriggerClassified`
+    - _Requirements: 1.7, 1.8, 1.9, 1.10, 1.11, 2.1_
+  - [ ] 1.3 Expand DialogueState with Phase 2 fields
+    - Add `deliberation` field (DeliberationPhase, default kIdle)
+    - Add `next_turn_trigger_id` field (uint64_t, default 0) — monotonic counter, never reset
+    - Add `pending_turn_trigger_id` field (uint64_t, default 0) — tracks in-flight request, reset to 0 on interrupt/completion
+    - Add `pending_tool_call_ids` field (vector of string)
+    - Add `pending_tool_results` field (unordered_map string→string)
+    - _Requirements: 2.2, 2.3, 2.4, 2.5_
+  - [ ] 1.4 Add new effect types to DialogueEffect variant
+    - Add `StartLlm{trigger}`, `EmitToolCallFrames{action}`, `RecordToolResult{observation}`, `RecordToolCallDecision{action}`, `DeliverResponse{action}`, `ResetBudgetWindow{}`, `EmitDiagnosticEffect{message}`, `ScheduleTimer{kind, timer_id, deadline}`, `CancelTimer{timer_id}`, `StartTurnTriggerClassification{obs_id, observation}`, `CancelTurnTriggerClassification{obs_id}`, `TransitionState{event}`, `RecordInterruptMemory{}`, `RecordTimeoutResults{missing_tool_call_ids}`
+    - Update `DialogueEffect` variant to include all new types
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15_
+
+- [ ] 2. Implement TimerBook (`core/dialogue/timer_book.h` and `core/dialogue/timer_book.cpp`)
+  - [ ] 2.1 Create `core/dialogue/timer_book.h` with class declaration
+    - Declare `TimerBook` class with `Schedule`, `Cancel`, `NextDeadline`, `PopExpired`, `Empty` methods
+    - Use `std::priority_queue` min-heap with generation counters (`std::unordered_map<string, uint64_t>`) for stale-entry detection
+    - `TimerEntry` includes `generation` field; entries are stale when their generation != current generation for their timer_id
+    - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8_
+  - [ ] 2.2 Implement `core/dialogue/timer_book.cpp`
+    - `Schedule`: increment generation for timer_id, push entry with new generation onto heap
+    - `Cancel`: increment generation for timer_id (no heap push — stale entries skipped on pop)
+    - `NextDeadline`: peek heap, skip stale entries (generation mismatch), return earliest non-stale deadline or nullopt
+    - `PopExpired(now)`: pop all entries with deadline <= now, skip stale, return non-stale in deadline order
+    - `Empty`: check if heap has any non-stale entries
+    - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.8_
+
+- [ ] 3. Checkpoint — Verify expanded types and TimerBook compile
+  - Add `dialogue/timer_book.cpp` to `core/CMakeLists.txt`
+  - Build the project and verify no compile errors
+  - Ensure existing Phase 1 tests still pass (types are backward compatible)
+
+- [ ] 4. Implement Phase 2 reducer handlers (`core/dialogue/default_reducer.h` and `core/dialogue/default_reducer.cpp`)
+  - [ ] 4.1 Update `default_reducer.h` — add Phase 2 handler declarations
+    - Rename `HandleUserMessageDuringDebounce` to `HandleUserMessage` (now handles both debounce and normal paths)
+    - Add declarations for: `HandleSystemEvent`, `HandleLlmCompleted`, `HandleLlmFailed`, `HandleToolResult`, `HandleToolCallTimeout`, `HandleContinuation`, `HandleTimerExpired`, `HandleTurnTriggerClassified`
+    - Add `NextTurnTriggerId` helper declaration
+    - _Requirements: 5.1, 6.1, 7.1, 8.1, 9.1, 10.1, 12.1, 13.1_
+  - [ ] 4.2 Implement `HandleUserMessage` — normal path (cooldown == kNone)
+    - When `cooldown == kNone` and `deliberation == kIdle`: set `conversation_active = true`, update `last_activity`, check idle timeout for budget reset, emit `RecordMemory` + `StartTurnTriggerClassification`, set `deliberation = kAwaitingTurnTrigger`, assign `pending_turn_trigger_id = ++next_turn_trigger_id` (monotonic counter in state, never reset — ensures ids are never reused even after interrupt resets pending_turn_trigger_id to 0)
+    - When `cooldown == kDebouncing`: existing Phase 1 behavior (RecordMemory only — debounce messages are always recorded because they bypass turn-trigger evaluation)
+    - _Requirements: 5.1, 5.2, 5.3_
+  - [ ] 4.3 Implement `HandleTurnTriggerClassified`
+    - If `obs_id` matches `pending_turn_trigger_id` and `verdict == kRespondNow`: set `deliberation = kThinking`, emit `StartLlm`
+    - If `obs_id` matches and `verdict == kStoreOnly`: set `deliberation = kIdle`, no effects, message remains recorded in committed history
+    - If `obs_id` does not match: return state unchanged (stale rejection)
+    - _Requirements: 6.1, 6.2, 6.3_
+  - [ ] 4.4 Implement `HandleLlmCompleted`
+    - Increment `turn_count`, add tokens to totals, update `last_activity`
+    - Route by `candidate.type`: kToolCall → set `deliberation = kAwaitingToolResults`, populate `pending_tool_call_ids`, emit `RecordToolCallDecision` + `EmitToolCallFrames` + `ScheduleTimer{kToolCallTimeout}`; kResponse → set `deliberation = kIdle`, emit `DeliverResponse`; kContinue → keep `deliberation = kThinking`, emit `StartLlm`
+    - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6_
+  - [ ] 4.5 Implement `HandleLlmFailed`
+    - Set `deliberation = kIdle`, emit `EmitDiagnosticEffect{reason}` + `TransitionState{kLlmFailure}`
+    - _Requirements: 8.1, 8.2_
+  - [ ] 4.6 Implement `HandleToolResult`
+    - Record result in `pending_tool_results`, update `last_activity`, emit `RecordToolResult`
+    - If all pending tool calls have results: set `deliberation = kThinking`, clear pending collections, emit `StartLlm` continuation
+    - If some still pending: keep `deliberation = kAwaitingToolResults`
+    - _Requirements: 9.1, 9.2, 9.3, 9.4_
+  - [ ] 4.7 Implement `HandleToolCallTimeout`
+    - Emit `RecordTimeoutResults{missing_tool_call_ids}` — the effect executor records synthetic timeout error entries to committed history for each missing tool call
+    - Set `deliberation = kThinking`, clear pending collections, emit `StartLlm` continuation
+    - _Requirements: 10.1, 10.2_
+  - [ ] 4.8 Update `HandleInterrupt` — add ScheduleTimer, cancel in-flight work, and RecordInterruptMemory
+    - Add `ScheduleTimer{kDebounce}` to effects
+    - Add `RecordInterruptMemory` to effects (ensures "Turn interrupted" always enters committed history)
+    - If `deliberation == kAwaitingTurnTrigger`: add `CancelTurnTriggerClassification`, reset `pending_turn_trigger_id`
+    - If `deliberation == kAwaitingToolResults`: add `CancelTimer` for tool call timeout
+    - Set `deliberation = kIdle` (or keep as appropriate for debounce)
+    - _Requirements: 11.1, 14.1, 14.2_
+  - [ ] 4.9 Implement `HandleTimerExpired`
+    - `kDebounce`: delegate to `HandleDebounceCooldownExpired` logic (clear cooldown, start thinking or signal budget exhausted)
+    - `kToolCallTimeout`: delegate to `HandleToolCallTimeout` logic
+    - `kConversationIdle`: declared for forward compatibility only — NOT emitted in Phase 2. If received, return no-op (state unchanged, empty effects).
+    - _Requirements: 11.2, 11.3_
+  - [ ] 4.10 Implement `HandleSystemEvent`
+    - When `deliberation == kIdle`: set `conversation_active = true`, update `last_activity`, emit `RecordMemory` + `StartLlm`, set `deliberation = kThinking`
+    - _Requirements: 12.1, 12.2_
+  - [ ] 4.11 Implement `HandleContinuation`
+    - When `deliberation == kIdle` or `kThinking`: emit `StartLlm`, set `deliberation = kThinking`
+    - _Requirements: 13.1_
+  - [ ] 4.12 Update `Reduce` dispatch — wire all new handlers via `std::visit`
+    - Replace no-op stubs for `LlmCompleted`, `LlmFailed`, `ToolResultReceived`, `ToolCallTimeout`, `ContinuationRequested`, `SystemEventReceived` with calls to the new handlers
+    - Add dispatch for `TimerExpired` and `TurnTriggerClassified`
+    - _Requirements: 16.1, 16.2, 16.3_
+
+- [ ] 5. Checkpoint — Verify expanded reducer compiles
+  - Build the project and verify no compile errors
+  - Ensure existing Phase 1 reducer tests still pass
+
+- [ ] 6. Write unit tests for Phase 2 reducer handlers
+  - [ ] 6.1 Create `tests/agent/dialogue_reducer_phase2_test.cpp` with unit tests
+    - Test `HandleUserMessage` normal path (cooldown=kNone, deliberation=kIdle): verify RecordMemory + StartTurnTriggerClassification in effects, deliberation=kAwaitingTurnTrigger, conversation_active=true, last_activity updated
+    - Test `HandleUserMessage` with idle timeout: verify ResetBudgetWindow in effects, budget counters zeroed
+    - Test `HandleTurnTriggerClassified` with matching obs_id + kRespondNow: verify deliberation=kThinking, StartLlm in effects
+    - Test `HandleTurnTriggerClassified` with matching obs_id + kStoreOnly: verify deliberation=kIdle, empty effects
+    - Test `HandleTurnTriggerClassified` with non-matching obs_id: verify no-op
+    - Test `HandleLlmCompleted` with kToolCall: verify turn_count++, tokens updated, deliberation=kAwaitingToolResults, pending_tool_call_ids populated, EmitToolCallFrames in effects
+    - Test `HandleLlmCompleted` with kResponse: verify DeliverResponse in effects, deliberation=kIdle
+    - Test `HandleLlmCompleted` with kContinue: verify StartLlm in effects, deliberation=kThinking
+    - Test `HandleLlmFailed`: verify deliberation=kIdle, EmitDiagnosticEffect + TransitionState in effects
+    - Test `HandleToolResult` partial (not all results in): verify result recorded, deliberation stays kAwaitingToolResults
+    - Test `HandleToolResult` complete (all results in): verify deliberation=kThinking, pending cleared, StartLlm in effects
+    - Test `HandleToolCallTimeout`: verify RecordTimeoutResults in effects with missing ids, deliberation=kThinking, StartLlm in effects
+    - Test `HandleInterrupt` with deliberation=kAwaitingTurnTrigger: verify CancelTurnTriggerClassification in effects
+    - Test `HandleInterrupt` with deliberation=kAwaitingToolResults: verify CancelTimer in effects
+    - Test `HandleTimerExpired` kDebounce: verify equivalent to DebounceCooldownExpired
+    - Test `HandleSystemEvent`: verify RecordMemory + StartLlm in effects, deliberation=kThinking
+    - Test `HandleContinuation`: verify StartLlm in effects, deliberation=kThinking
+    - _Requirements: 19.1_
+  - [ ] 6.2 Create `tests/agent/timer_book_test.cpp` with unit tests
+    - Test Schedule + NextDeadline: verify deadline returned
+    - Test Schedule + PopExpired: verify entries returned when deadline <= now
+    - Test Schedule + Cancel + PopExpired: verify cancelled entry not returned
+    - Test NextDeadline with multiple timers: verify earliest returned
+    - Test PopExpired returns entries in deadline order
+    - Test Empty: true when no timers, true when all cancelled, false when active timers exist
+    - Test PopExpired with mix of cancelled and active timers
+    - Test generation safety: Schedule(id, d1) → Cancel(id) → Schedule(id, d2) → PopExpired returns only second entry
+    - _Requirements: 19.2_
+
+- [ ] 7. Write property tests for Phase 2 reducer and TimerBook
+  - [ ] 7.1 Write property test: Reducer purity — extended (Property 1)
+    - For any valid `DialogueState` (including Phase 2 fields) and `DialogueEvent` (including Phase 2 events), calling `Reduce(state, event)` twice with identical inputs produces identical outputs
+    - Update generators in `dialogue_reducer_prop_test.cpp` to cover Phase 2 state fields and event types
+    - Run minimum 100 iterations
+    - **Validates: Requirements 16.4**
+  - [ ] 7.2 Write property test: State consistency invariants (Property 2)
+    - For any valid `DialogueState` and `DialogueEvent`, the `next_state` produced by `Reduce` satisfies: if `deliberation == kAwaitingTurnTrigger` then `pending_turn_trigger_id > 0`, and if `deliberation == kAwaitingToolResults` then `pending_tool_call_ids` is non-empty
+    - Run minimum 100 iterations
+    - **Validates: Requirements 2.6, 2.7**
+  - [ ] 7.3 Write property test: TimerBook schedule-then-pop round trip (Property 3)
+    - For any set of timer entries, scheduling all then calling `PopExpired(now)` where `now >= max(deadlines)` returns exactly the non-cancelled entries in deadline order
+    - Run minimum 100 iterations
+    - **Validates: Requirements 4.1, 4.4, 4.5**
+  - [ ] 7.4 Write property test: TimerBook cancel exclusion (Property 4)
+    - For any timer entry that is scheduled and then cancelled, `PopExpired` never returns it and `NextDeadline` does not return its deadline when it is the only timer
+    - Run minimum 100 iterations
+    - **Validates: Requirements 4.2, 4.3, 4.6**
+  - [ ] 7.5 Write property test: Normal user message records memory and triggers turn evaluation (Property 5)
+    - For any `DialogueState` where `cooldown == kNone` and `deliberation == kIdle`, and any `UserMessageReceived`, effects contain both `RecordMemory` and `StartTurnTriggerClassification`, and `next_state.deliberation == kAwaitingTurnTrigger`
+    - Run minimum 100 iterations
+    - **Validates: Requirements 5.1**
+  - [ ] 7.6 Write property test: Turn-trigger verdict routing (Property 7)
+    - For any `DialogueState` where `deliberation == kAwaitingTurnTrigger` and any `TurnTriggerClassified` with matching `obs_id`: kRespondNow → deliberation=kThinking + StartLlm; kStoreOnly → deliberation=kIdle + empty effects
+    - Run minimum 100 iterations
+    - **Validates: Requirements 6.1, 6.2**
+  - [ ] 7.7 Write property test: Stale turn-trigger rejection (Property 8)
+    - For any `DialogueState` and any `TurnTriggerClassified` with non-matching `obs_id`, state unchanged with no effects
+    - Run minimum 100 iterations
+    - **Validates: Requirements 6.3**
+  - [ ] 7.8 Write property test: LLM completion token and turn accounting (Property 9)
+    - For any `DialogueState` and any `LlmCompleted`, `next_state.turn_count == state.turn_count + 1` and tokens are correctly accumulated
+    - Run minimum 100 iterations
+    - **Validates: Requirements 7.1, 7.2**
+  - [ ] 7.9 Write property test: LLM result routing by action type (Property 10)
+    - For any `LlmCompleted`: kToolCall → EmitToolCallFrames + kAwaitingToolResults; kResponse → DeliverResponse + kIdle; kContinue → StartLlm + kThinking
+    - Run minimum 100 iterations
+    - **Validates: Requirements 7.3, 7.4, 7.5**
+  - [ ] 7.10 Write property test: Tool result collection and continuation (Property 12)
+    - For any `DialogueState` with `deliberation == kAwaitingToolResults` and any `ToolResultReceived`: result recorded; if all results in → kThinking + StartLlm; if partial → stays kAwaitingToolResults
+    - Run minimum 100 iterations
+    - **Validates: Requirements 9.1, 9.2, 9.3**
+  - [ ] 7.11 Write property test: Interrupt cancels in-flight work (Property 14)
+    - For any `InterruptRequested`: effects contain ScheduleTimer{kDebounce}; if kAwaitingTurnTrigger → CancelTurnTriggerClassification; if kAwaitingToolResults → CancelTimer
+    - Run minimum 100 iterations
+    - **Validates: Requirements 11.1, 14.1, 14.2**
+  - [ ] 7.12 Write property test: Activity tracking on message events (Property 16)
+    - For any `UserMessageReceived`, `SystemEventReceived`, `ToolResultReceived`, or `LlmCompleted` event, `next_state.conversation_active == true` and `next_state.last_activity == event.now`
+    - Run minimum 100 iterations
+    - **Validates: Requirements 5.3, 7.6, 9.4, 12.2**
+  - [ ] 7.13 Write property test: kStoreOnly does not start an assistant turn (Property 17)
+    - For any `DialogueState` where `deliberation == kAwaitingTurnTrigger` and any `TurnTriggerClassified` with verdict `kStoreOnly` and matching `obs_id`, effects SHALL NOT contain `StartLlm`
+    - Run minimum 100 iterations
+    - **Validates: Requirements 6.2**
+  - [ ] 7.14 Write property test: Timer id reuse after cancel (Property 18)
+    - For any timer_id, Schedule(id, d1) → Cancel(id) → Schedule(id, d2) → PopExpired(max(d1,d2)) returns only the second entry. The cancelled first entry is never returned.
+    - Run minimum 100 iterations
+    - **Validates: Requirements 4.1, 4.2, 4.8**
+  - [ ] 7.15 Write property test: Interrupt always records interrupt memory (Property 19)
+    - For any `DialogueState` and any `InterruptRequested` event, effects SHALL contain `RecordInterruptMemory`
+    - Run minimum 100 iterations
+    - **Validates: Requirements 14.1**
+
+- [ ] 8. Update test build system
+  - [ ] 8.1 Add Phase 2 test files to `tests/agent/CMakeLists.txt`
+    - Add `dialogue_reducer_phase2_test.cpp` to the existing `dialogue_reducer_test` target
+    - Create a new `timer_book_test` executable target for `timer_book_test.cpp`
+    - Link `timer_book_test` against `shizuru_core`, `GTest::gtest_main`, `rapidcheck_gtest`
+    - Add `add_test` for `timer_book_test` with `RC_PARAMS=max_success=100`
+    - _Requirements: 19.5_
+
+- [ ] 9. Checkpoint — Verify all reducer and TimerBook tests pass
+  - Run `dialogue_reducer_test` — all Phase 1 and Phase 2 unit + property tests must pass
+  - Run `timer_book_test` — all unit + property tests must pass
+
+- [ ] 10. Wire Phase 2 reducer into Controller
+  - [ ] 10.1 Update `Controller::ApplyDialogueDecision` — add Phase 2 effect handlers
+    - CRITICAL: Update the existing `CancelLlm` effect handler to NO LONGER record interrupt memory inline (remove the "Turn interrupted" MemoryEntry recording from CancelLlm). That responsibility moves to the new `RecordInterruptMemory` effect handler. This prevents duplicate interrupt entries since HandleInterrupt now emits both `CancelLlm` and `RecordInterruptMemory`.
+    - Add `std::visit` cases for: `StartLlm` (build context + call HandleThinking with trigger observation), `EmitToolCallFrames` (call HandleActing with action), `RecordToolResult` (record tool result memory entry), `RecordToolCallDecision` (record tool call decision memory entry), `DeliverResponse` (call HandleResponding with action), `ResetBudgetWindow` (call existing ResetBudgetWindow), `EmitDiagnosticEffect` (call EmitDiagnostic), `ScheduleTimer` (call timer_book_.Schedule), `CancelTimer` (call timer_book_.Cancel), `StartTurnTriggerClassification` (call the semantic turn-trigger classifier asynchronously, enqueue TurnTriggerClassified event; the existing ObservationFilter interface may be adapted underneath during migration), `CancelTurnTriggerClassification` (no-op for now, stale results rejected by obs_id), `TransitionState` (call TryTransition), `RecordInterruptMemory` (record "Turn interrupted" memory entry — this is now the SINGLE place that writes interrupt memory), `RecordTimeoutResults` (record synthetic timeout result entries for each missing tool call id)
+    - _Requirements: 15.4_
+  - [ ] 10.2 Add `TimerBook` member to Controller and integrate into RunLoop
+    - Add `dialogue::TimerBook timer_book_` member to `controller.h`
+    - In RunLoop: use `timer_book_.NextDeadline()` to compute `wait_for` duration
+    - In RunLoop: call `timer_book_.PopExpired(now)` on each iteration, feed `TimerExpired` events to reducer
+    - _Requirements: 15.5, 15.6_
+  - [ ] 10.3 Replace normal user message inline logic with reducer calls
+    - Replace the `(current == kListening || current == kIdle) && obs.type == kUserMessage` block with: construct `UserMessageReceived{obs, now}`, call `Reduce`, apply decision
+    - Remove inline semantic "should we respond now?" call — now handled by `StartTurnTriggerClassification` effect
+    - Remove inline `session_start_`, `last_activity_`, `conversation_active_` updates — now in reducer state
+    - _Requirements: 15.3_
+  - [ ] 10.4 Replace LLM completion inline logic with reducer calls
+    - After LLM returns in HandleThinking: construct `LlmCompleted{candidate, prompt_tokens, completion_tokens, now}`, call `Reduce`, apply decision
+    - Remove inline `turn_count_++`, `total_prompt_tokens_ +=`, `total_completion_tokens_ +=` — now in reducer
+    - Remove inline `HandleRouting` call — now driven by `EmitToolCallFrames`/`DeliverResponse`/`StartLlm` effects
+    - _Requirements: 15.3_
+  - [ ] 10.5 Replace LLM failure inline logic with reducer calls
+    - After LLM fails in HandleThinking: construct `LlmFailed{reason, now}`, call `Reduce`, apply decision
+    - _Requirements: 15.3_
+  - [ ] 10.6 Replace tool result inline logic with reducer calls
+    - Replace `HandleActingResult` body with: construct `ToolResultReceived{obs, now}`, call `Reduce`, apply decision
+    - Remove inline `pending_results_` tracking — now in reducer state
+    - _Requirements: 15.3_
+  - [ ] 10.7 Replace tool call timeout inline logic with reducer calls
+    - Replace timeout block in RunLoop with: construct `ToolCallTimeout{missing_ids, now}` or feed `TimerExpired{kToolCallTimeout}`, call `Reduce`, apply decision
+    - _Requirements: 15.3_
+  - [ ] 10.8 Replace system event inline logic with reducer calls
+    - Replace the `obs.type == kSystemEvent` block with: construct `SystemEventReceived{obs, now}`, call `Reduce`, apply decision
+    - _Requirements: 15.3_
+  - [ ] 10.9 Remove `SyncBudgetToDialogueState()` and redundant Controller fields
+    - Remove `SyncBudgetToDialogueState()` method
+    - Remove redundant fields: `turn_count_`, `total_prompt_tokens_`, `total_completion_tokens_`, `action_count_`, `conversation_active_`, `session_start_`, `last_activity_`, `pending_tool_calls_`, `pending_results_`
+    - Update all remaining Controller code that reads these fields to read from `dialogue_state_` instead
+    - _Requirements: 15.1, 15.2_
+
+- [ ] 11. Checkpoint — Verify existing tests still pass after Controller rewiring
+  - Run `controller_test` and `controller_prop_test` — all must pass without modification
+  - Run `controller_bug_condition_test` and `controller_preservation_test` — all must pass
+  - Run `dialogue_reducer_test` — all Phase 1 and Phase 2 tests must pass
+  - _Requirements: 18.1_
+
+- [ ] 12. Write controller-level regression tests for Phase 2 paths
+  - [ ] 12.1 Add regression tests to `tests/agent/controller_test.cpp` (or a new file)
+    - Test: normal user message → respond-now verdict → think → respond → back to listening
+    - Test: normal user message → store-only verdict → stay listening, message preserved in committed history
+    - Test: normal user message → think → tool call → tool result → continuation → respond
+    - Test: LLM failure → error state → recovery
+    - Test: tool call timeout → timeout results recorded to context → continuation → respond
+    - Test: system event → think → respond
+    - Test: interrupt during turn-trigger evaluation → evaluation cancelled → barge-in message buffered
+    - Test: timer id reuse — Schedule("debounce") → Cancel("debounce") → Schedule("debounce") → only second timer fires
+    - Test: interrupt always records interrupt memory — verify "Turn interrupted" entry in committed history regardless of deliberation phase (kIdle, kAwaitingTurnTrigger, kThinking, kAwaitingToolResults)
+    - _Requirements: 18.2, 18.3_
+
+- [ ] 13. Final checkpoint — Ensure all tests pass
+  - Run full test suite
+  - Verify no behavioral changes visible to external callers
+  - _Requirements: 18.1, 18.2_
+
+## Notes
+
+- Phase 2 hard scope: expand types + all reducer handlers + TimerBook + Controller rewiring + remove redundant fields
+- Phase 2 does NOT event-ize ObservationAggregator — aggregator remains a synchronous pre-reducer step. Aggregator event-ization is deferred to Phase 3.
+- **Data/semantic split**: data-plane noise filtering remains upstream of `core/`. The reducer only sees meaningful observations and decides whether to respond now or store only.
+- **RecordTimeoutResults**: tool call timeouts produce a `RecordTimeoutResults` effect that records synthetic timeout error entries to committed history, ensuring the LLM sees timeout information in the context window on continuation.
+- **TimerBook is generation-safe**: Schedule/Cancel increment a per-timer_id generation counter. Stale heap entries (generation mismatch) are silently skipped. This means Schedule→Cancel→Schedule for the same id works correctly.
+- The reducer NEVER reads the system clock — all `now` values come from event fields populated by Controller
+- `SyncBudgetToDialogueState()` is removed — the reducer is the single source of truth for budget counters
+- **TurnTriggerClassifier migration**: the semantic "should we respond now?" decision is wrapped in an async effect. The effect executor calls the turn-trigger classifier and enqueues a `TurnTriggerClassified` event with the result. The existing `ObservationFilter` interface may be adapted underneath temporarily, but its role in `core/` is semantic turn triggering, not data-plane noise rejection.
+- **kConversationIdle is declared but not emitted in Phase 2**: the `TimerKind::kConversationIdle` enum value exists for forward compatibility only. Controller does NOT schedule or emit `TimerExpired{kConversationIdle}` events in Phase 2. Aggregator timeout flush remains entirely inline in Controller until Phase 3. If the reducer receives this event (defensive), it returns no-op.
+- **NextTurnTriggerId**: generates unique correlation ids via `++state.next_turn_trigger_id`. This is a separate monotonic counter from `pending_turn_trigger_id`. Interrupt resets `pending_turn_trigger_id` to 0 but does NOT touch `next_turn_trigger_id`, so ids are never reused and stale async results cannot accidentally match a new request.
+- **CancelLlm interrupt memory split**: Phase 1's `CancelLlm` effect handler recorded "Turn interrupted" inline. Phase 2 moves that responsibility to the new `RecordInterruptMemory` effect. The `CancelLlm` handler must be updated to remove its inline interrupt memory recording to avoid duplicates.
+- `DebounceCooldownExpired` is kept for backward compatibility but `TimerExpired{kDebounce}` is the preferred path
+- Effect execution in ApplyDialogueDecision may delegate to existing Controller methods (HandleThinking, HandleActing, HandleResponding) where they serve as entry points for complex I/O sequences.
+- Unhandled event types in unexpected states return no-op (state unchanged, empty effects)
+- Phase 1 property tests are extended with Phase 2 generators, not replaced

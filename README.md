@@ -57,7 +57,7 @@ export ELEVENLABS_API_KEY=...
 
 ```
 app/          Product layer: persona, scheduler, tools, memory, AppRuntime
-core/         Agent framework: controller state machine, context, policy, strategies
+core/         Agent framework: dialogue reducer, controller state machine, context, policy, strategies
 io/           IoDevice implementations: audio, ASR, TTS, VAD, probes
 runtime/      Device bus: AgentRuntime, CoreDevice, ToolDispatchDevice, RouteTable
 services/     Vendor clients: OpenAI LLM, Baidu ASR/TTS, ElevenLabs TTS
@@ -79,6 +79,13 @@ Microphone → VAD → ASR → CoreDevice (LLM reasoning) → TTS → Speaker
 ```
 
 The app layer (`app/`) sits above the infrastructure and handles product-specific logic: persona prompt assembly, tool registration, scheduler wiring, and session lifecycle.
+
+Current core architecture status:
+
+- `controller/` still owns the main execution state machine and normal user input path
+- `dialogue/DefaultDialogueReducer` is already introduced for Phase 1 and owns the text/message-layer `barge-in + debounce` branch
+- normal user input still follows aggregator → filter → thinking
+- VAD `speech_start` interruption still uses the legacy interruption path and has not yet been unified under the reducer
 
 See `.kiro/steering/architecture.md` for the full architecture guide.
 

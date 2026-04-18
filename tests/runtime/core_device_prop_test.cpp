@@ -20,6 +20,7 @@
 #include "context/types.h"
 #include "io/control_frame.h"
 #include "io/data_frame.h"
+#include "io/interrupt_frame.h"
 #include "runtime/core_device.h"
 #include "mock_audit_sink.h"
 #include "mock_llm_client.h"
@@ -238,13 +239,13 @@ RC_GTEST_PROP(CoreDevicePropTest, prop_unsupported_port_discarded, ()) {
 }
 
 // ---------------------------------------------------------------------------
-// Property 7: speech_end on vad_in produces flush on control_out
-// Feature: core-decoupling, Property 7: speech_end produces flush
+// Property 7: interrupt_in produces cancel on control_out
+// Feature: core-decoupling, Property 7: interrupt produces cancel
 // ---------------------------------------------------------------------------
 // **Validates: Requirements 6.4, 8.5**
-RC_GTEST_PROP(CoreDevicePropTest, prop_speech_end_produces_flush, ()) {
-  // Property: any vad/event frame with payload "speech_end" delivered to
-  // vad_in must cause control_out to emit a frame where Parse == "flush".
+RC_GTEST_PROP(CoreDevicePropTest, prop_interrupt_in_produces_cancel, ()) {
+  // Property: any interrupt/request frame delivered to interrupt_in must
+  // cause control_out to emit a frame where Parse == "cancel".
   auto device = MakeCoreDevice("core_vad");
 
   std::mutex mu;
@@ -258,18 +259,17 @@ RC_GTEST_PROP(CoreDevicePropTest, prop_speech_end_produces_flush, ()) {
 
   device->Start();
 
-  // Deliver speech_end on vad_in.
-  const std::string event = "speech_end";
-  io::DataFrame vad_frame;
-  vad_frame.type = "vad/event";
-  vad_frame.payload = std::vector<uint8_t>(event.begin(), event.end());
-  device->OnInput("vad_in", std::move(vad_frame));
+  // Deliver barge-in on interrupt_in.
+  auto interrupt = io::InterruptFrame::Make(
+      io::InterruptFrame::kReasonBargeIn, "voice");
+  device->OnInput("interrupt_in", std::move(interrupt));
 
   // Wait briefly for the synchronous emit to propagate.
-  bool got_flush = WaitFor([&] {
+  bool got_cancel = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
     for (const auto& [port, f] : emitted) {
-      if (port == "control_out" && io::ControlFrame::Parse(f) == "flush") {
+      if (port == "control_out" &&
+          io::ControlFrame::Parse(f) == io::ControlFrame::kCommandCancel) {
         return true;
       }
     }
@@ -278,7 +278,7 @@ RC_GTEST_PROP(CoreDevicePropTest, prop_speech_end_produces_flush, ()) {
 
   device->Stop();
 
-  RC_ASSERT(got_flush);
+  RC_ASSERT(got_cancel);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,12 +286,9 @@ RC_GTEST_PROP(CoreDevicePropTest, prop_speech_end_produces_flush, ()) {
 // Feature: core-decoupling, Property 8: interrupt produces cancel
 // ---------------------------------------------------------------------------
 // **Validates: Requirements 1.5, 6.2**
-RC_GTEST_PROP(CoreDevicePropTest, prop_interrupt_produces_cancel, ()) {
-  // Property: a speech_start VAD event while the controller is in kThinking
+RC_GTEST_PROP(CoreDevicePropTest, prop_interrupt_during_thinking_produces_cancel, ()) {
+  // Property: an interrupt/request frame while the controller is in kThinking
   // must cause control_out to emit "cancel" immediately.
-  //
-  // CoreDevice::OnInput("vad_in", "speech_start") emits cancel directly on
-  // control_out and enqueues an interrupt — no dependency on the LLM thread.
 
   core::testing::MockLlmClient* llm = nullptr;
   auto device = MakeCoreDevice("core_intr", &llm);
@@ -331,13 +328,11 @@ RC_GTEST_PROP(CoreDevicePropTest, prop_interrupt_produces_cancel, ()) {
   }, 300);
   RC_ASSERT(in_thinking);
 
-  // Deliver speech_start on vad_in — this emits cancel immediately on
+  // Deliver interrupt on interrupt_in — this emits cancel immediately on
   // control_out without waiting for the LLM thread to unblock.
-  const std::string speech_start = "speech_start";
-  io::DataFrame vad_frame;
-  vad_frame.type = "vad/event";
-  vad_frame.payload = std::vector<uint8_t>(speech_start.begin(), speech_start.end());
-  device->OnInput("vad_in", std::move(vad_frame));
+  auto interrupt = io::InterruptFrame::Make(
+      io::InterruptFrame::kReasonBargeIn, "voice");
+  device->OnInput("interrupt_in", std::move(interrupt));
 
   // Verify cancel was emitted on control_out.
   bool got_cancel = WaitFor([&] {

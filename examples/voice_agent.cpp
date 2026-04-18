@@ -14,7 +14,8 @@
 //
 // Control routes:
 //
-//   [VadEventDevice]        vad_out   ──► [core]               vad_in
+//   [VadEventDevice]        interrupt_out ──► [core]           interrupt_in
+//   [VadEventDevice]        control_out   ──► [BaiduAsrDevice] control_in
 //   [core]                  control_out ► [BaiduAsrDevice]     control_in
 //   [core]                  control_out ► [ElevenLabsTtsDevice] control_in
 //   [core]                  control_out ► [AudioPlayoutDevice] control_in
@@ -177,7 +178,8 @@ int main(int argc, char* argv[]) {
   if (!voice_id.empty()) { el_cfg.voice_id = voice_id; }
   auto tts = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
 
-  // VadEventDevice: emits vad/event frames on vad_out (routed to core:vad_in).
+  // VadEventDevice: maps speech_start to interrupt_out and speech_end to
+  // control_out flush, while keeping raw vad_out for observability.
   auto asr_flush = std::make_unique<io::VadEventDevice>();
 
   // ── LLM config ────────────────────────────────────────────────────────────
@@ -457,7 +459,7 @@ int main(int argc, char* argv[]) {
   runtime.AddRoute({"vad_dump", io::PcmDumpDevice::kPassOut},
                    {"baidu_asr","audio_in"}, kDma);
 
-  // vad vad_out (events) → asr_flush (triggers Flush on speech_end)
+  // vad vad_out (events) → asr_flush adapter
   runtime.AddRoute({"vad",       io::EnergyVadDevice::kVadOut},
                    {"vad_event", io::VadEventDevice::kVadIn}, kDma);
 
@@ -485,9 +487,11 @@ int main(int argc, char* argv[]) {
   runtime.AddRoute({"tool_dispatch", runtime::ToolDispatchDevice::kResultOut},
                    {"core", "tool_result_in"}, kCtrl);
 
-  // VAD → core (interrupt detection)
-  runtime.AddRoute({"vad_event", "vad_out"},
-                   {"core", "vad_in"}, kDma);
+  // VAD adapter → ASR/core
+  runtime.AddRoute({"vad_event", io::VadEventDevice::kControlOut},
+                   {"baidu_asr", "control_in"}, kCtrl);
+  runtime.AddRoute({"vad_event", io::VadEventDevice::kInterruptOut},
+                   {"core", "interrupt_in"}, kDma);
 
   // Control plane: core controls ASR, TTS, and playout
   runtime.AddRoute({"core", "control_out"},

@@ -1,5 +1,16 @@
 # Natural Conversation Model
 
+## Architectural Positioning
+
+This document describes the short-term behavior target for natural
+conversation.  It should remain valid as a user-visible requirement even if
+the implementation moves away from ad-hoc controller branches.
+
+Long term, this behavior should live inside the dialogue kernel described in
+`.kiro/steering/dialogue-kernel.md`, where barge-in, debounce, continuation,
+and internal timer handling are modeled as dialogue events and effects rather
+than special-case controller flags.
+
 ## Problem
 
 Current behavior: user sends message A → LLM starts thinking → user sends B →
@@ -118,11 +129,15 @@ decision.  This flag is cleared when HandleThinking is finally called.
 
 ## State Machine Impact
 
-No new states needed.  The change is entirely within the kListening
-behavior after an interrupt:
+Short-term implementation can still be expressed within the existing
+controller states:
 
 - Before: interrupt → kListening → immediately process next observation
 - After: interrupt → kListening → buffer observations → timeout → process all
+
+Long-term architecture should not rely on controller state alone for this
+behavior.  The richer model belongs in explicit dialogue state owned by the
+dialogue kernel.
 
 ## Testing
 

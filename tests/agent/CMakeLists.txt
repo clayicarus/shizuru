@@ -97,6 +97,22 @@ target_include_directories(controller_bug_condition_test
 add_test(NAME controller_bug_condition_test COMMAND controller_bug_condition_test)
 set_tests_properties(controller_bug_condition_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=5")
 
+# Dialogue reducer tests (unit + property)
+add_executable(dialogue_reducer_test
+  dialogue_reducer_test.cpp
+  dialogue_reducer_prop_test.cpp
+)
+target_link_libraries(dialogue_reducer_test
+  PRIVATE shizuru_core
+  PRIVATE GTest::gtest_main
+  PRIVATE rapidcheck_gtest
+)
+target_include_directories(dialogue_reducer_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME dialogue_reducer_test COMMAND dialogue_reducer_test)
+set_tests_properties(dialogue_reducer_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=100")
+
 # Controller preservation tests (must pass on unfixed code)
 add_executable(controller_preservation_test
   controller_preservation_test.cpp

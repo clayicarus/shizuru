@@ -36,11 +36,11 @@ follow these conventions.
        │                       │
 ┌──────▼──────┐         ┌──────▼──────┐
 │  Core (core/)│         │  IO (io/)   │
-│  Controller  │         │  IoDevice   │
-│  Context     │         │  audio/     │
-│  Policy      │         │  asr/       │
-│  Strategies  │         │  tts/       │
-│              │         │  vad/       │
+│  Dialogue    │         │  IoDevice   │
+│  Controller  │         │  audio/     │
+│  Context     │         │  asr/       │
+│  Policy      │         │  tts/       │
+│  Strategies  │         │  vad/       │
 │              │         │  probe/     │
 └──────────────┘         └──────────────┘
        │
@@ -63,9 +63,29 @@ follow these conventions.
 ## Module Responsibilities
 
 ### core/ — Agent Framework
-Platform-independent agent logic.  Controller state machine, context
-strategy, policy layer, pluggable strategies.  No knowledge of IoDevice,
-DataFrame, or any specific vendor.
+Platform-independent agent logic.  Dialogue kernel, controller shell,
+context strategy, policy layer, and pluggable strategies.  No knowledge of
+IoDevice, DataFrame, or any specific vendor.
+
+`core/` is internally split into:
+- **dialogue/**: Dialogue kernel for turn-taking, reducer/effect semantics,
+  agenda management, and internal event handling.
+- **controller/**: Event loop shell that owns the queue, executes effects,
+  and bridges asynchronous callbacks back into dialogue events.
+- **context/**: Conversation history, prompt-window assembly, summarization.
+- **policy/**: Capability checks, approvals, audit hooks.
+- **strategies/**: Pluggable classifiers and helpers (input aggregation,
+  relevance filtering, TTS segmentation, response filtering).
+
+Current implementation status:
+- **Phase 1 is implemented**.  `core/dialogue/DefaultDialogueReducer`
+  currently owns the text/message-layer **barge-in + debounce cooldown**
+  branch.
+- **Normal user input flow remains in Controller** and still follows
+  aggregator → filter → thinking.
+- **VAD `speech_start` interruption is still handled by the legacy
+  `kInterruption` path** in `Controller`.  Full interrupt unification is a
+  later phase.
 
 ### io/ — Data Transport Devices
 IoDevice implementations that handle physical media or external service
@@ -77,12 +97,13 @@ convert data formats.
 - **AgentRuntime**: Pure device bus.  Registers devices, manages routes,
   dispatches frames, controls lifecycle.  Zero business logic.
 - **CoreDevice**: Bridge between core/ and io/.  Translates DataFrame ↔
-  Observation/ActionCandidate.  The only component that knows both worlds.
+  observation/tool-result/interrupt semantics.  The only component that knows
+  both the bus contract and the core dialogue contract.
 - **ToolDispatchDevice + ToolRegistry**: DMA controller analogy.  Receives
   tool call frames from CoreDevice, dispatches to registered tool functions,
   returns results.  Lives in runtime/ because it bridges the agent's
   reasoning loop with external capabilities.
-- **RouteTable**: Single source of truth for all data flow topology.
+- **RouteTable**: Single source of truth for signal topology across the bus.
 
 ### app/ — Product Layer
 Product-specific logic built on top of the infrastructure layers.
@@ -103,13 +124,59 @@ Thin C API layer for Flutter dart:ffi.  Holds AppRuntime, creates
 platform-specific audio devices (Oboe vs PortAudio), wires C callbacks
 for Dart NativeCallable.  No business logic.
 
+## Core Internal Architecture
+
+The current `core/` architecture is a hybrid:
+
+1. **Execution state machine in `controller/`** — the existing `State`,
+   `Event`, and `kTransitionTable` still drive the main lifecycle
+   (`Listening`, `Thinking`, `Acting`, `Responding`, etc.).
+2. **Dialogue reducer in `dialogue/`** — Phase 1 reducer handles
+   barge-in/debounce decisions and emits explicit effects.
+3. **Effect execution in `controller/`** — Controller applies reducer effects
+   inline without delegating interrupt semantics back to the old
+   `HandleInterrupt()` path.
+4. **Normal message path in `controller/` + `strategies/`** — regular user
+   input still goes through aggregator/filter before thinking.
+
+The longer-term direction for `core/` is a fuller dialogue kernel layered as:
+
+1. **Dialogue events** — external observations, timer expirations, LLM
+   callbacks, tool results, playback lifecycle updates.
+2. **Dialogue state** — explicit turn workspace, committed history view,
+   deliberation state, output state, pending tools, agenda.
+3. **Reducer / turn policy** — pure semantic decision layer that maps
+   `(state, event)` to `(next_state, effects)`.
+4. **Effect execution** — impure operations such as recording memory,
+   scheduling timers, starting/cancelling LLM calls, emitting tool frames,
+   and pushing UI conversation items.
+
+Phase 1 already establishes the reducer/effect shell, but only for the
+barge-in/debounce branch.  The detailed proposal and future phases live in
+`.kiro/steering/dialogue-kernel.md`.
+
+### Why This Split Exists
+
+- **Dialogue state is multi-dimensional**.  Listening / thinking / acting is
+  not enough once the agent must reason about barge-in, debounce windows,
+  pending tool work, and streaming playback simultaneously.
+- **Strategies are signal providers, not workflow owners**.  Aggregators and
+  filters may classify or reshape input, but they should not encode the whole
+  conversation policy by themselves.
+- **Effects must be explicit**.  Starting an LLM request, writing memory,
+  or cancelling playback are asynchronous side effects that should be visible
+  in the architecture rather than hidden inside controller branches.
+- **Migration is incremental**.  During Phase 1, Controller still owns the
+  normal message path and the execution state machine, while dialogue reducer
+  logic is introduced only on the barge-in/debounce branch.
+
 ## OS-Inspired Design Analogy
 
 The architecture draws from operating system concepts:
 
 | OS Concept | Shizuru Component | Role |
 |---|---|---|
-| CPU | Controller (core/) | Reasoning, state machine, decision making |
+| CPU | Controller shell + dialogue reducer (core/) | Reasoning, state transitions, decision making |
 | Memory Manager | ContextStrategy (core/) | Prompt window, token budget |
 | Permission System | PolicyLayer (core/) | RBAC, audit, approval gates |
 | Device Bus | AgentRuntime (runtime/) | Device registration, frame routing |
@@ -136,15 +203,19 @@ The architecture draws from operating system concepts:
 
 ## Signal Flow Rules
 
-1. **Control plane signals** (cancel, flush) originate from CoreDevice
-   and flow to IO devices via RouteTable.
+1. **Control plane signals** (cancel, flush) flow to IO devices via
+   RouteTable.  They are usually emitted by CoreDevice, but signal adapters
+   may also emit device-local control commands (for example speech_end →
+   ASR flush).
 2. **Data plane signals** (audio frames, text) flow between IO devices
    via DMA routes (requires_control_plane = false).
-3. **Tool call requests** flow from CoreDevice:action_out to
+3. **Event plane signals** (interrupts, scheduler triggers) enter core via
+   dedicated semantic input ports rather than device-specific protocols.
+4. **Tool call requests** flow from CoreDevice:action_out to
    ToolDispatchDevice:action_in via control plane route.
-4. **Tool results** flow from ToolDispatchDevice:result_out back to
+5. **Tool results** flow from ToolDispatchDevice:result_out back to
    CoreDevice:tool_result_in via control plane route.
-5. **Tool side effects** (scheduler writes, DB writes) are executed
+6. **Tool side effects** (scheduler writes, DB writes) are executed
    directly by tool functions — they do NOT flow through the bus.
    The Controller authorizes these indirectly via the tool call mechanism.
 
@@ -184,4 +255,3 @@ preferred over in-content markup (XML tags, etc.) because:
    be brought up naturally, not announced as system notifications).
 3. **The `name` field pipeline is already fully wired** — Observation.source
    → MemoryEntry.source_tag → ContextMessage.name → API `name` field.
-

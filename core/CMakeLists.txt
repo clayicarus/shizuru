@@ -18,6 +18,7 @@ add_library(shizuru_core STATIC
   session/session.cpp
   strategies/llm_observation_filter.cpp
   strategies/llm_observation_aggregator.cpp
+  dialogue/default_reducer.cpp
 )
 
 target_include_directories(shizuru_core

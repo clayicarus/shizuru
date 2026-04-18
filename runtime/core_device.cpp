@@ -7,6 +7,7 @@
 #include "async_logger.h"
 #include "conversation/item.h"
 #include "io/control_frame.h"
+#include "io/interrupt_frame.h"
 
 namespace shizuru::runtime {
 
@@ -49,7 +50,7 @@ CoreDevice::CoreDevice(std::string device_id,
       std::move(response_filter));
 
   // OnTransition: emit cancel on control_out when transitioning to kListening
-  // via kInterrupt or kResponseDelivered.
+  // via kInterrupt.
   session_->GetController().OnTransition(
       [this](core::State /*from*/, core::State to, core::Event event) {
         if (to == core::State::kListening &&
@@ -66,13 +67,13 @@ std::string CoreDevice::GetDeviceId() const {
 
 std::vector<io::PortDescriptor> CoreDevice::GetPortDescriptors() const {
   return {
-      {kTextIn,       io::PortDirection::kInput,  "text/plain"},
-      {kToolResultIn, io::PortDirection::kInput,  "action/tool_result"},
-      {kVadIn,        io::PortDirection::kInput,  "vad/event"},
-      {kSchedulerIn,  io::PortDirection::kInput,  "scheduler/event"},
-      {kTtsOut,       io::PortDirection::kOutput, "text/plain"},
-      {kActionOut,    io::PortDirection::kOutput, "action/tool_call"},
-      {kControlOut,   io::PortDirection::kOutput, "control/command"},
+      {kTextIn,        io::PortDirection::kInput,  "text/plain"},
+      {kToolResultIn,  io::PortDirection::kInput,  "action/tool_result"},
+      {kInterruptIn,   io::PortDirection::kInput,  io::InterruptFrame::kType},
+      {kSchedulerIn,   io::PortDirection::kInput,  "scheduler/event"},
+      {kTtsOut,        io::PortDirection::kOutput, "text/plain"},
+      {kActionOut,     io::PortDirection::kOutput, "action/tool_call"},
+      {kControlOut,    io::PortDirection::kOutput, "control/command"},
   };
 }
 
@@ -115,19 +116,16 @@ void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
       obs.source = "tool:" + tool_name;
     }
     session_->EnqueueObservation(std::move(obs));
-  } else if (port_name == kVadIn) {
-    const std::string event_name(frame.payload.begin(), frame.payload.end());
-    LOG_INFO("CoreDevice: vad_in received event '{}'", event_name);
-    if (event_name == "speech_end") {
-      LOG_INFO("CoreDevice: emitting flush on control_out");
-      EmitFrame(kControlOut, io::ControlFrame::Make("flush"));
-    } else if (event_name == "speech_start") {
-      // User started speaking — cancel TTS/playout immediately via control_out,
-      // then interrupt the controller so it transitions out of kThinking/kActing.
-      EmitFrame(kControlOut, io::ControlFrame::Make("cancel"));
-      session_->GetController().Interrupt();
-    }
-    // speech_active is silently ignored.
+  } else if (port_name == kInterruptIn) {
+    const std::string reason = io::InterruptFrame::ParseReason(frame);
+    const std::string source = io::InterruptFrame::ParseSource(frame);
+    LOG_INFO("CoreDevice: interrupt_in received reason='{}' source='{}'",
+             reason, source);
+
+    // Fast-path device cancellation: playout/TTS should stop as soon as
+    // barge-in is detected, before the controller loop processes the event.
+    EmitFrame(kControlOut, io::ControlFrame::Make(io::ControlFrame::kCommandCancel));
+    session_->GetController().Interrupt();
   } else if (port_name == kSchedulerIn) {
     // Scheduler events bypass aggregator and filter.
     const std::string content(frame.payload.begin(), frame.payload.end());

@@ -24,7 +24,7 @@
 namespace shizuru::runtime {
 
 // IoDevice adapter that wraps AgentSession.
-// Translates between DataFrame and core types (Observation, ActionCandidate).
+// Translates runtime-level frames into core observations and interrupts.
 class CoreDevice : public io::IoDevice {
  public:
   CoreDevice(std::string device_id,
@@ -55,7 +55,7 @@ class CoreDevice : public io::IoDevice {
  private:
   static constexpr char kTextIn[] = "text_in";
   static constexpr char kToolResultIn[] = "tool_result_in";
-  static constexpr char kVadIn[] = "vad_in";
+  static constexpr char kInterruptIn[] = "interrupt_in";
   static constexpr char kSchedulerIn[] = "scheduler_in";
   static constexpr char kTextOut[] = "text_out";
   static constexpr char kTtsOut[] = "tts_out";
