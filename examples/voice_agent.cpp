@@ -226,7 +226,6 @@ int main(int argc, char* argv[]) {
 
   // ── Core configs ──────────────────────────────────────────────────────────
   core::ControllerConfig ctrl_cfg;
-  ctrl_cfg.max_turns     = 100;
   ctrl_cfg.use_streaming = true;  // Enable SSE streaming
 
   core::ContextConfig ctx_cfg;

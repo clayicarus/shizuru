@@ -90,10 +90,8 @@ CoreDevice* AssembleAgent(AgentRuntime& runtime,
                           bool streaming = false,
                           core::PolicyConfig pol_cfg = {}) {
   core::ControllerConfig ctrl_cfg;
-  ctrl_cfg.max_turns = 10;
   ctrl_cfg.max_retries = 0;
   ctrl_cfg.retry_base_delay = std::chrono::milliseconds(1);
-  ctrl_cfg.turn_timeout = std::chrono::seconds(15);
   ctrl_cfg.token_budget = 100000;
   ctrl_cfg.action_count_limit = 20;
   ctrl_cfg.use_streaming = streaming;

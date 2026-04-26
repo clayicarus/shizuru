@@ -73,12 +73,9 @@ rc::Gen<ActionType> genActionType() {
 
 rc::Gen<ControllerConfig> genControllerConfig() {
   return rc::gen::build<ControllerConfig>(
-      rc::gen::set(&ControllerConfig::max_turns, rc::gen::inRange(1, 50)),
       rc::gen::set(&ControllerConfig::max_retries, rc::gen::inRange(0, 5)),
       rc::gen::set(&ControllerConfig::retry_base_delay,
                    rc::gen::just(std::chrono::milliseconds(1))),
-      rc::gen::set(&ControllerConfig::turn_timeout,
-                   rc::gen::just(std::chrono::seconds(5))),
       rc::gen::set(&ControllerConfig::token_budget,
                    rc::gen::inRange(1000, 100000)),
       rc::gen::set(&ControllerConfig::action_count_limit,
@@ -220,8 +217,11 @@ RC_GTEST_PROP(ControllerPropTest, prop_valid_transitions, (void)) {
 // ---------------------------------------------------------------------------
 RC_GTEST_PROP(ControllerPropTest, prop_invalid_transitions_preserve_state,
               (void)) {
-  auto [state, event] = *genInvalidTransitionPair();
-  RC_PRE(state == State::kIdle);
+  // Generate invalid transitions specifically from kIdle to avoid
+  // double-filtering (suchThat + RC_PRE) which causes RapidCheck to give up.
+  auto event = *genEvent();
+  auto state = State::kIdle;
+  RC_PRE(!IsValidTransition(state, event));
 
   TestHarness h;
   std::vector<std::string> diagnostics;
@@ -276,10 +276,10 @@ RC_GTEST_PROP(ControllerPropTest, prop_action_routing_by_type, (void)) {
   auto action_type = *genActionType();
 
   ControllerConfig cfg;
-  cfg.max_turns = 5;
+  cfg.action_count_limit = 5;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 100;
 
@@ -425,13 +425,14 @@ RC_GTEST_PROP(ControllerPropTest, prop_observation_fifo, (void)) {
   int count = *rc::gen::inRange(2, 6);
 
   ControllerConfig cfg;
-  cfg.max_turns = 100;
+  cfg.action_count_limit = 100;
   cfg.max_retries = 0;
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
   TestHarness h(cfg);
 
+  std::atomic<int> llm_call_count{0};
   std::vector<std::string> processed_order;
   std::mutex order_mu;
 
@@ -440,6 +441,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_observation_fifo, (void)) {
       std::lock_guard<std::mutex> lock(order_mu);
       processed_order.push_back(ctx.messages.back().content);
     }
+    llm_call_count.fetch_add(1);
     LlmResult r;
     r.candidate.type = ActionType::kResponse;
     r.candidate.response_text = "ack";
@@ -451,10 +453,15 @@ RC_GTEST_PROP(ControllerPropTest, prop_observation_fifo, (void)) {
   h.controller->Start();
   RC_ASSERT(WaitFor([&] { return h.controller->GetState() == State::kListening; }));
 
+  // Send messages one at a time, waiting for each turn to complete before
+  // sending the next.  This is necessary because turn-trigger classification
+  // is async — without waiting, messages pile up and supersede each other.
   std::vector<std::string> expected_order;
   for (int i = 0; i < count; ++i) {
     std::string content = "msg_" + std::to_string(i);
     expected_order.push_back(content);
+
+    int before = llm_call_count.load();
 
     Observation obs;
     obs.type = ObservationType::kUserMessage;
@@ -462,103 +469,33 @@ RC_GTEST_PROP(ControllerPropTest, prop_observation_fifo, (void)) {
     obs.source = "user";
     obs.timestamp = std::chrono::steady_clock::now();
     h.controller->EnqueueObservation(std::move(obs));
-  }
 
-  // Wait for at least the first observation to be processed.
-  RC_ASSERT(WaitFor([&] {
-    std::lock_guard<std::mutex> lock(order_mu);
-    return !processed_order.empty();
-  }));
+    // Wait for this turn's LLM call to complete.
+    RC_ASSERT(WaitFor([&] {
+      return llm_call_count.load() > before;
+    }));
+    // Wait for controller to return to Listening.
+    RC_ASSERT(WaitFor([&] {
+      return h.controller->GetState() == State::kListening;
+    }));
+  }
 
   h.controller->Shutdown();
 
   std::lock_guard<std::mutex> lock(order_mu);
-  RC_ASSERT(!processed_order.empty());
-  RC_ASSERT(processed_order[0] == expected_order[0]);
+  RC_ASSERT(processed_order.size() == expected_order.size());
+  for (size_t i = 0; i < processed_order.size(); ++i) {
+    RC_ASSERT(processed_order[i] == expected_order[i]);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Property 7: Turn count stop condition
-// ---------------------------------------------------------------------------
-RC_GTEST_PROP(ControllerPropTest, prop_turn_count_stop, (void)) {
-  int max_turns = *rc::gen::inRange(1, 5);
-
-  ControllerConfig cfg;
-  cfg.max_turns = max_turns;
-  cfg.max_retries = 0;
-  cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(10);
-  cfg.token_budget = 1000000;
-  cfg.action_count_limit = 1000;
-
-  testing::MockAuditSink audit_sink;
-  testing::MockMemoryStore memory_store;
-  ContextConfig ctx_cfg;
-  ctx_cfg.max_context_tokens = 1000000;
-  ContextStrategy context(ctx_cfg, memory_store);
-  context.InitSession("test-session");
-
-  PolicyConfig pol_cfg;
-  PolicyLayer policy(pol_cfg, audit_sink);
-  policy.InitSession("test-session");
-
-  auto llm = std::make_unique<testing::MockLlmClient>();
-  auto* llm_ptr = llm.get();
-
-  llm_ptr->submit_fn = [](const ContextWindow&) -> LlmResult {
-    LlmResult r;
-    r.candidate.type = ActionType::kResponse;
-    r.candidate.response_text = "response";
-    r.prompt_tokens = 1;
-    r.completion_tokens = 1;
-    return r;
-  };
-
-  std::vector<std::tuple<State, State, Event>> transitions;
-  std::mutex trans_mu;
-
-  Controller ctrl("test-session", cfg, std::move(llm), nullptr, nullptr, context, policy);
-  ctrl.OnTransition(
-      [&](State from, State to, Event event) {
-        std::lock_guard<std::mutex> lock(trans_mu);
-        transitions.push_back({from, to, event});
-      });
-
-  ctrl.Start();
-  RC_ASSERT(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
-
-  // Send all observations upfront.
-  for (int i = 0; i < max_turns + 2; ++i) {
-    Observation obs;
-    obs.type = ObservationType::kUserMessage;
-    obs.content = "turn_" + std::to_string(i);
-    obs.source = "user";
-    obs.timestamp = std::chrono::steady_clock::now();
-    ctrl.EnqueueObservation(std::move(obs));
-  }
-
-  // Wait for kStopConditionMet → kIdle.
-  RC_ASSERT(WaitFor([&] {
-    std::lock_guard<std::mutex> lock(trans_mu);
-    for (const auto& [from, to, ev] : transitions) {
-      if (ev == Event::kStopConditionMet && to == State::kIdle) return true;
-    }
-    return false;
-  }));
-
-  ctrl.Shutdown();
-
-  std::lock_guard<std::mutex> lock(trans_mu);
-  bool found_stop_condition = false;
-  for (const auto& [from, to, ev] : transitions) {
-    if (ev == Event::kStopConditionMet && to == State::kIdle) {
-      found_stop_condition = true;
-      break;
-    }
-  }
-  RC_ASSERT(found_stop_condition);
-  RC_ASSERT(static_cast<int>(llm_ptr->submit_calls.size()) == max_turns);
-}
+// Property 7: Turn count stop condition — REMOVED
+// The old session-level max_turns limit has been replaced by per-turn limits
+// (action_count_limit, max_continuations, token_budget).  Per-turn limits
+// reset on each new user message, so the old "send N+2 messages and expect
+// stop" test no longer applies.  Per-turn budget exhaustion is tested in
+// dialogue_reducer_test.cpp.
 
 // ---------------------------------------------------------------------------
 // Property 8: LLM retry with exponential backoff
@@ -567,10 +504,9 @@ RC_GTEST_PROP(ControllerPropTest, prop_llm_retry_backoff, (void)) {
   int max_retries = *rc::gen::inRange(1, 4);
 
   ControllerConfig cfg;
-  cfg.max_turns = 10;
+  cfg.action_count_limit = 10;
   cfg.max_retries = max_retries;
   cfg.retry_base_delay = std::chrono::milliseconds(5);
-  cfg.turn_timeout = std::chrono::seconds(10);
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
   TestHarness h(cfg);
@@ -631,10 +567,10 @@ RC_GTEST_PROP(ControllerPropTest, prop_llm_retry_backoff, (void)) {
 // ---------------------------------------------------------------------------
 RC_GTEST_PROP(ControllerPropTest, prop_io_failure_feeds_thinking, (void)) {
   ControllerConfig cfg;
-  cfg.max_turns = 10;
+  cfg.action_count_limit = 10;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
 
@@ -774,10 +710,9 @@ RC_GTEST_PROP(ControllerPropTest, prop_budget_guardrails, (void)) {
   int token_budget = *rc::gen::inRange(20, 100);
 
   ControllerConfig cfg;
-  cfg.max_turns = 1000;
+  cfg.action_count_limit = 1000;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(10);
   cfg.token_budget = token_budget;
   cfg.action_count_limit = 1000;
 
@@ -856,10 +791,9 @@ RC_GTEST_PROP(ControllerPropTest, prop_budget_guardrails, (void)) {
 // ---------------------------------------------------------------------------
 RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
   ControllerConfig cfg;
-  cfg.max_turns = 100;
+  cfg.action_count_limit = 100;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(10);
   cfg.token_budget = 1000000;
   cfg.action_count_limit = 1000;
 
@@ -1065,10 +999,10 @@ RC_GTEST_PROP(ControllerPropTest,
   };
 
   ControllerConfig cfg;
-  cfg.max_turns = 10;
+  cfg.action_count_limit = 10;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 100;
 
@@ -1233,10 +1167,10 @@ RC_GTEST_PROP(ControllerPropTest,
   };
 
   ControllerConfig cfg;
-  cfg.max_turns = 10;
+  cfg.action_count_limit = 10;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 100;
 
@@ -1353,10 +1287,10 @@ RC_GTEST_PROP(ControllerPropTest,
   };
 
   ControllerConfig cfg;
-  cfg.max_turns = 10;
+  cfg.action_count_limit = 10;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 100;
 

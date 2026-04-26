@@ -131,6 +131,7 @@ enum class ActivityKind {
   kInterrupted,         // 7  Turn interrupted by user
   kTurnComplete,        // 8  Turn finished, back to listening
   kBudgetExhausted,     // 9  Budget limit hit, entering idle
+  kInputStored,         // 10 Message stored but no assistant turn (kStoreOnly)
 };
 
 struct ActivityEvent {

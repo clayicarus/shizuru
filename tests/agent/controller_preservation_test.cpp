@@ -103,10 +103,10 @@ RC_GTEST_PROP(ControllerPreservation,
   std::vector<std::string> responses;
 
   ControllerConfig cfg;
-  cfg.max_turns = 20;
+  cfg.action_count_limit = 20;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 50;
 
@@ -265,10 +265,10 @@ RC_GTEST_PROP(ControllerPreservation,
   };
 
   ControllerConfig cfg;
-  cfg.max_turns = 20;
+  cfg.action_count_limit = 20;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 50;
 
@@ -391,10 +391,10 @@ TEST(ControllerPreservation, TtsSegmentationPreservation) {
   };
 
   ControllerConfig cfg;
-  cfg.max_turns = 20;
+  cfg.action_count_limit = 20;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 50;
   cfg.use_streaming = true;
@@ -487,10 +487,10 @@ RC_GTEST_PROP(ControllerPreservation,
   };
 
   ControllerConfig cfg;
-  cfg.max_turns = 20;
+  cfg.action_count_limit = 20;
   cfg.max_retries = 0;
   cfg.retry_base_delay = std::chrono::milliseconds(1);
-  cfg.turn_timeout = std::chrono::seconds(5);
+  cfg.max_continuations = 50;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 50;
 

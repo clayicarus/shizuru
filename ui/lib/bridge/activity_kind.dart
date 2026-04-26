@@ -11,6 +11,7 @@ enum ActivityKind {
   interrupted,        // 7
   turnComplete,       // 8
   budgetExhausted,    // 9
+  inputStored,        // 10
 }
 
 extension ActivityKindExtension on ActivityKind {

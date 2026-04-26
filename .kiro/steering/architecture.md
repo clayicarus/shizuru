@@ -79,13 +79,18 @@ IoDevice, DataFrame, or any specific vendor.
 
 Current implementation status:
 - **Phase 1 is implemented**.  `core/dialogue/DefaultDialogueReducer`
-  currently owns the text/message-layer **barge-in + debounce cooldown**
-  branch.
-- **Normal user input flow remains in Controller** and still follows
-  aggregator → filter → thinking.
-- **VAD `speech_start` interruption is still handled by the legacy
-  `kInterruption` path** in `Controller`.  Full interrupt unification is a
-  later phase.
+  owns the text/message-layer **barge-in + debounce cooldown** branch.
+- **Phase 2 is implemented**.  All post-aggregation turn-taking semantics
+  (normal user messages, LLM completion/failure, tool result/timeout,
+  system events, continuation, turn-trigger classification) are routed
+  through the reducer.  Controller is a thin event-mapping and
+  effect-execution shell.
+- **Phase 3 is implemented**.  A provisional turn workspace separates
+  in-progress turn data from committed history.  Debounce fragments are
+  merged before commit.  The ObservationAggregator is event-driven
+  (AggregationComplete / AggregationTimeout events, TimerBook-managed
+  timeout).
+- **Phase 4 (agenda, mixed-initiative)** is not yet implemented.
 
 ### io/ — Data Transport Devices
 IoDevice implementations that handle physical media or external service

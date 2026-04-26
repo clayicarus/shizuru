@@ -217,6 +217,9 @@ class AgentProvider extends ChangeNotifier {
       case ActivityKind.budgetExhausted:
         _activity = 'Turn limit reached';
         break;
+      case ActivityKind.inputStored:
+        _activity = '';
+        break;
     }
     _activityCallback?.call(kind, detail);
     notifyListeners();

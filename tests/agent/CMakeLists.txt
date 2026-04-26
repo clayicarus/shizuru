@@ -16,10 +16,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(rapidcheck)
 
-# Controller tests (unit + property)
+# Controller tests (unit + property + Phase 2 regression)
 add_executable(controller_test
   controller_test.cpp
   controller_prop_test.cpp
+  controller_phase2_test.cpp
 )
 target_link_libraries(controller_test
   PRIVATE shizuru_core
@@ -100,6 +101,8 @@ set_tests_properties(controller_bug_condition_test PROPERTIES ENVIRONMENT "RC_PA
 # Dialogue reducer tests (unit + property)
 add_executable(dialogue_reducer_test
   dialogue_reducer_test.cpp
+  dialogue_reducer_phase2_test.cpp
+  dialogue_reducer_phase3_test.cpp
   dialogue_reducer_prop_test.cpp
 )
 target_link_libraries(dialogue_reducer_test
@@ -112,6 +115,21 @@ target_include_directories(dialogue_reducer_test
 )
 add_test(NAME dialogue_reducer_test COMMAND dialogue_reducer_test)
 set_tests_properties(dialogue_reducer_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=100")
+
+# TimerBook tests (unit)
+add_executable(timer_book_test
+  timer_book_test.cpp
+)
+target_link_libraries(timer_book_test
+  PRIVATE shizuru_core
+  PRIVATE GTest::gtest_main
+  PRIVATE rapidcheck_gtest
+)
+target_include_directories(timer_book_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME timer_book_test COMMAND timer_book_test)
+set_tests_properties(timer_book_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=100")
 
 # Controller preservation tests (must pass on unfixed code)
 add_executable(controller_preservation_test

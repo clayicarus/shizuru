@@ -231,7 +231,6 @@ int main(int argc, char* argv[]) {
   llm_cfg.tools            = {weather_tool};
 
   shizuru::core::ControllerConfig ctrl_cfg;
-  ctrl_cfg.max_turns = 100;
 
   shizuru::core::ContextConfig ctx_cfg;
 

@@ -224,7 +224,6 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   const std::string baidu_api_key = get_str("baidu_api_key");
   const std::string baidu_sec_key = get_str("baidu_secret_key");
   const std::string user_instr    = get_str("system_instruction");
-  const int max_turns = get_int("max_turns", 100);
 
   if (llm_api_key.empty()) {
     WriteError(error_buf, error_buf_len, "llm_api_key is required");
@@ -240,7 +239,6 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   app_cfg.llm.connect_timeout = std::chrono::seconds(10);
   app_cfg.llm.read_timeout    = std::chrono::seconds(60);
   app_cfg.llm.enable_thinking = true;
-  app_cfg.controller.max_turns     = max_turns;
   app_cfg.controller.use_streaming = true;
   app_cfg.policy.default_capabilities = {"builtin"};
   {

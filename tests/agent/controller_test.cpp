@@ -89,10 +89,10 @@ class ControllerTest : public ::testing::Test {
 
   ControllerConfig DefaultConfig() {
     ControllerConfig cfg;
-    cfg.max_turns = 20;
+    cfg.action_count_limit = 20;
     cfg.max_retries = 3;
     cfg.retry_base_delay = std::chrono::milliseconds(1);
-    cfg.turn_timeout = std::chrono::seconds(5);
+    cfg.max_continuations = 50;
     cfg.token_budget = 100000;
     cfg.action_count_limit = 50;
     return cfg;
@@ -591,7 +591,7 @@ TEST_F(ControllerTest, ErrorRecovery_LlmFailureThenRecover) {
 TEST_F(ControllerTest, BudgetExceeded_TokenBudget) {
   ControllerConfig cfg = DefaultConfig();
   cfg.token_budget = 30;
-  cfg.max_turns = 100;
+  cfg.action_count_limit = 100;
 
   auto ctrl = MakeController(cfg);
 
@@ -649,7 +649,7 @@ TEST_F(ControllerTest, BudgetExceeded_TokenBudget) {
 TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
   ControllerConfig cfg = DefaultConfig();
   cfg.action_count_limit = 2;
-  cfg.max_turns = 100;
+  cfg.action_count_limit = 100;
   cfg.token_budget = 1000000;
 
   PolicyConfig pol_cfg;
@@ -772,63 +772,19 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
 }
 
 // ---------------------------------------------------------------------------
-// Turn timeout — LLM sleeps past the timeout so HandleResponding fires it
+// TurnTimeout test removed — turn_timeout config was removed in favor of
+// per-turn limits (action_count_limit, max_continuations, token_budget).
+// Per-turn budget exhaustion is tested in dialogue_reducer_test.cpp.
 // ---------------------------------------------------------------------------
-TEST_F(ControllerTest, TurnTimeout) {
-  ControllerConfig cfg = DefaultConfig();
-  cfg.turn_timeout = std::chrono::seconds(1);
-  cfg.max_turns = 1000;
-  cfg.token_budget = 1000000;
-  cfg.action_count_limit = 1000;
-
-  auto ctrl = MakeController(cfg);
-
-  // LLM sleeps 1.1s — longer than turn_timeout — so the turn-timeout
-  // check in HandleResponding fires after the first response is delivered.
-  llm_raw_->submit_fn = [](const ContextWindow&) -> LlmResult {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
-    LlmResult r;
-    r.candidate.type = ActionType::kResponse;
-    r.candidate.response_text = "ok";
-    r.prompt_tokens = 1;
-    r.completion_tokens = 1;
-    return r;
-  };
-
-  std::mutex mu;
-  std::vector<std::tuple<State, State, Event>> transitions;
-  ctrl->OnTransition([&](State from, State to, Event event) {
-    std::lock_guard<std::mutex> lock(mu);
-    transitions.push_back({from, to, event});
-  });
-
-  ctrl->Start();
-  ASSERT_TRUE(WaitFor([&] { return ctrl->GetState() == State::kListening; }));
-
-  ctrl->EnqueueObservation(MakeUserObs("first"));
-
-  // Wait up to 2s for kStopConditionMet → kIdle (LLM takes ~1.1s).
-  bool found_stop = WaitFor([&] {
-    std::lock_guard<std::mutex> lock(mu);
-    for (const auto& [from, to, ev] : transitions) {
-      if (ev == Event::kStopConditionMet && to == State::kIdle) return true;
-    }
-    return false;
-  }, 2000);
-
-  ctrl->Shutdown();
-  EXPECT_TRUE(found_stop) << "kStopConditionMet never fired after turn timeout";
-}
 
 // ---------------------------------------------------------------------------
 // Idle can be reawakened by a new user message after StopConditionMet.
 // ---------------------------------------------------------------------------
 TEST_F(ControllerTest, IdleStateCanWakeOnNewUserObservation) {
   ControllerConfig cfg = DefaultConfig();
-  cfg.max_turns = 1;
-  cfg.token_budget = 1000000;
+  cfg.token_budget = 1;  // Exhaust after first LLM call (prompt+completion >= 1)
   cfg.action_count_limit = 1000;
-  cfg.turn_timeout = std::chrono::seconds(30);
+  cfg.max_continuations = 50;
 
   auto llm = std::make_unique<testing::MockLlmClient>();
   auto* llm_ptr = llm.get();
@@ -901,7 +857,7 @@ TEST_F(ControllerTest, IdleStateCanWakeOnNewUserObservation) {
 // ---------------------------------------------------------------------------
 TEST_F(ControllerTest, InterruptDuringThinking) {
   ControllerConfig cfg = DefaultConfig();
-  cfg.max_turns = 100;
+  cfg.action_count_limit = 100;
 
   testing::MockAuditSink audit2;
   testing::MockMemoryStore memory2;
@@ -1058,7 +1014,7 @@ TEST_F(ControllerTest, DiagnosticOnInvalidTransition) {
 // ---------------------------------------------------------------------------
 TEST_F(ControllerTest, MultipleObservationsProcessedInOrder) {
   ControllerConfig cfg = DefaultConfig();
-  cfg.max_turns = 100;
+  cfg.action_count_limit = 100;
   auto ctrl = MakeController(cfg);
 
   std::mutex mu;
@@ -1235,7 +1191,7 @@ class ShortWaitAggregator : public ObservationAggregator {
 
 TEST_F(ControllerTest, BargeInDebounce_FullReducerPath) {
   ControllerConfig cfg = DefaultConfig();
-  cfg.max_turns = 100;
+  cfg.action_count_limit = 100;
 
   PolicyConfig pol_cfg;
   PolicyRule allow_rule;

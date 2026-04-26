@@ -17,6 +17,7 @@
 #include "controller/config.h"
 #include "controller/types.h"
 #include "dialogue/reducer.h"
+#include "dialogue/timer_book.h"
 #include "dialogue/types.h"
 #include "interfaces/llm_client.h"
 #include "io/data_frame.h"
@@ -113,15 +114,12 @@ class Controller {
   void RunLoop();                            // Main reasoning loop
   bool TryTransition(Event event);           // Validate + execute transition
   void HandleThinking(const Observation& obs); // Build context, call LLM
-  void HandleRouting(ActionCandidate ac);    // Route LLM output
   void HandleActing(ActionCandidate ac);     // Emit action frame (non-blocking)
   void HandleActingResult(const Observation& obs); // Process tool result
   void HandleResponding(ActionCandidate ac); // Deliver response
   bool CheckBudget();                        // Enforce guardrails
   void ResetBudgetWindow();                  // Re-arm counters after Idle
-  void HandleInterrupt();                    // Cancel in-progress work
   void ApplyDialogueDecision(const dialogue::DialogueDecision& decision);
-  void SyncBudgetToDialogueState();
   void EmitDiagnostic(const std::string& message); // Notify diagnostic callbacks
   void EmitActivity(ActivityKind kind, std::string detail = {}); // Notify activity callbacks
   void EmitConversationItem(const conversation::ConversationItem& item, bool is_delta);
@@ -154,9 +152,8 @@ class Controller {
   // Supports parallel tool calls: pending_tool_calls_ tracks all outstanding
   // calls, pending_results_ collects results as they arrive.
   ActionCandidate pending_action_;
-  std::vector<ToolCall> pending_tool_calls_;
-  std::unordered_map<std::string, std::string> pending_results_;  // id → result JSON
   std::chrono::steady_clock::time_point tool_call_start_;         // for timeout
+  bool last_tool_cycle_all_success_ = true;  // Tracks tool result success for audit
 
   // State (accessed from loop thread; read via atomic for external queries)
   std::atomic<State> state_{State::kIdle};
@@ -166,11 +163,7 @@ class Controller {
   std::condition_variable queue_cv_;
   std::deque<Observation> observation_queue_;
 
-  // Session counters
-  int turn_count_ = 0;
-  int total_prompt_tokens_ = 0;
-  int total_completion_tokens_ = 0;
-  int action_count_ = 0;
+  // Session counters (now owned by dialogue_state_ via reducer)
   bool first_token_logged_ = false;
   bool in_thinking_block_ = false;  // Tracks <think>...</think> for TTS filtering
   std::string thinking_tag_buf_;    // Partial tag accumulator
@@ -179,13 +172,40 @@ class Controller {
   std::string active_assistant_turn_group_id_;
   std::string current_stream_item_id_;
   std::unordered_map<std::string, std::string> tool_call_item_ids_;
-  std::chrono::steady_clock::time_point session_start_;
-  std::chrono::steady_clock::time_point last_activity_;
-  bool conversation_active_ = false;
 
-  // Dialogue reducer (Phase 1: barge-in + debounce only).
+  // Dialogue reducer (Phase 1+2: all post-aggregation paths).
   std::unique_ptr<dialogue::DialogueReducer> reducer_;
   dialogue::DialogueState dialogue_state_;
+  dialogue::TimerBook timer_book_;
+
+  // Internal dialogue event queue — for async effect completions
+  // (e.g., TurnTriggerClassified) that need to be fed back into the reducer
+  // on the loop thread.  Protected by queue_mutex_, notifies queue_cv_.
+  std::deque<dialogue::DialogueEvent> internal_event_queue_;
+
+  // --- Serialized turn-trigger classification worker ---
+  // A single background thread processes classification requests one at a
+  // time, ensuring the ObservationFilter is never called concurrently.
+  // CancelTurnTriggerClassification sets the cancellation flag so the worker
+  // skips enqueuing stale results and avoids wasting work on superseded
+  // requests.
+
+  struct ClassificationRequest {
+    uint64_t obs_id;
+    Observation observation;
+    std::shared_ptr<std::atomic<bool>> cancelled;
+  };
+
+  std::mutex classification_mutex_;
+  std::condition_variable classification_cv_;
+  std::deque<ClassificationRequest> classification_queue_;
+  std::thread classification_thread_;
+  std::atomic<bool> classification_shutdown_{false};
+  // The cancellation token for the currently in-flight or most recently
+  // enqueued classification.  Set by CancelTurnTriggerClassification.
+  std::shared_ptr<std::atomic<bool>> active_cancel_token_;
+
+  void ClassificationWorker();  // Runs on classification_thread_
 
   // Loop thread
   std::thread loop_thread_;

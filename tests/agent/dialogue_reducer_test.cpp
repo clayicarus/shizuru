@@ -30,10 +30,11 @@ class DialogueReducerTest : public ::testing::Test {
     DialogueState s;
     s.conversation_active = true;
     s.cooldown = CooldownPhase::kNone;
-    s.turn_count = 0;
-    s.total_prompt_tokens = 0;
-    s.total_completion_tokens = 0;
-    s.action_count = 0;
+    s.turn_llm_calls = 0;
+    s.turn_prompt_tokens = 0;
+    s.turn_completion_tokens = 0;
+    s.turn_action_count = 0;
+    s.turn_continuation_count = 0;
     s.session_start = Clock::now();
     s.last_activity = s.session_start;
     return s;
@@ -62,14 +63,17 @@ TEST_F(DialogueReducerTest, HandleInterrupt_SetsCooldownToDebouncing) {
   EXPECT_EQ(decision.next_state.cooldown, CooldownPhase::kDebouncing);
 }
 
-TEST_F(DialogueReducerTest, HandleInterrupt_EmitsSingleCancelLlmEffect) {
+TEST_F(DialogueReducerTest, HandleInterrupt_EmitsCancelLlmAndRecordInterruptMemoryAndScheduleTimer) {
   auto state = MakeDefaultState();
   auto now = Clock::now();
 
   auto decision = reducer_.Reduce(state, InterruptRequested{now});
 
-  ASSERT_EQ(decision.effects.size(), 1u);
+  // Phase 2: CancelLlm + RecordInterruptMemory + ScheduleTimer{kDebounce}
+  ASSERT_GE(decision.effects.size(), 3u);
   EXPECT_TRUE(std::holds_alternative<CancelLlm>(decision.effects[0]));
+  EXPECT_TRUE(std::holds_alternative<RecordInterruptMemory>(decision.effects[1]));
+  EXPECT_TRUE(std::holds_alternative<ScheduleTimer>(decision.effects[2]));
 }
 
 TEST_F(DialogueReducerTest, HandleInterrupt_NoSignalInterruptedEffect) {
@@ -108,8 +112,9 @@ TEST_F(DialogueReducerTest, UserMessageDuringDebounce_EmitsRecordMemory) {
   auto decision = reducer_.Reduce(
       state, UserMessageReceived{obs, now});
 
+  // Phase 3: BufferToWorkspace instead of RecordMemory during debounce.
   ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<RecordMemory>(decision.effects[0]));
+  EXPECT_TRUE(std::holds_alternative<BufferToWorkspace>(decision.effects[0]));
 }
 
 TEST_F(DialogueReducerTest, UserMessageDuringDebounce_NoStartLlmContinuation) {
@@ -139,23 +144,36 @@ TEST_F(DialogueReducerTest, UserMessageDuringDebounce_CooldownStaysDebouncing) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. HandleUserMessage when cooldown is kNone — no-op for Phase 1
+// 3. HandleUserMessage when cooldown is kNone — Phase 2 normal path
 // ---------------------------------------------------------------------------
 
-TEST_F(DialogueReducerTest, UserMessageNoCooldown_IsNoOp) {
+TEST_F(DialogueReducerTest, UserMessageNoCooldown_EmitsRecordMemoryAndStartTurnTrigger) {
   auto state = MakeDefaultState();
   state.cooldown = CooldownPhase::kNone;
+  state.deliberation = DeliberationPhase::kIdle;
   auto obs = MakeUserObservation("normal message");
   auto now = Clock::now();
 
   auto decision = reducer_.Reduce(
       state, UserMessageReceived{obs, now});
 
-  EXPECT_TRUE(decision.effects.empty());
-  // State should be unchanged.
-  EXPECT_EQ(decision.next_state.cooldown, state.cooldown);
-  EXPECT_EQ(decision.next_state.turn_count, state.turn_count);
-  EXPECT_EQ(decision.next_state.conversation_active, state.conversation_active);
+  // Phase 3: BufferToWorkspace + CommitWorkspace + StartTurnTriggerClassification
+  EXPECT_FALSE(decision.effects.empty());
+  bool has_buffer = false;
+  bool has_commit = false;
+  bool has_trigger = false;
+  for (const auto& effect : decision.effects) {
+    if (std::holds_alternative<BufferToWorkspace>(effect)) has_buffer = true;
+    if (std::holds_alternative<CommitWorkspace>(effect)) has_commit = true;
+    if (std::holds_alternative<StartTurnTriggerClassification>(effect))
+      has_trigger = true;
+  }
+  EXPECT_TRUE(has_buffer);
+  EXPECT_TRUE(has_commit);
+  EXPECT_TRUE(has_trigger);
+  EXPECT_EQ(decision.next_state.deliberation,
+            DeliberationPhase::kAwaitingTurnTrigger);
+  EXPECT_TRUE(decision.next_state.conversation_active);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,8 +199,10 @@ TEST_F(DialogueReducerTest, DebounceCooldownExpired_BudgetOk_EmitsStartLlmContin
   auto decision = reducer_.Reduce(
       state, DebounceCooldownExpired{now});
 
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<StartLlmContinuation>(decision.effects[0]));
+  // Phase 3: CommitWorkspace{true} + StartLlmContinuation
+  ASSERT_EQ(decision.effects.size(), 2u);
+  EXPECT_TRUE(std::holds_alternative<CommitWorkspace>(decision.effects[0]));
+  EXPECT_TRUE(std::holds_alternative<StartLlmContinuation>(decision.effects[1]));
 }
 
 // ---------------------------------------------------------------------------
@@ -192,20 +212,22 @@ TEST_F(DialogueReducerTest, DebounceCooldownExpired_BudgetOk_EmitsStartLlmContin
 TEST_F(DialogueReducerTest, DebounceCooldownExpired_BudgetExhausted_EmitsSignalBudgetExhausted) {
   auto state = MakeDefaultState();
   state.cooldown = CooldownPhase::kDebouncing;
-  state.turn_count = config_.max_turns;  // At the limit.
+  state.turn_action_count = config_.action_count_limit;  // At the limit.
   auto now = state.session_start + std::chrono::seconds(1);
 
   auto decision = reducer_.Reduce(
       state, DebounceCooldownExpired{now});
 
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<SignalBudgetExhausted>(decision.effects[0]));
+  // Phase 3: CommitWorkspace{true} + SignalBudgetExhausted
+  ASSERT_EQ(decision.effects.size(), 2u);
+  EXPECT_TRUE(std::holds_alternative<CommitWorkspace>(decision.effects[0]));
+  EXPECT_TRUE(std::holds_alternative<SignalBudgetExhausted>(decision.effects[1]));
 }
 
 TEST_F(DialogueReducerTest, DebounceCooldownExpired_BudgetExhausted_NoStartLlmContinuation) {
   auto state = MakeDefaultState();
   state.cooldown = CooldownPhase::kDebouncing;
-  state.turn_count = config_.max_turns;
+  state.turn_action_count = config_.action_count_limit;
   auto now = state.session_start + std::chrono::seconds(1);
 
   auto decision = reducer_.Reduce(
@@ -217,153 +239,129 @@ TEST_F(DialogueReducerTest, DebounceCooldownExpired_BudgetExhausted_NoStartLlmCo
 }
 
 // ---------------------------------------------------------------------------
-// 6. IsBudgetExhausted boundary values
+// 6. IsBudgetExhausted boundary values (per-turn limits)
 // ---------------------------------------------------------------------------
-
-TEST_F(DialogueReducerTest, BudgetBoundary_TurnsAtLimit_Exhausted) {
-  ControllerConfig cfg;
-  cfg.max_turns = 5;
-  cfg.token_budget = 100000;
-  cfg.action_count_limit = 50;
-  cfg.turn_timeout = std::chrono::seconds(60);
-  DefaultDialogueReducer r(cfg);
-
-  auto state = MakeDefaultState();
-  state.cooldown = CooldownPhase::kDebouncing;
-  state.turn_count = 5;  // == max_turns
-  auto now = state.session_start + std::chrono::seconds(1);
-
-  auto decision = r.Reduce(state, DebounceCooldownExpired{now});
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<SignalBudgetExhausted>(decision.effects[0]));
-}
-
-TEST_F(DialogueReducerTest, BudgetBoundary_TurnsBelowLimit_NotExhausted) {
-  ControllerConfig cfg;
-  cfg.max_turns = 5;
-  cfg.token_budget = 100000;
-  cfg.action_count_limit = 50;
-  cfg.turn_timeout = std::chrono::seconds(60);
-  DefaultDialogueReducer r(cfg);
-
-  auto state = MakeDefaultState();
-  state.cooldown = CooldownPhase::kDebouncing;
-  state.turn_count = 4;  // == max_turns - 1
-  auto now = state.session_start + std::chrono::seconds(1);
-
-  auto decision = r.Reduce(state, DebounceCooldownExpired{now});
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<StartLlmContinuation>(decision.effects[0]));
-}
 
 TEST_F(DialogueReducerTest, BudgetBoundary_TokensAtLimit_Exhausted) {
   ControllerConfig cfg;
-  cfg.max_turns = 100;
   cfg.token_budget = 1000;
   cfg.action_count_limit = 50;
-  cfg.turn_timeout = std::chrono::seconds(60);
+  cfg.max_continuations = 50;
   DefaultDialogueReducer r(cfg);
 
   auto state = MakeDefaultState();
   state.cooldown = CooldownPhase::kDebouncing;
-  state.total_prompt_tokens = 600;
-  state.total_completion_tokens = 400;  // sum == 1000 == token_budget
+  state.turn_prompt_tokens = 600;
+  state.turn_completion_tokens = 400;  // sum == 1000 == token_budget
   auto now = state.session_start + std::chrono::seconds(1);
 
   auto decision = r.Reduce(state, DebounceCooldownExpired{now});
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<SignalBudgetExhausted>(decision.effects[0]));
+  bool has_exhausted = false;
+  for (const auto& e : decision.effects) {
+    if (std::holds_alternative<SignalBudgetExhausted>(e)) has_exhausted = true;
+  }
+  EXPECT_TRUE(has_exhausted);
 }
 
 TEST_F(DialogueReducerTest, BudgetBoundary_TokensBelowLimit_NotExhausted) {
   ControllerConfig cfg;
-  cfg.max_turns = 100;
   cfg.token_budget = 1000;
   cfg.action_count_limit = 50;
-  cfg.turn_timeout = std::chrono::seconds(60);
+  cfg.max_continuations = 50;
   DefaultDialogueReducer r(cfg);
 
   auto state = MakeDefaultState();
   state.cooldown = CooldownPhase::kDebouncing;
-  state.total_prompt_tokens = 500;
-  state.total_completion_tokens = 499;  // sum == 999 < token_budget
+  state.turn_prompt_tokens = 500;
+  state.turn_completion_tokens = 499;  // sum == 999 < token_budget
   auto now = state.session_start + std::chrono::seconds(1);
 
   auto decision = r.Reduce(state, DebounceCooldownExpired{now});
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<StartLlmContinuation>(decision.effects[0]));
+  bool has_continuation = false;
+  for (const auto& e : decision.effects) {
+    if (std::holds_alternative<StartLlmContinuation>(e)) has_continuation = true;
+  }
+  EXPECT_TRUE(has_continuation);
 }
 
 TEST_F(DialogueReducerTest, BudgetBoundary_ActionsAtLimit_Exhausted) {
   ControllerConfig cfg;
-  cfg.max_turns = 100;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 10;
-  cfg.turn_timeout = std::chrono::seconds(60);
+  cfg.max_continuations = 50;
   DefaultDialogueReducer r(cfg);
 
   auto state = MakeDefaultState();
   state.cooldown = CooldownPhase::kDebouncing;
-  state.action_count = 10;  // == action_count_limit
+  state.turn_action_count = 10;  // == action_count_limit
   auto now = state.session_start + std::chrono::seconds(1);
 
   auto decision = r.Reduce(state, DebounceCooldownExpired{now});
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<SignalBudgetExhausted>(decision.effects[0]));
+  bool has_exhausted = false;
+  for (const auto& e : decision.effects) {
+    if (std::holds_alternative<SignalBudgetExhausted>(e)) has_exhausted = true;
+  }
+  EXPECT_TRUE(has_exhausted);
 }
 
 TEST_F(DialogueReducerTest, BudgetBoundary_ActionsBelowLimit_NotExhausted) {
   ControllerConfig cfg;
-  cfg.max_turns = 100;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 10;
-  cfg.turn_timeout = std::chrono::seconds(60);
+  cfg.max_continuations = 50;
   DefaultDialogueReducer r(cfg);
 
   auto state = MakeDefaultState();
   state.cooldown = CooldownPhase::kDebouncing;
-  state.action_count = 9;  // == action_count_limit - 1
+  state.turn_action_count = 9;  // == action_count_limit - 1
   auto now = state.session_start + std::chrono::seconds(1);
 
   auto decision = r.Reduce(state, DebounceCooldownExpired{now});
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<StartLlmContinuation>(decision.effects[0]));
+  bool has_continuation = false;
+  for (const auto& e : decision.effects) {
+    if (std::holds_alternative<StartLlmContinuation>(e)) has_continuation = true;
+  }
+  EXPECT_TRUE(has_continuation);
 }
 
-TEST_F(DialogueReducerTest, BudgetBoundary_TimeAtLimit_Exhausted) {
+TEST_F(DialogueReducerTest, BudgetBoundary_ContinuationsAtLimit_Exhausted) {
   ControllerConfig cfg;
-  cfg.max_turns = 100;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 50;
-  cfg.turn_timeout = std::chrono::seconds(30);
+  cfg.max_continuations = 3;
   DefaultDialogueReducer r(cfg);
 
   auto state = MakeDefaultState();
   state.cooldown = CooldownPhase::kDebouncing;
-  // now - session_start == turn_timeout exactly
-  auto now = state.session_start + std::chrono::seconds(30);
+  state.turn_continuation_count = 3;  // == max_continuations
+  auto now = state.session_start + std::chrono::seconds(1);
 
   auto decision = r.Reduce(state, DebounceCooldownExpired{now});
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<SignalBudgetExhausted>(decision.effects[0]));
+  bool has_exhausted = false;
+  for (const auto& e : decision.effects) {
+    if (std::holds_alternative<SignalBudgetExhausted>(e)) has_exhausted = true;
+  }
+  EXPECT_TRUE(has_exhausted);
 }
 
-TEST_F(DialogueReducerTest, BudgetBoundary_TimeBelowLimit_NotExhausted) {
+TEST_F(DialogueReducerTest, BudgetBoundary_ContinuationsBelowLimit_NotExhausted) {
   ControllerConfig cfg;
-  cfg.max_turns = 100;
   cfg.token_budget = 100000;
   cfg.action_count_limit = 50;
-  cfg.turn_timeout = std::chrono::seconds(30);
+  cfg.max_continuations = 3;
   DefaultDialogueReducer r(cfg);
 
   auto state = MakeDefaultState();
   state.cooldown = CooldownPhase::kDebouncing;
-  // now - session_start == turn_timeout - 1s
-  auto now = state.session_start + std::chrono::seconds(29);
+  state.turn_continuation_count = 2;  // == max_continuations - 1
+  auto now = state.session_start + std::chrono::seconds(1);
 
   auto decision = r.Reduce(state, DebounceCooldownExpired{now});
-  ASSERT_EQ(decision.effects.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<StartLlmContinuation>(decision.effects[0]));
+  bool has_continuation = false;
+  for (const auto& e : decision.effects) {
+    if (std::holds_alternative<StartLlmContinuation>(e)) has_continuation = true;
+  }
+  EXPECT_TRUE(has_continuation);
 }
 
 // ---------------------------------------------------------------------------
@@ -372,69 +370,132 @@ TEST_F(DialogueReducerTest, BudgetBoundary_TimeBelowLimit_NotExhausted) {
 
 TEST_F(DialogueReducerTest, ShutdownRequested_StateUnchanged) {
   auto state = MakeDefaultState();
-  state.turn_count = 3;
+  state.turn_llm_calls = 3;
   state.cooldown = CooldownPhase::kDebouncing;
 
   auto decision = reducer_.Reduce(state, ShutdownRequested{});
 
   EXPECT_TRUE(decision.effects.empty());
   EXPECT_EQ(decision.next_state.cooldown, state.cooldown);
-  EXPECT_EQ(decision.next_state.turn_count, state.turn_count);
+  EXPECT_EQ(decision.next_state.turn_llm_calls, state.turn_llm_calls);
   EXPECT_EQ(decision.next_state.conversation_active, state.conversation_active);
 }
 
 // ---------------------------------------------------------------------------
-// 8. Unhandled event types — no-op passthrough
+// 8. Phase 2 event handlers — verify they produce real effects
 // ---------------------------------------------------------------------------
 
-TEST_F(DialogueReducerTest, UnhandledEvent_LlmCompleted_NoOp) {
+TEST_F(DialogueReducerTest, LlmCompleted_IncrementsTurnCount) {
   auto state = MakeDefaultState();
-  state.turn_count = 7;
+  state.turn_llm_calls = 7;
+  state.deliberation = DeliberationPhase::kThinking;
 
-  auto decision = reducer_.Reduce(state, LlmCompleted{});
+  ActionCandidate candidate;
+  candidate.type = ActionType::kResponse;
+  candidate.response_text = "hello";
+  auto now = Clock::now();
 
-  EXPECT_TRUE(decision.effects.empty());
-  EXPECT_EQ(decision.next_state.turn_count, state.turn_count);
+  auto decision = reducer_.Reduce(
+      state, LlmCompleted{candidate, 100, 50, now});
+
+  EXPECT_EQ(decision.next_state.turn_llm_calls, 8);
+  EXPECT_FALSE(decision.effects.empty());
 }
 
-TEST_F(DialogueReducerTest, UnhandledEvent_LlmFailed_NoOp) {
+TEST_F(DialogueReducerTest, LlmFailed_EmitsDiagnosticAndTransition) {
   auto state = MakeDefaultState();
+  state.deliberation = DeliberationPhase::kThinking;
+  auto now = Clock::now();
 
-  auto decision = reducer_.Reduce(state, LlmFailed{});
+  auto decision = reducer_.Reduce(
+      state, LlmFailed{"timeout", now});
 
-  EXPECT_TRUE(decision.effects.empty());
+  EXPECT_EQ(decision.next_state.deliberation, DeliberationPhase::kIdle);
+  ASSERT_EQ(decision.effects.size(), 2u);
+  EXPECT_TRUE(std::holds_alternative<EmitDiagnosticEffect>(decision.effects[0]));
+  EXPECT_TRUE(std::holds_alternative<TransitionState>(decision.effects[1]));
 }
 
-TEST_F(DialogueReducerTest, UnhandledEvent_ToolResultReceived_NoOp) {
+TEST_F(DialogueReducerTest, ToolResultReceived_RecordsResult) {
   auto state = MakeDefaultState();
+  state.deliberation = DeliberationPhase::kAwaitingToolResults;
+  state.pending_tool_call_ids = {"call_1"};
 
-  auto decision = reducer_.Reduce(state, ToolResultReceived{});
+  Observation obs;
+  obs.type = ObservationType::kToolResult;
+  obs.content = R"({"result":"ok"})";
+  obs.source = "call_1";
+  auto now = Clock::now();
+  obs.timestamp = now;
 
-  EXPECT_TRUE(decision.effects.empty());
+  auto decision = reducer_.Reduce(
+      state, ToolResultReceived{obs, now});
+
+  EXPECT_FALSE(decision.effects.empty());
+  bool has_record = false;
+  for (const auto& effect : decision.effects) {
+    if (std::holds_alternative<RecordToolResult>(effect)) has_record = true;
+  }
+  EXPECT_TRUE(has_record);
 }
 
-TEST_F(DialogueReducerTest, UnhandledEvent_ToolCallTimeout_NoOp) {
+TEST_F(DialogueReducerTest, ToolCallTimeout_EmitsRecordTimeoutAndStartLlm) {
   auto state = MakeDefaultState();
+  state.deliberation = DeliberationPhase::kAwaitingToolResults;
+  state.pending_tool_call_ids = {"call_1"};
+  auto now = Clock::now();
 
-  auto decision = reducer_.Reduce(state, ToolCallTimeout{});
+  auto decision = reducer_.Reduce(
+      state, ToolCallTimeout{{"call_1"}, now});
 
-  EXPECT_TRUE(decision.effects.empty());
+  EXPECT_EQ(decision.next_state.deliberation, DeliberationPhase::kThinking);
+  bool has_timeout = false;
+  bool has_start = false;
+  for (const auto& effect : decision.effects) {
+    if (std::holds_alternative<RecordTimeoutResults>(effect)) has_timeout = true;
+    if (std::holds_alternative<StartLlm>(effect)) has_start = true;
+  }
+  EXPECT_TRUE(has_timeout);
+  EXPECT_TRUE(has_start);
 }
 
-TEST_F(DialogueReducerTest, UnhandledEvent_ContinuationRequested_NoOp) {
+TEST_F(DialogueReducerTest, ContinuationRequested_EmitsStartLlm) {
   auto state = MakeDefaultState();
+  state.deliberation = DeliberationPhase::kIdle;
+  auto now = Clock::now();
 
-  auto decision = reducer_.Reduce(state, ContinuationRequested{});
+  auto decision = reducer_.Reduce(
+      state, ContinuationRequested{"test", now});
 
-  EXPECT_TRUE(decision.effects.empty());
+  EXPECT_EQ(decision.next_state.deliberation, DeliberationPhase::kThinking);
+  ASSERT_EQ(decision.effects.size(), 1u);
+  EXPECT_TRUE(std::holds_alternative<StartLlm>(decision.effects[0]));
 }
 
-TEST_F(DialogueReducerTest, UnhandledEvent_SystemEventReceived_NoOp) {
+TEST_F(DialogueReducerTest, SystemEventReceived_EmitsRecordMemoryAndStartLlm) {
   auto state = MakeDefaultState();
+  state.deliberation = DeliberationPhase::kIdle;
 
-  auto decision = reducer_.Reduce(state, SystemEventReceived{});
+  Observation obs;
+  obs.type = ObservationType::kSystemEvent;
+  obs.content = "reminder";
+  obs.source = "scheduler";
+  auto now = Clock::now();
+  obs.timestamp = now;
 
-  EXPECT_TRUE(decision.effects.empty());
+  auto decision = reducer_.Reduce(
+      state, SystemEventReceived{obs, now});
+
+  EXPECT_EQ(decision.next_state.deliberation, DeliberationPhase::kThinking);
+  EXPECT_TRUE(decision.next_state.conversation_active);
+  bool has_record = false;
+  bool has_start = false;
+  for (const auto& effect : decision.effects) {
+    if (std::holds_alternative<RecordMemory>(effect)) has_record = true;
+    if (std::holds_alternative<StartLlm>(effect)) has_start = true;
+  }
+  EXPECT_TRUE(has_record);
+  EXPECT_TRUE(has_start);
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +512,7 @@ TEST_F(DialogueReducerTest, Purity_SameInputsSameOutputs) {
 
   // State fields must match.
   EXPECT_EQ(decision1.next_state.cooldown, decision2.next_state.cooldown);
-  EXPECT_EQ(decision1.next_state.turn_count, decision2.next_state.turn_count);
+  EXPECT_EQ(decision1.next_state.turn_llm_calls, decision2.next_state.turn_llm_calls);
   EXPECT_EQ(decision1.next_state.conversation_active,
             decision2.next_state.conversation_active);
   EXPECT_EQ(decision1.next_state.last_activity, decision2.next_state.last_activity);
