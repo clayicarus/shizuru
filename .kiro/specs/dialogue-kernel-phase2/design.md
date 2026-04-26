@@ -193,10 +193,10 @@ sequenceDiagram
         Note over C: Message stays in committed history, but no assistant turn starts
     end
 
-    Note over C: If interrupt arrives during turn-trigger evaluation:
-    C->>R: Reduce(AwaitingTurnTrigger, InterruptRequested)
-    R-->>C: {Debouncing, [CancelLlm, CancelTurnTriggerClassification]}
-    Note over C: Stale TurnTriggerClassified discarded by obs_id check
+    Note over C: If a new user message arrives during turn-trigger evaluation:
+    C->>R: Reduce(AwaitingTurnTrigger, UserMessageReceived{new_obs})
+    R-->>C: {AwaitingTurnTrigger, [CancelTurnTriggerClassification, RecordMemory, StartTurnTriggerClassification{new_id}]}
+    Note over C: Stale TurnTriggerClassified from old request discarded by obs_id mismatch
 ```
 
 
@@ -745,9 +745,11 @@ These Controller members become redundant because the reducer owns the state:
 
 **Validates: Requirements 10.1, 10.2**
 
-### Property 14: Interrupt schedules debounce timer and cancels in-flight work
+### Property 14: Interrupt schedules debounce timer and cancels in-flight tool work
 
-*For any* `DialogueState` and *for any* `InterruptRequested` event, effects SHALL contain `ScheduleTimer{kDebounce}`. Additionally, if `deliberation == kAwaitingTurnTrigger`, effects SHALL contain `CancelTurnTriggerClassification` and `next_state.pending_turn_trigger_id` SHALL be `0`. If `deliberation == kAwaitingToolResults`, effects SHALL contain `CancelTimer` for the tool call timeout.
+*For any* `DialogueState` where the Controller FSM is in an interruptible state (kThinking, kRouting, kActing — corresponding to `deliberation` being `kThinking` or `kAwaitingToolResults`) and *for any* `InterruptRequested` event, effects SHALL contain `ScheduleTimer{kDebounce}` and `RecordInterruptMemory`. If `deliberation == kAwaitingToolResults`, effects SHALL additionally contain `CancelTimer` for the tool call timeout.
+
+> **Note:** `kAwaitingTurnTrigger` corresponds to Controller FSM state kListening, which is NOT interruptible. The reducer never receives `InterruptRequested` when `deliberation == kAwaitingTurnTrigger`. Turn-trigger cancellation during kAwaitingTurnTrigger is handled by a superseding `UserMessageReceived` event (see Property 20).
 
 **Validates: Requirements 11.1, 14.1, 14.2**
 
@@ -777,6 +779,14 @@ These Controller members become redundant because the reducer owns the state:
 
 ### Property 19: Interrupt always records interrupt memory
 
-*For any* `DialogueState` and *for any* `InterruptRequested` event, effects SHALL contain `RecordInterruptMemory`. This ensures the "Turn interrupted" entry always appears in committed history regardless of deliberation phase.
+*For any* `DialogueState` where the Controller FSM is in an interruptible state (interrupt ingress precondition satisfied) and *for any* `InterruptRequested` event, effects SHALL contain `RecordInterruptMemory`. This ensures the "Turn interrupted" entry always appears in committed history when an interrupt is validly dispatched.
 
-**Validates: Requirements 14.1**
+> **Note:** Controller only dispatches `InterruptRequested` in interruptible states (kThinking, kRouting, kActing). The reducer never receives this event in kIdle, kListening, kResponding, kError, or kTerminated. Property tests must use `RC_PRE` to enforce this precondition.
+
+**Validates: Requirements 14.2**
+
+### Property 20: Superseding UserMessageReceived cancels pending turn-trigger
+
+*For any* `DialogueState` where `deliberation == kAwaitingTurnTrigger` and *for any* `UserMessageReceived` event, effects SHALL contain `CancelTurnTriggerClassification`, and the new message SHALL be processed normally (RecordMemory + StartTurnTriggerClassification with a fresh `pending_turn_trigger_id` derived from `++next_turn_trigger_id`). The stale classification result from the previous request will be rejected by obs_id mismatch.
+
+**Validates: Requirements 14.3**

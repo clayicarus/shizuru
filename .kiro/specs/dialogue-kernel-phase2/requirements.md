@@ -32,8 +32,10 @@ assistant turn immediately (`kRespondNow`) or be stored without response
   returns a `DialogueDecision` containing `next_state` and a list of effects.
   It performs no I/O, no blocking, and no mutation of shared state.
 - **DialogueState**: Explicit struct capturing conversation-active flag,
-  cooldown phase, deliberation phase, budget counters, pending turn-trigger
-  correlation id, pending tool call ids, and pending tool results.
+  cooldown phase, deliberation phase, budget counters, turn-trigger
+  correlation ids (`next_turn_trigger_id` as monotonic counter,
+  `pending_turn_trigger_id` as in-flight request tracker), pending tool call
+  ids, and pending tool results.
 - **DialogueEvent**: A `std::variant` representing the full event taxonomy
   including all Phase 1 events plus `TimerExpired`, `TurnTriggerClassified`,
   and populated payloads for `LlmCompleted`, `LlmFailed`,
@@ -99,6 +101,13 @@ code path maps to a typed event.
    `verdict`, and `now`
 9. THE Dialogue_Module SHALL define `TimerKind` with values `kDebounce`,
    `kToolCallTimeout`, and `kConversationIdle`
+
+> **Phase 2 scope constraint:** `kConversationIdle` is declared in the enum
+> for forward compatibility only. THE Controller SHALL NOT schedule or emit
+> `TimerExpired{kConversationIdle}` events in Phase 2. Aggregator timeout
+> flush remains entirely inline in Controller until Phase 3 aggregator
+> event-ization. If the reducer receives `TimerExpired{kConversationIdle}`
+> defensively, it SHALL return the current state unchanged with no effects.
 10. THE Dialogue_Module SHALL define `TurnTriggerVerdict` with values
     `kRespondNow` and `kStoreOnly`
 11. THE Dialogue_Module SHALL update `DialogueEvent` to include
@@ -345,23 +354,37 @@ thinking is expressed through the reducer.
    `kIdle` or `kThinking`, THE DefaultDialogueReducer SHALL include `StartLlm`
    and set `deliberation = kThinking`
 
-### Requirement 14: Interrupt During Turn-Trigger Evaluation
+### Requirement 14: Interrupt and Turn-Trigger Superseding
 
 **User Story:** As a core developer, I want the reducer to cancel in-flight
-turn-trigger evaluation when an interrupt arrives, so that stale semantic
-results do not trigger thinking after a barge-in.
+work when an interrupt or superseding message arrives, so that stale async
+results do not trigger incorrect behavior.
 
 #### Acceptance Criteria
 
 1. WHEN an `InterruptRequested` event is received and
-   `deliberation == kAwaitingTurnTrigger`, THE DefaultDialogueReducer SHALL
-   include `CancelTurnTriggerClassification` and reset
-   `pending_turn_trigger_id` to `0`
-2. WHEN an `InterruptRequested` event is received and
    `deliberation == kAwaitingToolResults`, THE DefaultDialogueReducer SHALL
    include `CancelTimer` for the tool timeout timer
-3. WHEN an `InterruptRequested` event is received, THE DefaultDialogueReducer
+2. WHEN an `InterruptRequested` event is received, THE DefaultDialogueReducer
    SHALL include `RecordInterruptMemory`
+3. WHEN a `UserMessageReceived` event is received and
+   `deliberation == kAwaitingTurnTrigger`, THE DefaultDialogueReducer SHALL
+   cancel the pending turn-trigger evaluation by incrementing
+   `next_turn_trigger_id`, resetting `pending_turn_trigger_id` to `0`,
+   including `CancelTurnTriggerClassification` in the effects list, then
+   processing the new message normally (RecordMemory +
+   StartTurnTriggerClassification with a fresh id)
+
+> **Ingress precondition for InterruptRequested:** Controller only constructs
+> and dispatches `InterruptRequested` events when the Controller FSM is in an
+> interruptible state (kThinking, kRouting, kActing) or when a barge-in user
+> message arrives during those states. `Controller::Interrupt()` is a no-op
+> in non-interruptible states and does not enqueue `kInterruption`. The
+> reducer therefore never receives `InterruptRequested` when
+> `deliberation == kAwaitingTurnTrigger` (which corresponds to Controller FSM
+> state kListening, a non-interruptible state). Turn-trigger cancellation is
+> instead handled by a superseding `UserMessageReceived` event per criterion
+> 14.3 above.
 
 ### Requirement 15: Controller as Thin Shell
 
@@ -379,8 +402,13 @@ pure event-mapping and effect-execution shell.
    `last_activity_`, `pending_tool_calls_`, `pending_results_`)
 3. THE Controller SHALL map every observation type and async completion to a
    `DialogueEvent` and call `Reduce` instead of inline semantic branching
-4. THE Controller::ApplyDialogueDecision SHALL execute all new Phase 2 effects
-   including `StartTurnTriggerClassification`,
+4. THE Controller::ApplyDialogueDecision SHALL execute effects in
+   `decision.effects` sequentially in vector order (index 0 first, index 1
+   next, etc.). This ordering guarantee is required for correctness: the
+   reducer relies on effects being executed in the order it produces them
+   (e.g., `RecordTimeoutResults` before `StartLlm`, `RecordMemory` before
+   `StartLlm`, `CancelLlm` before `ScheduleTimer`). All new Phase 2 effects
+   SHALL be handled including `StartTurnTriggerClassification`,
    `CancelTurnTriggerClassification`, `RecordTimeoutResults`, and
    `RecordInterruptMemory`
 5. THE Controller SHALL own a `TimerBook` instance and use
