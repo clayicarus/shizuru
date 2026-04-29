@@ -178,35 +178,6 @@ class Controller {
   dialogue::DialogueState dialogue_state_;
   dialogue::TimerBook timer_book_;
 
-  // Internal dialogue event queue — for async effect completions
-  // (e.g., TurnTriggerClassified) that need to be fed back into the reducer
-  // on the loop thread.  Protected by queue_mutex_, notifies queue_cv_.
-  std::deque<dialogue::DialogueEvent> internal_event_queue_;
-
-  // --- Serialized turn-trigger classification worker ---
-  // A single background thread processes classification requests one at a
-  // time, ensuring the ObservationFilter is never called concurrently.
-  // CancelTurnTriggerClassification sets the cancellation flag so the worker
-  // skips enqueuing stale results and avoids wasting work on superseded
-  // requests.
-
-  struct ClassificationRequest {
-    uint64_t obs_id;
-    Observation observation;
-    std::shared_ptr<std::atomic<bool>> cancelled;
-  };
-
-  std::mutex classification_mutex_;
-  std::condition_variable classification_cv_;
-  std::deque<ClassificationRequest> classification_queue_;
-  std::thread classification_thread_;
-  std::atomic<bool> classification_shutdown_{false};
-  // The cancellation token for the currently in-flight or most recently
-  // enqueued classification.  Set by CancelTurnTriggerClassification.
-  std::shared_ptr<std::atomic<bool>> active_cancel_token_;
-
-  void ClassificationWorker();  // Runs on classification_thread_
-
   // Loop thread
   std::thread loop_thread_;
   std::atomic<bool> shutdown_requested_{false};

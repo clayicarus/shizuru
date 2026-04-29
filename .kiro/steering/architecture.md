@@ -85,6 +85,12 @@ Current implementation status:
   system events, continuation, turn-trigger classification) are routed
   through the reducer.  Controller is a thin event-mapping and
   effect-execution shell.
+- **Turn-trigger classification is temporarily bypassed at runtime**.
+  The reducer/effect shape exists, but Controller currently maps
+  `StartTurnTriggerClassification` directly to `kRespondNow` for all
+  meaningful observations.  This is intentional until a robust,
+  cancellable classifier path with explicit shutdown semantics is
+  reintroduced.
 - **Phase 3 is implemented**.  A provisional turn workspace separates
   in-progress turn data from committed history.  Debounce fragments are
   merged before commit.  The ObservationAggregator is event-driven

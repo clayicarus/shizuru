@@ -1,6 +1,6 @@
 # Shizuru — Agent Guidelines
 
-All markdown documents must be written in English.
+All markdown documents must be written in English except spec.
 
 ## Development Philosophy
 
@@ -84,6 +84,8 @@ services/
 ## Known Issues / TODO
 
 - **Internal event type**: LLM cannot distinguish user input from system events (reminders, followups) in the context window. Need `kInternalEvent` MemoryEntryType mapped to `role: "system"` in conversation history.
-- **Context-aware filter**: ObservationFilter should consider source (voice/text/system) and conversation state, not just content.
+- **Turn-trigger filter is temporarily disabled**: Controller currently bypasses semantic turn-trigger filtering and treats all meaningful observations as respond-now. Re-enable only after there is a robust, cancellable classifier path with explicit shutdown semantics.
+- **Persistence is the current top priority**: Introduce the SQLite-backed MemoryStore and store real session/user data before adding more behavioral complexity.
+- **Interaction meters are deferred**: Add session-scoped meters (for example reply threshold, text input rate, speech rate, emotional pressure) after persistence is in place, so dialogue policy can consume stable signal snapshots instead of ad-hoc heuristics.
 - **MaybeSummarize is a stub**: does not actually call LLM for summarization.
 - **Markdown stripping**: LLM sometimes outputs markdown despite prompt instructions.

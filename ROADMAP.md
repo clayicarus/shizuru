@@ -48,6 +48,7 @@ Priority for the current stage:
 - Finish the user-visible MVP first.
 - Do not start broad architecture cleanup before the MVP is usable end-to-end.
 - Severe engineering issues found during review are tracked below in a dedicated post-MVP hardening phase, unless one of them blocks basic demo stability.
+- **Current top priority:** introduce real persistent storage (SQLite-backed MemoryStore) and start storing durable session/user data before adding more dialogue behavior.
 
 ### Done
 - [x] Shizuru persona (conversational Chinese style)
@@ -62,10 +63,17 @@ Priority for the current stage:
 ### Next
 - [x] **Context window source identification**: use OpenAI API `name` field to distinguish input sources (user, voice, scheduler) instead of in-content XML tags
 - [ ] **Persistent MemoryStore (SQLite)**: replace InMemoryStore so conversations survive restarts
+  Current focus:
+  - Introduce the real SQLite backend
+  - Wire AppRuntime to use persistent storage instead of in-memory fallback
+  - Persist enough session/user data to survive restart before extending memory semantics
 - [ ] **Context-aware ObservationFilter**: filter should consider observation source (voice vs text vs system) and conversation state, not just content
 - [ ] **Followup tools**: save_followup, list_followups, complete_followup
 - [ ] **User identity**: user_id in AppConfig, memory keyed by user
 - [ ] **Cross-device sync**: backend service + sync protocol
+
+### Deferred Behavioral TODO
+- [ ] **Interaction meter system**: add session-scoped signal meters (for example reply threshold, text input rate, speech rate, interruption pressure, emotional pressure) that can feed deterministic policy and future LLM hints. Do this after persistence is in place.
 
 ## Phase 10 — Post-MVP Stabilization and Architecture Hardening
 
@@ -92,6 +100,7 @@ Goal:
 - [ ] **Reduce callback locking by freezing wiring before start**: once runtime wiring is complete, device output callbacks and app callbacks should be immutable where possible.
 - [ ] **Remove bridge state polling thread**: push state transitions directly from the controller/bridge instead of polling every 50 ms.
 - [ ] **Unify UI audio state with native device state**: mic/speaker toggles, route enablement, and device start/stop must be driven by one coherent state model.
+- [ ] **Re-enable turn-trigger filtering with a robust classifier path**: semantic reply gating is currently bypassed. Restore it only with explicit cancellation, shutdown behavior, and clear separation from data-plane input sanitization.
 
 ### Architecture cleanup after hardening
 - [ ] **Move AppRuntime away from hard-coded device IDs**: route assembly should depend on declared topology or named roles, not concrete implementation IDs.

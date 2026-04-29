@@ -56,27 +56,12 @@ bool WaitFor(std::function<bool()> pred, int timeout_ms = 3000) {
 }
 
 // ---------------------------------------------------------------------------
-// ObservationFilter that rejects everything (forces kStoreOnly verdict).
+// ObservationFilter stubs are kept here as fixtures for when turn-trigger
+// filtering is re-enabled. The current runtime path bypasses them.
 // ---------------------------------------------------------------------------
 class RejectAllFilter : public ObservationFilter {
  public:
   bool ShouldProcess(const Observation& /*obs*/) override { return false; }
-};
-
-// ---------------------------------------------------------------------------
-// ObservationFilter that accepts first N calls, then rejects.
-// Used to test superseding: first call blocks, second call accepts.
-// ---------------------------------------------------------------------------
-class CountingFilter : public ObservationFilter {
- public:
-  bool ShouldProcess(const Observation& /*obs*/) override {
-    int c = call_count_.fetch_add(1);
-    // Accept all calls by default.
-    return c < accept_count_;
-  }
-
-  std::atomic<int> call_count_{0};
-  int accept_count_ = 100;  // Accept all by default.
 };
 
 // Aggregator that always reports HasPending so RunLoop uses short wait.
@@ -212,9 +197,10 @@ TEST_F(ControllerPhase2Test, RespondNow_FullCycle) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: Normal user message → store-only → stay listening
+// Test 2: Turn-trigger filter is currently disabled, so even a rejecting
+// filter cannot suppress the assistant turn.
 // ---------------------------------------------------------------------------
-TEST_F(ControllerPhase2Test, StoreOnly_StaysListening) {
+TEST_F(ControllerPhase2Test, FilterDisabled_StillResponds) {
   auto llm = std::make_unique<testing::MockLlmClient>();
   auto* llm_ptr = llm.get();
 
@@ -223,13 +209,13 @@ TEST_F(ControllerPhase2Test, StoreOnly_StaysListening) {
     llm_call_count.fetch_add(1);
     LlmResult r;
     r.candidate.type = ActionType::kResponse;
-    r.candidate.response_text = "should not happen";
+    r.candidate.response_text = "responded anyway";
     r.prompt_tokens = 1;
     r.completion_tokens = 1;
     return r;
   };
 
-  // Use RejectAllFilter → kStoreOnly verdict.
+  // Even with a rejecting filter injected, controller should still respond.
   Controller ctrl("test-session", DefaultConfig(), std::move(llm),
                   nullptr, nullptr, *context_, *policy_,
                   nullptr,  // aggregator
@@ -240,12 +226,8 @@ TEST_F(ControllerPhase2Test, StoreOnly_StaysListening) {
 
   ctrl.EnqueueObservation(MakeUserObs("background noise"));
 
-  // Give time for the observation to be processed.
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-  // Should still be listening — no thinking started.
-  EXPECT_EQ(ctrl.GetState(), State::kListening);
-  EXPECT_EQ(llm_call_count.load(), 0);
+  ASSERT_TRUE(WaitFor([&] { return llm_call_count.load() >= 1; }));
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
 
   // Verify message is preserved in committed history.
   auto entries = memory_store_->GetAll("test-session");
@@ -253,7 +235,7 @@ TEST_F(ControllerPhase2Test, StoreOnly_StaysListening) {
   for (const auto& e : entries) {
     if (e.content.find("background noise") != std::string::npos) found_msg = true;
   }
-  EXPECT_TRUE(found_msg) << "Store-only message must be preserved in committed history";
+  EXPECT_TRUE(found_msg);
 
   ctrl.Shutdown();
 }
@@ -586,111 +568,7 @@ TEST_F(ControllerPhase2Test, SystemEvent_ThinkRespond) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 7: Superseding message during turn-trigger evaluation
-// ---------------------------------------------------------------------------
-TEST_F(ControllerPhase2Test, SupersedingMessage_CancelsOldEvaluation) {
-  // Use a filter that rejects the first call (stale) and accepts the second.
-  // The first message triggers classification → kStoreOnly (rejected).
-  // Before that completes, a second message arrives and supersedes.
-  // The second message's classification → kRespondNow.
-  //
-  // Since StartTurnTriggerClassification is currently synchronous in the
-  // effect executor, we test the superseding path by sending two messages
-  // rapidly. The first gets kStoreOnly, the second gets kRespondNow.
-  // The key invariant: the second message triggers thinking, not the first.
-
-  auto llm = std::make_unique<testing::MockLlmClient>();
-  auto* llm_ptr = llm.get();
-
-  std::mutex llm_mu;
-  std::vector<ContextWindow> captured_windows;
-  llm_ptr->submit_fn = [&](const ContextWindow& ctx) -> LlmResult {
-    {
-      std::lock_guard<std::mutex> lock(llm_mu);
-      captured_windows.push_back(ctx);
-    }
-    LlmResult r;
-    r.candidate.type = ActionType::kResponse;
-    r.candidate.response_text = "responded";
-    r.prompt_tokens = 10;
-    r.completion_tokens = 5;
-    return r;
-  };
-
-  // Custom filter: reject first message, accept second.
-  auto filter = std::make_unique<CountingFilter>();
-  filter->accept_count_ = 0;  // Reject all initially.
-
-  // We need a different approach: send first message (rejected → store-only),
-  // then send second message (accepted → respond-now).
-  // Use a filter that rejects "noise" and accepts "important".
-  class SelectiveFilter : public ObservationFilter {
-   public:
-    bool ShouldProcess(const Observation& obs) override {
-      return obs.content.find("important") != std::string::npos;
-    }
-  };
-
-  Controller ctrl("test-session", DefaultConfig(), std::move(llm),
-                  nullptr, nullptr, *context_, *policy_,
-                  nullptr,  // aggregator
-                  std::make_unique<SelectiveFilter>());
-
-  std::mutex mu;
-  std::vector<std::string> responses;
-  ctrl.OnConversationItem([&](const conversation::ConversationItem& item, bool is_delta) {
-    if (!is_delta && item.kind == conversation::ItemKind::kAssistantMessage) {
-      std::lock_guard<std::mutex> lock(mu);
-      responses.push_back(item.payload.value("text", ""));
-    }
-  });
-
-  ctrl.Start();
-  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
-
-  // First message: rejected by filter → store-only.
-  ctrl.EnqueueObservation(MakeUserObs("noise message"));
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-  // Second message: accepted by filter → respond-now.
-  ctrl.EnqueueObservation(MakeUserObs("important message"));
-
-  // Wait for response.
-  ASSERT_TRUE(WaitFor([&] {
-    std::lock_guard<std::mutex> lock(mu);
-    return !responses.empty();
-  }));
-
-  ctrl.Shutdown();
-
-  // Verify: first message (noise) is in committed history.
-  auto entries = memory_store_->GetAll("test-session");
-  bool found_noise = false, found_important = false;
-  for (const auto& e : entries) {
-    if (e.content.find("noise message") != std::string::npos) found_noise = true;
-    if (e.content.find("important message") != std::string::npos) found_important = true;
-  }
-  EXPECT_TRUE(found_noise) << "First (store-only) message must be in committed history";
-  EXPECT_TRUE(found_important) << "Second (respond-now) message must be in committed history";
-
-  // Verify: LLM was called and the context includes both messages.
-  {
-    std::lock_guard<std::mutex> lock(llm_mu);
-    ASSERT_GE(captured_windows.size(), 1u);
-    const auto& window = captured_windows[0];
-    bool ctx_has_noise = false, ctx_has_important = false;
-    for (const auto& msg : window.messages) {
-      if (msg.content.find("noise message") != std::string::npos) ctx_has_noise = true;
-      if (msg.content.find("important message") != std::string::npos) ctx_has_important = true;
-    }
-    // Both messages should be in context since store-only still records.
-    EXPECT_TRUE(ctx_has_noise) << "Store-only message should be visible in LLM context";
-    EXPECT_TRUE(ctx_has_important) << "Respond-now message should be visible in LLM context";
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Test 8: Timer id reuse — Schedule → Cancel → Schedule → only second fires
+// Test 7: Timer id reuse — Schedule → Cancel → Schedule → only second fires
 // ---------------------------------------------------------------------------
 TEST_F(ControllerPhase2Test, TimerIdReuse_OnlySecondFires) {
   // This tests TimerBook directly since it's a pure data structure.
@@ -727,7 +605,7 @@ TEST_F(ControllerPhase2Test, TimerIdReuse_OnlySecondFires) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 9: Interrupt always records interrupt memory
+// Test 8: Interrupt always records interrupt memory
 // ---------------------------------------------------------------------------
 TEST_F(ControllerPhase2Test, InterruptRecordsInterruptMemory) {
   // Set up a tool call scenario so we can interrupt during kActing.

@@ -197,7 +197,6 @@ void Controller::Start() {
   dialogue_state_.last_activity = now;
   dialogue_state_.conversation_active = false;
   TryTransition(Event::kStart);
-  classification_thread_ = std::thread(&Controller::ClassificationWorker, this);
   loop_thread_ = std::thread(&Controller::RunLoop, this);
 }
 
@@ -207,15 +206,6 @@ void Controller::Shutdown() {
   queue_cv_.notify_one();
   if (loop_thread_.joinable()) {
     loop_thread_.join();
-  }
-  // Shut down the classification worker thread.
-  {
-    std::lock_guard<std::mutex> lock(classification_mutex_);
-    classification_shutdown_.store(true);
-  }
-  classification_cv_.notify_one();
-  if (classification_thread_.joinable()) {
-    classification_thread_.join();
   }
   TryTransition(Event::kShutdown);
 }
@@ -364,9 +354,7 @@ void Controller::RunLoop() {
       }
 
       queue_cv_.wait_for(lock, wait_duration, [&] {
-        return !observation_queue_.empty() ||
-               !internal_event_queue_.empty() ||
-               shutdown_requested_.load();
+        return !observation_queue_.empty() || shutdown_requested_.load();
       });
       if (shutdown_requested_.load()) break;
 
@@ -395,24 +383,6 @@ void Controller::RunLoop() {
         lock.unlock();
         ApplyDialogueDecision(decision);
         lock.lock();
-      }
-
-      // Drain internal dialogue events (e.g., async TurnTriggerClassified
-      // results) AFTER processing any pending observations.  This ordering
-      // is critical for superseding semantics: if a new UserMessageReceived
-      // and a stale TurnTriggerClassified are both pending, the observation
-      // must be processed first so the reducer's superseding path
-      // (HandleUserMessage during kAwaitingTurnTrigger) can cancel the old
-      // classification before the stale verdict is applied.
-      if (observation_queue_.empty() && !internal_event_queue_.empty()) {
-        auto event = std::move(internal_event_queue_.front());
-        internal_event_queue_.pop_front();
-        auto decision = reducer_->Reduce(dialogue_state_, event);
-        lock.unlock();
-        ApplyDialogueDecision(decision);
-        // Re-enter the loop to check for new observations before processing
-        // more internal events.
-        continue;
       }
 
       // Phase 3: Aggregator timeout is now handled by TimerBook
@@ -527,8 +497,10 @@ void Controller::RunLoop() {
         continue;  // Stay in kListening, wait for more or timeout.
       }
 
-      // Stage 2: Relevance filter — now handled via StartTurnTriggerClassification effect.
-      // Construct AggregationComplete and let the reducer decide.
+      // Stage 2: turn-trigger classification hook.
+      // The reducer still emits StartTurnTriggerClassification, but Controller
+      // currently bypasses the actual filter and treats all meaningful
+      // observations as respond-now.
       auto now = std::chrono::steady_clock::now();
       LOG_INFO("[{}] User message received: \"{}\"",
                MODULE_NAME, aggregated->content);
@@ -1027,50 +999,6 @@ void Controller::ResetBudgetWindow() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Classification worker — runs on classification_thread_.
-// Processes turn-trigger classification requests serially, ensuring the
-// ObservationFilter is never called concurrently.
-// ---------------------------------------------------------------------------
-
-void Controller::ClassificationWorker() {
-  while (true) {
-    ClassificationRequest req;
-    {
-      std::unique_lock<std::mutex> lock(classification_mutex_);
-      classification_cv_.wait(lock, [&] {
-        return !classification_queue_.empty() ||
-               classification_shutdown_.load();
-      });
-      if (classification_shutdown_.load()) return;
-      req = std::move(classification_queue_.front());
-      classification_queue_.pop_front();
-    }
-
-    // Check cancellation before calling the filter — skip work for
-    // superseded requests.
-    if (req.cancelled->load()) continue;
-
-    bool accepted = observation_filter_->ShouldProcess(req.observation);
-
-    // Check cancellation again after the (potentially slow) filter call.
-    // If cancelled while the filter was running, discard the result.
-    if (req.cancelled->load()) continue;
-
-    dialogue::TurnTriggerVerdict verdict =
-        accepted ? dialogue::TurnTriggerVerdict::kRespondNow
-                 : dialogue::TurnTriggerVerdict::kStoreOnly;
-    auto now = std::chrono::steady_clock::now();
-    dialogue::TurnTriggerClassified classified{req.obs_id, verdict, now};
-
-    if (!shutdown_requested_.load()) {
-      std::lock_guard<std::mutex> lock(queue_mutex_);
-      internal_event_queue_.push_back(std::move(classified));
-    }
-    queue_cv_.notify_one();
-  }
-}
-
 void Controller::ApplyDialogueDecision(
     const dialogue::DialogueDecision& decision) {
   dialogue_state_ = decision.next_state;
@@ -1286,35 +1214,20 @@ void Controller::ApplyDialogueDecision(
         timer_book_.Cancel(e.timer_id);
       },
       [&](const dialogue::StartTurnTriggerClassification& e) {
-        // Enqueue a classification request for the dedicated worker thread.
-        // The worker processes requests serially, so the ObservationFilter
-        // is never called concurrently — this is safe for non-thread-safe
-        // implementations like LlmObservationFilter.
-        //
-        // Each request carries a cancellation token.  If a superseding
-        // message arrives, CancelTurnTriggerClassification sets the token,
-        // and the worker skips the cancelled request (either before calling
-        // the filter or after, if the call was already in progress).
-        EmitActivity(ActivityKind::kFilteringInput);
-
-        auto cancel_token = std::make_shared<std::atomic<bool>>(false);
-        {
-          std::lock_guard<std::mutex> lock(classification_mutex_);
-          active_cancel_token_ = cancel_token;
-          classification_queue_.push_back(ClassificationRequest{
-              e.obs_id, e.observation, cancel_token});
-        }
-        classification_cv_.notify_one();
+        // TEMPORARILY DISABLED:
+        // The semantic turn-trigger filter remains disabled until we have a
+        // cancellable, robust classifier path with clear shutdown semantics.
+        // For now, every meaningful observation that reaches core triggers an
+        // assistant turn immediately.
+        auto now = std::chrono::steady_clock::now();
+        dialogue::TurnTriggerClassified classified{
+            e.obs_id, dialogue::TurnTriggerVerdict::kRespondNow, now};
+        auto inner_decision = reducer_->Reduce(dialogue_state_, classified);
+        ApplyDialogueDecision(inner_decision);
       },
       [&](const dialogue::CancelTurnTriggerClassification&) {
-        // Signal the active classification to skip its result.  The worker
-        // checks this flag before and after calling ShouldProcess().
-        // This prevents superseded classifications from wasting work on
-        // slow filters (e.g., LLM-based) and avoids enqueuing stale results.
-        std::lock_guard<std::mutex> lock(classification_mutex_);
-        if (active_cancel_token_) {
-          active_cancel_token_->store(true);
-        }
+        // Turn-trigger filtering is currently disabled, so there is no
+        // in-flight classification work to cancel.
       },
       [&](const dialogue::TransitionState& e) {
         TryTransition(e.event);
