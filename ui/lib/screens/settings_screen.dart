@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../bridge/bridge_config.dart';
@@ -67,6 +68,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _saving = true);
 
     final prefs = await SharedPreferences.getInstance();
+    final supportDir = await getApplicationSupportDirectory();
+    final defaultDbPath = '${supportDir.path}/shizuru.sqlite3';
+    final userId = prefs.getString('user_id') ?? 'local-user';
     await prefs.setString('llm_base_url',       _llmBaseUrl.text.trim());
     await prefs.setString('llm_api_path',        _llmApiPath.text.trim());
     await prefs.setString('llm_api_key',         _llmApiKey.text.trim());
@@ -79,6 +83,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setString('max_turns',            _maxTurns.text.trim());
 
     final config = BridgeConfig(
+      userId: userId,
+      dbPath: prefs.getString('db_path') ?? defaultDbPath,
       llmBaseUrl:        _llmBaseUrl.text.trim(),
       llmApiPath:        _llmApiPath.text.trim(),
       llmApiKey:         _llmApiKey.text.trim(),
@@ -110,10 +116,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       });
 
       try {
+        conv.clearMessages();
+        conv.beginBatch();
         await agent.initialize(config);
+        conv.endBatch();
         setState(() => _saving = false);
         if (mounted) Navigator.of(context).pop();
       } catch (e) {
+        conv.endBatch();
         setState(() => _saving = false);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(

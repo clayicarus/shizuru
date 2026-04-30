@@ -133,6 +133,14 @@ int32_t shizuru_set_voice_input(ShizuruHandle handle, int32_t enable);
 // First call with enable=1 also starts the audio devices on the pathway.
 int32_t shizuru_set_voice_output(ShizuruHandle handle, int32_t enable);
 
+// Clear all persisted memory for the current session (database wipe).
+// Returns 0 on success, negative on error.
+int32_t shizuru_clear_database(ShizuruHandle handle);
+
+// Clear the in-flight context window while preserving persisted history.
+// Returns 0 on success, negative on error.
+int32_t shizuru_clear_context(ShizuruHandle handle);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

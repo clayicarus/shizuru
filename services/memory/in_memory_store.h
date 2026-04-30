@@ -36,6 +36,16 @@ class InMemoryStore : public core::MemoryStore {
         all.end() - static_cast<ptrdiff_t>(count), all.end());
   }
 
+  size_t Count(const std::string& session_id) override {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = entries_.find(session_id);
+    if (it == entries_.end()) {
+      return 0;
+    }
+    return it->second.size();
+  }
+
+  // Test-only unbounded read path. Runtime code should use GetRecent().
   std::vector<core::MemoryEntry> GetAll(
       const std::string& session_id) override {
     std::lock_guard<std::mutex> lock(mu_);

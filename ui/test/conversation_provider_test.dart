@@ -348,6 +348,23 @@ void main() {
     expect(provider.messages[2].segments.single.text, 'new');
   });
 
+  test('replayed human_message is rendered as a user bubble', () {
+    final provider = ConversationProvider();
+
+    provider.onConversationItem(
+      _makeItem(
+        'human_message',
+        {'text': 'loaded from history'},
+        itemId: 'user_1',
+      ),
+      false,
+    );
+
+    expect(provider.messages.length, 1);
+    expect(provider.messages.single.role, 'user');
+    expect(provider.messages.single.segments.single.text, 'loaded from history');
+  });
+
   test('plainText getter returns only text segments', () {
     final msg = ConversationMessage(
       role: 'assistant',

@@ -69,6 +69,21 @@ class ConversationProvider extends ChangeNotifier {
 
   List<ConversationMessage> get messages => List.unmodifiable(_messages);
 
+  /// Suppress per-item notifications during bulk replay.
+  bool _batchMode = false;
+
+  /// Begin batch mode — notifications are suppressed until [endBatch].
+  void beginBatch() {
+    _batchMode = true;
+  }
+
+  /// End batch mode — fires a single notification and scrolls to bottom.
+  void endBatch() {
+    _batchMode = false;
+    notifyListeners();
+    _scrollToBottom(animate: false);
+  }
+
   void addUserMessage(String text) {
     _closeStreamingAssistantBubbles();
     _messages.add(
@@ -84,6 +99,10 @@ class ConversationProvider extends ChangeNotifier {
 
   /// Single entry point for all conversation items from C++.
   void onConversationItem(String itemJson, bool isDelta) {
+    _dispatchItem(itemJson, isDelta, notify: true);
+  }
+
+  void _dispatchItem(String itemJson, bool isDelta, {required bool notify}) {
     Map<String, dynamic> item;
     try {
       item = jsonDecode(itemJson) as Map<String, dynamic>;
@@ -96,46 +115,79 @@ class ConversationProvider extends ChangeNotifier {
     final turnGroupId = item['turn_group_id'] as String? ?? '';
     final payload = item['payload'] as Map<String, dynamic>? ?? {};
 
+    // Extract persisted wall-clock timestamp if present (replay path).
+    final timestampMs = payload['timestamp_ms'] as int?;
+    final timestamp = timestampMs != null
+        ? DateTime.fromMillisecondsSinceEpoch(timestampMs)
+        : DateTime.now();
+
     switch (kind) {
+      case 'human_message':
+        _handleHumanMessage(payload, timestamp: timestamp);
+        break;
       case 'assistant_message':
         _handleAssistantMessage(
           payload,
           isDelta,
           itemId: itemId,
           turnGroupId: turnGroupId,
+          timestamp: timestamp,
         );
         break;
       case 'tool_call':
-        _handleToolCall(payload, itemId: itemId, turnGroupId: turnGroupId);
+        _handleToolCall(payload, itemId: itemId, turnGroupId: turnGroupId,
+            timestamp: timestamp);
         break;
       case 'tool_result':
-        _handleToolResult(payload, itemId: itemId, turnGroupId: turnGroupId);
+        _handleToolResult(payload, itemId: itemId, turnGroupId: turnGroupId,
+            timestamp: timestamp);
         break;
       default:
         break;
     }
 
-    notifyListeners();
-    _scrollToBottom(animate: !isDelta);
+    if (notify && !_batchMode) {
+      notifyListeners();
+      _scrollToBottom(animate: !isDelta);
+    }
   }
 
   // ── Streaming delta handling ───────────────────────────────────────────
+
+  void _handleHumanMessage(Map<String, dynamic> payload,
+      {DateTime? timestamp}) {
+    final text = payload['text'] as String? ?? '';
+    if (text.isEmpty) {
+      return;
+    }
+    _closeStreamingAssistantBubbles();
+    _messages.add(
+      ConversationMessage(
+        role: 'user',
+        timestamp: timestamp ?? DateTime.now(),
+        segments: [BubbleSegment.text(text)],
+      ),
+    );
+  }
 
   void _handleAssistantMessage(
     Map<String, dynamic> payload,
     bool isDelta, {
     required String itemId,
     required String turnGroupId,
+    DateTime? timestamp,
   }) {
     final text = payload['text'] as String? ?? '';
     if (isDelta) {
       final bubble = _ensureAssistantBubble(
         turnGroupId: turnGroupId,
         streaming: true,
+        timestamp: timestamp,
       );
       _appendStreamingText(bubble, text, itemId: itemId);
     } else {
-      _finalizeBubble(text, itemId: itemId, turnGroupId: turnGroupId);
+      _finalizeBubble(text, itemId: itemId, turnGroupId: turnGroupId,
+          timestamp: timestamp);
     }
   }
 
@@ -216,8 +268,10 @@ class ConversationProvider extends ChangeNotifier {
     String finalText, {
     required String itemId,
     required String turnGroupId,
+    DateTime? timestamp,
   }) {
-    final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId);
+    final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId,
+        timestamp: timestamp);
     bubble.isStreaming = false;
 
     _replaceTextSegments(bubble, itemId: itemId, finalText: finalText);
@@ -279,8 +333,10 @@ class ConversationProvider extends ChangeNotifier {
     Map<String, dynamic> payload, {
     required String itemId,
     required String turnGroupId,
+    DateTime? timestamp,
   }) {
-    final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId);
+    final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId,
+        timestamp: timestamp);
     bubble.isStreaming = false;
     final toolCalls = payload['tool_calls'] as List<dynamic>? ?? [];
     for (final tc in toolCalls) {
@@ -301,8 +357,10 @@ class ConversationProvider extends ChangeNotifier {
     Map<String, dynamic> payload, {
     required String itemId,
     required String turnGroupId,
+    DateTime? timestamp,
   }) {
-    final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId);
+    final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId,
+        timestamp: timestamp);
     final content = payload['content'];
     bool success = false;
     if (content is Map<String, dynamic>) {
@@ -323,6 +381,7 @@ class ConversationProvider extends ChangeNotifier {
   ConversationMessage _ensureAssistantBubble({
     required String turnGroupId,
     bool streaming = false,
+    DateTime? timestamp,
   }) {
     if (turnGroupId.isNotEmpty) {
       final existingIndex = _messages.indexWhere(
@@ -350,7 +409,7 @@ class ConversationProvider extends ChangeNotifier {
     _messages.add(
       ConversationMessage(
         role: 'assistant',
-        timestamp: DateTime.now(),
+        timestamp: timestamp ?? DateTime.now(),
         turnGroupId: turnGroupId.isEmpty ? null : turnGroupId,
         isStreaming: streaming,
       ),
@@ -386,6 +445,7 @@ class ConversationProvider extends ChangeNotifier {
   void clearMessages() {
     _messages.clear();
     _fallbackStreamingIndex = -1;
+    _batchMode = false;
     _inThinkBlock = false;
     _tagBuf = '';
     notifyListeners();
@@ -394,15 +454,15 @@ class ConversationProvider extends ChangeNotifier {
   void _scrollToBottom({bool animate = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!scrollController.hasClients) return;
-      final pos = scrollController.position;
+      // ListView is reversed: offset 0 is the bottom (newest messages).
       if (animate) {
         scrollController.animateTo(
-          pos.maxScrollExtent,
+          0.0,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
       } else {
-        scrollController.jumpTo(pos.maxScrollExtent);
+        scrollController.jumpTo(0.0);
       }
     });
   }

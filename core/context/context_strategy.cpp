@@ -10,6 +10,8 @@ namespace shizuru::core {
 
 namespace {
 
+constexpr size_t kMaxContextFetchEntries = 512;
+
 ContextMessage LegacyObservationMessage(const Observation& observation) {
   ContextMessage msg;
   switch (observation.type) {
@@ -114,8 +116,10 @@ ContextWindow ContextStrategy::BuildContext(
     remaining_budget = 0;
   }
 
-  // 4. Get all memory entries and select which fit in the budget.
-  auto all_entries = store_.GetAll(session_id);
+  // 4. Get a bounded recent window of memory entries and select which fit in
+  // the token budget. This prevents prompt construction from fetching an
+  // unbounded history from persistent storage.
+  auto all_entries = store_.GetRecent(session_id, kMaxContextFetchEntries);
 
   // Iterate from newest to oldest, accumulating tokens.
   // Track which entries are included.
@@ -233,7 +237,6 @@ void ContextStrategy::SetSystemInstruction(const std::string& session_id,
 }
 
 void ContextStrategy::ReleaseSession(const std::string& session_id) {
-  store_.Clear(session_id);
   {
     std::lock_guard<std::mutex> lock(instruction_mutex_);
     system_instructions_.erase(session_id);
@@ -241,13 +244,16 @@ void ContextStrategy::ReleaseSession(const std::string& session_id) {
 }
 
 void ContextStrategy::MaybeSummarize(const std::string& session_id) {
-  auto all = store_.GetAll(session_id);
-  if (static_cast<int>(all.size()) <= config_.summarization_threshold) {
+  const size_t total_entries = store_.Count(session_id);
+  if (static_cast<int>(total_entries) <= config_.summarization_threshold) {
     return;
   }
 
   // Summarize the oldest half of entries.
-  size_t half = all.size() / 2;
+  size_t half = total_entries / 2;
+  if (half == 0) {
+    return;
+  }
 
   // Build a summary entry.
   MemoryEntry summary;
@@ -256,13 +262,6 @@ void ContextStrategy::MaybeSummarize(const std::string& session_id) {
   summary.content =
       "Summary of " + std::to_string(half) + " entries";
   summary.timestamp = std::chrono::steady_clock::now();
-
-  // Rough token estimate: sum of summarized entries' tokens / 4
-  // (compression ratio), with a minimum of the content size / 4.
-  int summarized_tokens = 0;
-  for (size_t i = 0; i < half; ++i) {
-    summarized_tokens += EntryTokens(all[i]);
-  }
   summary.estimated_tokens =
       static_cast<int>(summary.content.size()) / 4;
 

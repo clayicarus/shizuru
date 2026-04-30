@@ -332,10 +332,10 @@ TEST(ContextStrategyTest, DefaultSystemInstructionNoArg) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: ReleaseSession clears everything
+// Test: ReleaseSession clears only ephemeral session state
 // Requirements: 6.4
 // ---------------------------------------------------------------------------
-TEST(ContextStrategyTest, ReleaseSessionClearsMemory) {
+TEST(ContextStrategyTest, ReleaseSessionPreservesCommittedHistory) {
   ContextConfig config;
   config.max_context_tokens = 100000;
   config.summarization_threshold = 1000;
@@ -353,8 +353,14 @@ TEST(ContextStrategyTest, ReleaseSessionClearsMemory) {
 
   strategy.ReleaseSession(sid);
 
-  EXPECT_TRUE(store.GetAll(sid).empty());
-  EXPECT_TRUE(store.GetRecent(sid, 10).empty());
+  ASSERT_EQ(store.GetAll(sid).size(), 2u);
+  EXPECT_EQ(store.GetRecent(sid, 10).size(), 2u);
+
+  strategy.InitSession(sid, "Reinitialized");
+  auto window = strategy.BuildContext(sid, MakeObservation("Again"));
+  ASSERT_GE(window.messages.size(), 4u);
+  EXPECT_EQ(window.messages[1].content, "Hello");
+  EXPECT_EQ(window.messages[2].content, "Hi");
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +445,7 @@ TEST(ContextStrategyTest, MultipleSessionsIsolated) {
 
   // Release s1 should not affect s2.
   strategy.ReleaseSession("s1");
-  EXPECT_TRUE(store.GetAll("s1").empty());
+  EXPECT_FALSE(store.GetAll("s1").empty());
   EXPECT_FALSE(store.GetAll("s2").empty());
 }
 

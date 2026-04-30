@@ -7,8 +7,10 @@
 #include <utility>
 
 #include "app/persona/persona.h"
+#include "app/memory/sqlite_memory_store.h"
 #include "app/tools/builtin_tools.h"
 #include "async_logger.h"
+#include "conversation/item.h"
 #include "runtime/tool_dispatch_device.h"
 #include "runtime/core_device.h"
 #include "runtime/route_table.h"
@@ -24,6 +26,11 @@
 #include "core/strategies/tts_segment_strategy.h"
 
 namespace shizuru::app {
+namespace {
+
+constexpr size_t kMaxStartupHistoryReplayEntries = 256;
+
+}  // namespace
 
 AppRuntime::AppRuntime(AppConfig config) : config_(std::move(config)) {
   // Initialize logger.
@@ -119,15 +126,48 @@ void AppRuntime::Start() {
   auto resp_filter = std::make_unique<core::StripThinkingFilter>();
 
   // ── Create CoreDevice ────────────────────────────────────────────────────
-  const std::string session_id =
+  const std::string generated_session_id =
       "session-" + std::to_string(
           std::chrono::steady_clock::now().time_since_epoch().count());
+  const std::string session_id =
+      !config_.user_id.empty() ? config_.user_id : generated_session_id;
+
+  std::unique_ptr<core::MemoryStore> memory_store;
+  if (!config_.db_path.empty()) {
+    memory_store = std::make_unique<app::SqliteMemoryStore>(config_.db_path);
+  } else {
+    memory_store = std::make_unique<services::InMemoryStore>();
+  }
+
+  std::vector<core::conversation::ConversationItem> persisted_items;
+  {
+    // Capture clock offsets once for converting steady_clock → wall-clock ms.
+    const auto now_sys = std::chrono::system_clock::now();
+    const auto now_steady = std::chrono::steady_clock::now();
+
+    for (const auto& entry :
+         memory_store->GetRecent(session_id, kMaxStartupHistoryReplayEntries)) {
+      auto item = core::conversation::TryParseConversationItem(entry.item_json);
+      if (!item.has_value()) {
+        continue;
+      }
+      // Inject the persisted wall-clock timestamp so the UI can display the
+      // original message time instead of the current replay time.
+      auto delta = entry.timestamp - now_steady;
+      auto wall_tp = now_sys + std::chrono::duration_cast<
+          std::chrono::system_clock::duration>(delta);
+      auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          wall_tp.time_since_epoch()).count();
+      item->payload["timestamp_ms"] = wall_ms;
+      persisted_items.push_back(std::move(*item));
+    }
+  }
 
   auto core = std::make_unique<runtime::CoreDevice>(
       "core", session_id,
       config_.controller, config_.context, config_.policy,
       std::make_unique<services::OpenAiClient>(config_.llm),
-      std::make_unique<services::InMemoryStore>(),
+      std::move(memory_store),
       std::make_unique<services::LogAuditSink>(),
       std::move(obs_agg),
       std::move(obs_filter),
@@ -198,6 +238,9 @@ void AppRuntime::Start() {
   // ── Wire core routes ─────────────────────────────────────────────────────
   WireRoutes();
 
+  // ── Replay persisted conversation history for the UI ────────────────────
+  ReplayPersistedConversationHistory(persisted_items);
+
   // ── Start all auto_start devices ─────────────────────────────────────────
   bus_.StartAll();
 }
@@ -222,6 +265,47 @@ void AppRuntime::Shutdown() {
   core_device_ = nullptr;
   scheduler_ = nullptr;
   bus_.Shutdown();
+}
+
+void AppRuntime::ClearDatabase() {
+  if (core_device_ == nullptr) { return; }
+  auto& session = core_device_->Session();
+  const auto& sid = session.SessionId();
+
+  // Wipe all persisted entries for this session.
+  session.GetMemoryStore().Clear(sid);
+
+  // Reset the context window so the next turn doesn't reference stale data.
+  session.GetContext().ReleaseSession(sid);
+  session.GetContext().InitSession(
+      sid, config_.context.default_system_instruction);
+}
+
+void AppRuntime::ClearContext() {
+  if (core_device_ == nullptr) { return; }
+  auto& session = core_device_->Session();
+  const auto& sid = session.SessionId();
+
+  // Release ephemeral context state (system instruction cache, etc.)
+  // while preserving committed history in the memory store.
+  session.GetContext().ReleaseSession(sid);
+  session.GetContext().InitSession(
+      sid, config_.context.default_system_instruction);
+}
+
+void AppRuntime::ReplayPersistedConversationHistory(
+    const std::vector<core::conversation::ConversationItem>& items) {
+  ConversationItemCallback cb;
+  {
+    std::lock_guard<std::mutex> lock(cb_mutex_);
+    cb = conversation_item_cb_;
+  }
+  if (!cb) {
+    return;
+  }
+  for (const auto& item : items) {
+    cb(item, false);
+  }
 }
 
 void AppRuntime::WireRoutes() {

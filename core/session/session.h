@@ -50,6 +50,7 @@ class AgentSession {
   Controller& GetController() { return controller_; }
   ContextStrategy& GetContext() { return context_; }
   PolicyLayer& GetPolicy() { return policy_; }
+  MemoryStore& GetMemoryStore() { return *memory_; }
 
  private:
   std::string session_id_;

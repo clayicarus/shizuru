@@ -8,20 +8,23 @@
 // Schema (single table, simple):
 //   CREATE TABLE memory (
 //     id INTEGER PRIMARY KEY AUTOINCREMENT,
-//     user_id TEXT NOT NULL,
+//     session_key TEXT NOT NULL,
 //     type INTEGER NOT NULL,        -- MemoryEntryType ordinal
 //     role TEXT NOT NULL,
 //     content TEXT NOT NULL,
 //     source_tag TEXT DEFAULT '',
 //     tool_call_id TEXT DEFAULT '',
 //     tool_calls_json TEXT DEFAULT '',
-//     timestamp_ms INTEGER NOT NULL, -- milliseconds since epoch
+//     item_json TEXT DEFAULT '',
+//     created_at_ms INTEGER NOT NULL, -- milliseconds since epoch
 //     estimated_tokens INTEGER DEFAULT 0
 //   );
 //
-// The session_id parameter in MemoryStore methods maps to user_id here,
-// since the product layer uses user_id as the memory key.
+// The session_id parameter in MemoryStore methods maps to session_key here.
+// AppRuntime may choose to pass a stable user_id as the session key for
+// persistent history.
 
+#include <memory>
 #include <string>
 
 #include "core/interfaces/memory_store.h"
@@ -37,12 +40,14 @@ class SqliteMemoryStore : public core::MemoryStore {
 
   void Append(const std::string& user_id, const core::MemoryEntry& entry) override;
   std::vector<core::MemoryEntry> GetRecent(const std::string& user_id, size_t count) override;
+  size_t Count(const std::string& user_id) override;
+  // Test-only unbounded read path. Runtime code should use GetRecent().
   std::vector<core::MemoryEntry> GetAll(const std::string& user_id) override;
   void Summarize(const std::string& user_id, size_t start_index, size_t end_index,
                  const core::MemoryEntry& summary) override;
   void Clear(const std::string& user_id) override;
 
- private:
+private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

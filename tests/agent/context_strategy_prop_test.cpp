@@ -473,12 +473,26 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_session_release_clears_memory,
   // Release the session.
   strategy.ReleaseSession(session_id);
 
-  // All subsequent retrievals should return empty.
+  // Committed history must remain available after the session is released.
   auto after_all = store.GetAll(session_id);
-  RC_ASSERT(after_all.empty());
+  RC_ASSERT(after_all.size() == before.size());
+  for (size_t i = 0; i < before.size(); ++i) {
+    RC_ASSERT(after_all[i].role == before[i].role);
+    RC_ASSERT(after_all[i].content == before[i].content);
+    RC_ASSERT(after_all[i].tool_call_id == before[i].tool_call_id);
+    RC_ASSERT(after_all[i].tool_calls_json == before[i].tool_calls_json);
+    RC_ASSERT(after_all[i].item_json == before[i].item_json);
+  }
 
   auto after_recent = store.GetRecent(session_id, 100);
-  RC_ASSERT(after_recent.empty());
+  RC_ASSERT(after_recent.size() == before.size());
+  for (size_t i = 0; i < before.size(); ++i) {
+    RC_ASSERT(after_recent[i].role == before[i].role);
+    RC_ASSERT(after_recent[i].content == before[i].content);
+    RC_ASSERT(after_recent[i].tool_call_id == before[i].tool_call_id);
+    RC_ASSERT(after_recent[i].tool_calls_json == before[i].tool_calls_json);
+    RC_ASSERT(after_recent[i].item_json == before[i].item_json);
+  }
 }
 
 // ---------------------------------------------------------------------------

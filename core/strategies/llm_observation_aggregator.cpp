@@ -52,6 +52,11 @@ std::optional<Observation> LlmObservationAggregator::Feed(
     return FlushBuffer();
   }
 
+  // Update last_input_time_ AFTER the (potentially blocking) LLM call so
+  // that CheckTimeout's elapsed calculation starts from when the aggregator
+  // actually decided to buffer, not from before the LLM round-trip.
+  last_input_time_ = std::chrono::steady_clock::now();
+
   LOG_INFO("[Aggregator] Utterance incomplete, waiting for more");
   return std::nullopt;
 }

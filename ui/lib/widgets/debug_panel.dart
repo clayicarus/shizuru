@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../bridge/agent_state.dart';
 import '../providers/agent_provider.dart';
+import '../providers/conversation_provider.dart';
 
 class DebugPanel extends StatelessWidget {
   const DebugPanel({super.key});
@@ -12,9 +13,43 @@ class DebugPanel extends StatelessWidget {
       '${t.second.toString().padLeft(2, '0')}.'
       '${t.millisecond.toString().padLeft(3, '0')}';
 
+  void _confirmClearDatabase(
+      BuildContext context, AgentProvider agent, ConversationProvider conv) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear Database'),
+        content: const Text(
+            'This will permanently delete all conversation history. Continue?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              agent.clearDatabase();
+              conv.clearMessages();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Database cleared'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final agent = context.watch<AgentProvider>();
+    final conv = context.watch<ConversationProvider>();
     final log = agent.activityLog;
 
     return Drawer(
@@ -50,6 +85,39 @@ class DebugPanel extends StatelessWidget {
                   TextButton(
                     onPressed: () => agent.stopAllAudio(),
                     child: const Text('Stop', style: TextStyle(fontSize: 11)),
+                  ),
+                ],
+              ),
+            ),
+            // Memory controls
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Row(
+                children: [
+                  const Text('Memory: ',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  TextButton(
+                    onPressed: agent.isInitialized
+                        ? () {
+                            agent.clearContext();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Context cleared'),
+                                duration: Duration(seconds: 1),
+                              ),
+                            );
+                          }
+                        : null,
+                    child: const Text('Clear Context',
+                        style: TextStyle(fontSize: 11)),
+                  ),
+                  TextButton(
+                    onPressed: agent.isInitialized
+                        ? () => _confirmClearDatabase(context, agent, conv)
+                        : null,
+                    style: TextButton.styleFrom(foregroundColor: Colors.red),
+                    child: const Text('Clear DB',
+                        style: TextStyle(fontSize: 11)),
                   ),
                 ],
               ),

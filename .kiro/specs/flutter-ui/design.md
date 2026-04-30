@@ -98,6 +98,8 @@ void    shizuru_set_audio_level_callback(ShizuruHandle handle,
 
 ```json
 {
+  "user_id":             "local-user",
+  "db_path":             "/platform/default/path/shizuru.sqlite3",
   "llm_base_url":        "https://dashscope.aliyuncs.com",
   "llm_api_path":        "/compatible-mode/v1/chat/completions",
   "llm_api_key":         "...",
@@ -109,6 +111,13 @@ void    shizuru_set_audio_level_callback(ShizuruHandle handle,
   "max_turns":           100
 }
 ```
+
+Notes:
+- `user_id` is the stable memory key used by the app layer for persistent conversation history.
+- `db_path` is the SQLite file path passed through the bridge into `AppConfig`.
+- On Android, the platform layer should provide the default app-private path
+  (for example via Flutter `path_provider` / application support directory)
+  instead of hard-coding a path in C++.
 
 ### Internal structure of `ShizuruHandle`
 

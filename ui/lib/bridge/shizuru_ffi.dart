@@ -39,6 +39,8 @@ typedef _SetDiagnosticCallbackNative = Void Function(
 typedef _SetActivityCallbackNative = Void Function(
     Pointer handle, Pointer<NativeFunction<_ActivityCallbackNative>> cb,
     Pointer userData);
+typedef _ClearDatabaseNative = Int32 Function(Pointer handle);
+typedef _ClearContextNative = Int32 Function(Pointer handle);
 
 // Callback native types
 typedef _OutputCallbackNative = Void Function(
@@ -86,6 +88,8 @@ typedef _SetDiagnosticCallbackDart = void Function(
 typedef _SetActivityCallbackDart = void Function(
     Pointer handle, Pointer<NativeFunction<_ActivityCallbackNative>> cb,
     Pointer userData);
+typedef _ClearDatabaseDart = int Function(Pointer handle);
+typedef _ClearContextDart = int Function(Pointer handle);
 
 // ---------------------------------------------------------------------------
 // ShizuruBridge
@@ -112,6 +116,8 @@ class ShizuruBridge {
   late final _SetTranscriptCallbackDart _setTranscriptCallback;
   late final _SetDiagnosticCallbackDart _setDiagnosticCallback;
   late final _SetActivityCallbackDart _setActivityCallback;
+  late final _ClearDatabaseDart _clearDatabase;
+  late final _ClearContextDart _clearContext;
 
   // Keep NativeCallable references alive
   NativeCallable<_OutputCallbackNative>? _outputCallable;
@@ -191,6 +197,10 @@ class ShizuruBridge {
         _SetDiagnosticCallbackDart>('shizuru_set_diagnostic_callback');
     _setActivityCallback = _lib.lookupFunction<_SetActivityCallbackNative,
         _SetActivityCallbackDart>('shizuru_set_activity_callback');
+    _clearDatabase = _lib.lookupFunction<_ClearDatabaseNative,
+        _ClearDatabaseDart>('shizuru_clear_database');
+    _clearContext = _lib.lookupFunction<_ClearContextNative,
+        _ClearContextDart>('shizuru_clear_context');
   }
 
   int start() => _start(_handle);
@@ -261,6 +271,8 @@ class ShizuruBridge {
   int stopPlayout() => _stopPlayout(_handle);
   int setVoiceInput(bool enable) => _setVoiceInput(_handle, enable ? 1 : 0);
   int setVoiceOutput(bool enable) => _setVoiceOutput(_handle, enable ? 1 : 0);
+  int clearDatabase() => _clearDatabase(_handle);
+  int clearContext() => _clearContext(_handle);
 
   void onAudioLevel(void Function(double rms) callback) {
     _audioLevelCallable?.close();

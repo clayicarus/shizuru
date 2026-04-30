@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'bridge/bridge_config.dart';
@@ -82,6 +83,9 @@ class _AppStartupState extends State<_AppStartup> {
   Future<void> _startup() async {
     final prefs = await SharedPreferences.getInstance();
     BridgeConfig? savedConfig;
+    final supportDir = await getApplicationSupportDirectory();
+    final defaultDbPath = '${supportDir.path}/shizuru.sqlite3';
+    final userId = prefs.getString('user_id') ?? 'local-user';
 
     final llmApiKey = prefs.getString('llm_api_key') ?? '';
     final elevenLabsKey = prefs.getString('elevenlabs_api_key') ?? '';
@@ -96,6 +100,8 @@ class _AppStartupState extends State<_AppStartup> {
 
     if (configComplete && !_skipAutoInit) {
       savedConfig = BridgeConfig(
+        userId: userId,
+        dbPath: prefs.getString('db_path') ?? defaultDbPath,
         llmBaseUrl:
             prefs.getString('llm_base_url') ??
             BridgeConfig.defaults().llmBaseUrl,
@@ -157,11 +163,16 @@ class _AppStartupState extends State<_AppStartup> {
   Future<void> _initializeSavedConfig(BridgeConfig config) async {
     if (!mounted) return;
     try {
+      final conv = context.read<ConversationProvider>();
+      conv.clearMessages();
+      conv.beginBatch();
       await context.read<AgentProvider>().initialize(config);
+      conv.endBatch();
     } catch (e, st) {
       debugPrint('Shizuru startup failed: $e');
       debugPrint('$st');
       if (!mounted) return;
+      context.read<ConversationProvider>().endBatch();
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
           builder: (_) => const SettingsScreen(isInitialSetup: true),

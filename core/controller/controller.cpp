@@ -173,6 +173,15 @@ Controller::Controller(std::string session_id,
                            ? std::move(response_filter)
                            : std::make_unique<PassthroughFilter>()) {
   reducer_ = std::make_unique<dialogue::DefaultDialogueReducer>(config_);
+
+  // Seed sequence counters with a time-based offset so turnGroupId and
+  // itemId values never collide across process restarts for the same
+  // session_id.  Without this, replayed history items and new items can
+  // share the same turnGroupId, causing the UI to merge them into one bubble.
+  auto epoch_ns = static_cast<uint64_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  next_conversation_item_seq_ = epoch_ns % 1000000000ULL;
+  next_assistant_turn_seq_ = epoch_ns % 1000000000ULL;
 }
 
 Controller::~Controller() {

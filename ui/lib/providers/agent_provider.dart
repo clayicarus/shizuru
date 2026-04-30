@@ -137,6 +137,18 @@ class AgentProvider extends ChangeNotifier {
     _bridge?.sendMessage(text);
   }
 
+  void clearDatabase() {
+    _bridge?.clearDatabase();
+    _log('Database cleared');
+    notifyListeners();
+  }
+
+  void clearContext() {
+    _bridge?.clearContext();
+    _log('Context cleared');
+    notifyListeners();
+  }
+
   static const _audioChannel = MethodChannel('com.example.shizuru_ui/audio');
 
   void toggleCapture() {

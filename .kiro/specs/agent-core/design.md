@@ -299,6 +299,53 @@ class MemoryStore {
 }  // namespace shizuru::core
 ```
 
+#### SQLite-Backed App MemoryStore (app/memory/sqlite_memory_store.*)
+
+The default persistent backend is implemented in the app layer as a concrete
+`MemoryStore` using SQLite. The core interface remains unchanged; the app
+layer decides whether to inject an in-memory or SQLite-backed implementation.
+
+Current schema:
+
+```sql
+CREATE TABLE memory (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_key TEXT NOT NULL,
+  type INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source_tag TEXT NOT NULL DEFAULT '',
+  tool_call_id TEXT NOT NULL DEFAULT '',
+  tool_calls_json TEXT NOT NULL DEFAULT '',
+  item_json TEXT NOT NULL DEFAULT '',
+  created_at_ms INTEGER NOT NULL,
+  estimated_tokens INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_memory_session_id_id
+  ON memory(session_key, id);
+
+CREATE INDEX idx_memory_session_id_created_at
+  ON memory(session_key, created_at_ms);
+```
+
+Operational constraints:
+- `GetRecent(session_key, count)` must clamp `count` to a bounded maximum.
+- Prompt building must read a bounded recent window, not the full table.
+- `created_at_ms` stores wall-clock time for persistence; `MemoryEntry.timestamp`
+  remains a runtime field reconstructed on read.
+
+Example rows for a short conversation:
+
+| id | session_key | type | role | content | source_tag | tool_call_id | tool_calls_json | item_json | created_at_ms | estimated_tokens |
+|---|---|---:|---|---|---|---|---|---|---:|---:|
+| 1 | `local-user` | 0 | `user` | `I had a rough day at work.` | `user` | `` | `` | `{...human message...}` | 1714440000000 | 7 |
+| 2 | `local-user` | 1 | `assistant` | `That sounds exhausting. Do you want to talk about what happened?` | `` | `` | `` | `{...assistant message...}` | 1714440004200 | 16 |
+| 3 | `local-user` | 0 | `user` | `Yes. Also remind me tomorrow to send that report.` | `user` | `` | `` | `{...human message...}` | 1714440011000 | 11 |
+| 4 | `local-user` | 2 | `assistant` | `` | `` | `` | `[{...tool call set_reminder...}]` | `{...tool call item...}` | 1714440011800 | 12 |
+| 5 | `local-user` | 3 | `tool` | `{"success":true,"tool_name":"set_reminder","tool_call_id":"call_1","output":"scheduled"}` | `tool:set_reminder` | `call_1` | `` | `{...tool result item...}` | 1714440012100 | 10 |
+| 6 | `local-user` | 1 | `assistant` | `Done. I'll remind you tomorrow.` | `` | `` | `` | `{...assistant message...}` | 1714440012600 | 8 |
+
 ### Core Classes
 
 #### Controller

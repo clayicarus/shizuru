@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "app/assembly/app_config.h"
 #include "app/persona/persona.h"
@@ -73,7 +74,17 @@ class AppRuntime {
   // Shutdown everything.
   void Shutdown();
 
+  // Clear all persisted memory for the current session (database wipe).
+  // Also clears the UI conversation.
+  void ClearDatabase();
+
+  // Clear the in-flight context window while preserving persisted history.
+  // Resets the prompt context so the next turn starts fresh.
+  void ClearContext();
+
  private:
+  void ReplayPersistedConversationHistory(
+      const std::vector<core::conversation::ConversationItem>& items);
   void WireRoutes();
 
   AppConfig config_;

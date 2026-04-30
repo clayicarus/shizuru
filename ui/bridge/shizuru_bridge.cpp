@@ -223,6 +223,8 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   const std::string el_voice_id   = get_str("elevenlabs_voice_id");
   const std::string baidu_api_key = get_str("baidu_api_key");
   const std::string baidu_sec_key = get_str("baidu_secret_key");
+  const std::string user_id       = get_str("user_id", "local-user");
+  const std::string db_path       = get_str("db_path");
   const std::string user_instr    = get_str("system_instruction");
 
   if (llm_api_key.empty()) {
@@ -241,6 +243,8 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
   app_cfg.llm.enable_thinking = true;
   app_cfg.controller.use_streaming = true;
   app_cfg.policy.default_capabilities = {"builtin"};
+  app_cfg.user_id = user_id;
+  app_cfg.db_path = db_path;
   {
     core::PolicyRule allow_builtin;
     allow_builtin.priority = 0;
@@ -642,6 +646,24 @@ int32_t shizuru_stop_playout(ShizuruHandle handle) {
   bool exp = true;
   if (!ctx->playout_running.compare_exchange_strong(exp, false)) { return 0; }
   try { ctx->playout->Stop(); } catch (...) { ctx->playout_running.store(true); return -2; }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Memory / context management
+// ---------------------------------------------------------------------------
+
+int32_t shizuru_clear_database(ShizuruHandle handle) {
+  if (!handle) { return -1; }
+  auto* ctx = static_cast<ShizuruContext*>(handle);
+  try { ctx->app->ClearDatabase(); } catch (...) { return -2; }
+  return 0;
+}
+
+int32_t shizuru_clear_context(ShizuruHandle handle) {
+  if (!handle) { return -1; }
+  auto* ctx = static_cast<ShizuruContext*>(handle);
+  try { ctx->app->ClearContext(); } catch (...) { return -2; }
   return 0;
 }
 

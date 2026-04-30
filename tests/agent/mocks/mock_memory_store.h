@@ -35,6 +35,16 @@ class MockMemoryStore : public MemoryStore {
                                     all.end());
   }
 
+  size_t Count(const std::string& session_id) override {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = entries_.find(session_id);
+    if (it == entries_.end()) {
+      return 0;
+    }
+    return it->second.size();
+  }
+
+  // Test-only helper used by assertions over committed history.
   std::vector<MemoryEntry> GetAll(const std::string& session_id) override {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = entries_.find(session_id);

@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 class BridgeConfig {
+  final String userId;
+  final String dbPath;
   final String llmBaseUrl;
   final String llmApiPath;
   final String llmApiKey;
@@ -13,6 +15,8 @@ class BridgeConfig {
   final int maxTurns;
 
   const BridgeConfig({
+    required this.userId,
+    required this.dbPath,
     required this.llmBaseUrl,
     required this.llmApiPath,
     required this.llmApiKey,
@@ -26,6 +30,8 @@ class BridgeConfig {
   });
 
   factory BridgeConfig.defaults() => const BridgeConfig(
+    userId: 'local-user',
+    dbPath: '',
     llmBaseUrl: 'https://dashscope.aliyuncs.com',
     llmApiPath: '/compatible-mode/v1/chat/completions',
     llmApiKey: '',
@@ -41,6 +47,8 @@ class BridgeConfig {
   );
 
   BridgeConfig copyWith({
+    String? userId,
+    String? dbPath,
     String? llmBaseUrl,
     String? llmApiPath,
     String? llmApiKey,
@@ -53,6 +61,8 @@ class BridgeConfig {
     int? maxTurns,
   }) {
     return BridgeConfig(
+      userId: userId ?? this.userId,
+      dbPath: dbPath ?? this.dbPath,
       llmBaseUrl: llmBaseUrl ?? this.llmBaseUrl,
       llmApiPath: llmApiPath ?? this.llmApiPath,
       llmApiKey: llmApiKey ?? this.llmApiKey,
@@ -67,6 +77,8 @@ class BridgeConfig {
   }
 
   String toJson() => jsonEncode({
+    'user_id':            userId,
+    'db_path':            dbPath,
     'llm_base_url':       llmBaseUrl,
     'llm_api_path':       llmApiPath,
     'llm_api_key':        llmApiKey,
@@ -80,6 +92,8 @@ class BridgeConfig {
   });
 
   factory BridgeConfig.fromJson(Map<String, dynamic> json) => BridgeConfig(
+    userId: json['user_id'] as String? ?? 'local-user',
+    dbPath: json['db_path'] as String? ?? '',
     llmBaseUrl:       json['llm_base_url'] as String? ?? 'https://dashscope.aliyuncs.com',
     llmApiPath:       json['llm_api_path'] as String? ?? '/compatible-mode/v1/chat/completions',
     llmApiKey:        json['llm_api_key'] as String? ?? '',

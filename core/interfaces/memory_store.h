@@ -21,7 +21,12 @@ class MemoryStore {
   virtual std::vector<MemoryEntry> GetRecent(const std::string& session_id,
                                               size_t count) = 0;
 
+  // Count entries for a session without loading them.
+  virtual size_t Count(const std::string& session_id) = 0;
+
   // Retrieve all entries for a session.
+  // Test-only escape hatch: production / business code must not depend on
+  // unbounded history reads. Use GetRecent() or Count() instead.
   virtual std::vector<MemoryEntry> GetAll(const std::string& session_id) = 0;
 
   // Replace a range of entries with a summary entry (for summarization).

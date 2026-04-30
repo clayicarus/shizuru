@@ -87,11 +87,12 @@ class _ConversationScreenState extends State<ConversationScreen> {
           Expanded(
             child: ListView.builder(
               controller: conv.scrollController,
+              reverse: true,
               padding: const EdgeInsets.symmetric(vertical: 8),
               itemCount: messages.length,
               itemBuilder: (ctx, i) => MessageBubble(
                 key: ValueKey('msg_$i'),
-                message: messages[i],
+                message: messages[messages.length - 1 - i],
               ),
             ),
           ),

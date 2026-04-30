@@ -34,7 +34,7 @@ class ContextStrategy {
   void SetSystemInstruction(const std::string& session_id,
                             const std::string& instruction);
 
-  // Release all memory for a session.
+  // Release ephemeral per-session state while preserving committed history.
   void ReleaseSession(const std::string& session_id);
 
  private:
