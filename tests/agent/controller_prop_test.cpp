@@ -17,6 +17,8 @@
 
 #include "context/config.h"
 #include "context/context_strategy.h"
+#include "conversation/item.h"
+#include "conversation/render.h"
 #include "controller/config.h"
 #include "controller/controller.h"
 #include "controller/types.h"
@@ -30,6 +32,15 @@
 
 namespace shizuru::core {
 namespace {
+
+// Helper: extract searchable text content from a MemoryEntry.
+std::string EntryText(const MemoryEntry& e) {
+  if (e.type == MemoryEntryType::kSummary || e.type == MemoryEntryType::kExternalContext) {
+    return e.content;
+  }
+  auto rendered = conversation::RenderForLlm(e.item);
+  return rendered.content;
+}
 
 // Poll predicate until true or timeout_ms elapses.
 bool WaitFor(std::function<bool()> pred, int timeout_ms = 2000) {
@@ -319,13 +330,15 @@ RC_GTEST_PROP(ControllerPropTest, prop_action_routing_by_type, (void)) {
         const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = nlohmann::json({
-            {"success", true},
-            {"tool_name", json.value("tool_name", "test_tool")},
-            {"tool_call_id", json.value("tool_call_id", "")},
-            {"output", "ok"},
-        }).dump();
-        result_obs.source = "tool";
+        result_obs.item = conversation::MakeToolResultItem(
+            json.value("tool_name", "test_tool"),
+            json.value("tool_call_id", ""),
+            nlohmann::json({
+                {"success", true},
+                {"tool_name", json.value("tool_name", "test_tool")},
+                {"tool_call_id", json.value("tool_call_id", "")},
+                {"output", "ok"},
+            }));
         result_obs.timestamp = std::chrono::steady_clock::now();
         (*ctrl_holder)->EnqueueObservation(std::move(result_obs));
       }
@@ -380,8 +393,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_action_routing_by_type, (void)) {
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "hello";
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", "hello");
   obs.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs));
 
@@ -465,8 +477,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_observation_fifo, (void)) {
 
     Observation obs;
     obs.type = ObservationType::kUserMessage;
-    obs.content = content;
-    obs.source = "user";
+    obs.item = conversation::MakeHumanMessageItem("user", "", content);
     obs.timestamp = std::chrono::steady_clock::now();
     h.controller->EnqueueObservation(std::move(obs));
 
@@ -535,8 +546,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_llm_retry_backoff, (void)) {
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "test";
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", "test");
   obs.timestamp = std::chrono::steady_clock::now();
   h.controller->EnqueueObservation(std::move(obs));
 
@@ -609,13 +619,15 @@ RC_GTEST_PROP(ControllerPropTest, prop_io_failure_feeds_thinking, (void)) {
         const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = nlohmann::json({
-            {"success", false},
-            {"tool_name", json.value("tool_name", "test_tool")},
-            {"tool_call_id", json.value("tool_call_id", "")},
-            {"error", "tool execution failed"},
-        }).dump();
-        result_obs.source = "tool";
+        result_obs.item = conversation::MakeToolResultItem(
+            json.value("tool_name", "test_tool"),
+            json.value("tool_call_id", ""),
+            nlohmann::json({
+                {"success", false},
+                {"tool_name", json.value("tool_name", "test_tool")},
+                {"tool_call_id", json.value("tool_call_id", "")},
+                {"error", "tool execution failed"},
+            }));
         result_obs.timestamp = std::chrono::steady_clock::now();
         (*ctrl_holder2)->EnqueueObservation(std::move(result_obs));
       }
@@ -668,8 +680,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_io_failure_feeds_thinking, (void)) {
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "do something";
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", "do something");
   obs.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs));
 
@@ -757,8 +768,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_budget_guardrails, (void)) {
   for (int i = 0; i < 3; ++i) {
     Observation obs;
     obs.type = ObservationType::kUserMessage;
-    obs.content = "msg_" + std::to_string(i);
-    obs.source = "user";
+    obs.item = conversation::MakeHumanMessageItem("user", "", "msg_" + std::to_string(i));
     obs.timestamp = std::chrono::steady_clock::now();
     ctrl.EnqueueObservation(std::move(obs));
   }
@@ -846,8 +856,7 @@ RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
 
   Observation obs1;
   obs1.type = ObservationType::kUserMessage;
-  obs1.content = "first message";
-  obs1.source = "user";
+  obs1.item = conversation::MakeHumanMessageItem("user", "", "first message");
   obs1.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs1));
 
@@ -890,11 +899,13 @@ RC_GTEST_PROP(ControllerPropTest, prop_interruption_behavior, (void)) {
   bool found_interrupt_memory = false;
   bool found_empty_user_message = false;
   for (const auto& e : entries) {
-    if (e.content.find("interrupted") != std::string::npos ||
-        e.content.find("Interrupt") != std::string::npos) {
+    if (EntryText(e).find("interrupted") != std::string::npos ||
+        EntryText(e).find("Interrupt") != std::string::npos) {
       found_interrupt_memory = true;
     }
-    if (e.role == "user" && e.content.empty()) {
+    auto text = EntryText(e);
+    auto rendered = conversation::RenderForLlm(e.item);
+    if (rendered.role == "user" && text.empty()) {
       found_empty_user_message = true;
     }
   }
@@ -956,13 +967,15 @@ RC_GTEST_PROP(ControllerPropTest,
         const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = nlohmann::json({
-            {"success", true},
-            {"tool_name", json.value("tool_name", "test_tool")},
-            {"tool_call_id", json.value("tool_call_id", "")},
-            {"output", "ok"},
-        }).dump();
-        result_obs.source = "tool";
+        result_obs.item = conversation::MakeToolResultItem(
+            json.value("tool_name", "test_tool"),
+            json.value("tool_call_id", ""),
+            nlohmann::json({
+                {"success", true},
+                {"tool_name", json.value("tool_name", "test_tool")},
+                {"tool_call_id", json.value("tool_call_id", "")},
+                {"output", "ok"},
+            }));
         result_obs.timestamp = std::chrono::steady_clock::now();
         (*ctrl_holder)->EnqueueObservation(std::move(result_obs));
       }
@@ -1027,8 +1040,7 @@ RC_GTEST_PROP(ControllerPropTest,
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "trigger tool";
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", "trigger tool");
   obs.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs));
 
@@ -1059,11 +1071,11 @@ RC_GTEST_PROP(ControllerPropTest,
       const auto json = nlohmann::json::parse(payload);
       RC_ASSERT(json.value("tool_name", "") == captured_name);
       if (json.contains("arguments")) {
-        const auto& args = json["arguments"];
-        if (args.is_string()) {
-          RC_ASSERT(args.get<std::string>() == captured_args);
+        const auto& args_val = json["arguments"];
+        if (args_val.is_string()) {
+          RC_ASSERT(args_val.get<std::string>() == captured_args);
         } else {
-          RC_ASSERT(args.dump() == captured_args);
+          RC_ASSERT(args_val.dump() == captured_args);
         }
       } else {
         RC_FAIL("tool call payload missing arguments");
@@ -1117,23 +1129,24 @@ RC_GTEST_PROP(ControllerPropTest,
         const bool has_success = captured_content.find("success") != std::string::npos;
         const std::string payload(frame.payload.begin(), frame.payload.end());
         const auto json = nlohmann::json::parse(payload);
-        std::string result_json = has_success
-            ? nlohmann::json({
-                  {"success", true},
-                  {"tool_name", json.value("tool_name", "test_tool")},
-                  {"tool_call_id", json.value("tool_call_id", "")},
-                  {"output", captured_content},
-              }).dump()
-            : nlohmann::json({
-                  {"success", false},
-                  {"tool_name", json.value("tool_name", "test_tool")},
-                  {"tool_call_id", json.value("tool_call_id", "")},
-                  {"error", captured_content},
-              }).dump();
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = result_json;
-        result_obs.source = "tool";
+        result_obs.item = conversation::MakeToolResultItem(
+            json.value("tool_name", "test_tool"),
+            json.value("tool_call_id", ""),
+            has_success
+                ? nlohmann::json({
+                      {"success", true},
+                      {"tool_name", json.value("tool_name", "test_tool")},
+                      {"tool_call_id", json.value("tool_call_id", "")},
+                      {"output", captured_content},
+                  })
+                : nlohmann::json({
+                      {"success", false},
+                      {"tool_name", json.value("tool_name", "test_tool")},
+                      {"tool_call_id", json.value("tool_call_id", "")},
+                      {"error", captured_content},
+                  }));
         result_obs.timestamp = std::chrono::steady_clock::now();
         (*ctrl_holder)->EnqueueObservation(std::move(result_obs));
       }
@@ -1195,8 +1208,7 @@ RC_GTEST_PROP(ControllerPropTest,
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "trigger tool";
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", "trigger tool");
   obs.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs));
 
@@ -1310,8 +1322,7 @@ RC_GTEST_PROP(ControllerPropTest,
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "trigger denied tool";
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", "trigger denied tool");
   obs.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs));
 

@@ -147,8 +147,14 @@ void AppRuntime::Start() {
 
     for (const auto& entry :
          memory_store->GetRecent(session_id, kMaxStartupHistoryReplayEntries)) {
-      auto item = core::conversation::TryParseConversationItem(entry.item_json);
-      if (!item.has_value()) {
+      // Skip non-message entries (summary, external context).
+      if (entry.type == core::MemoryEntryType::kSummary ||
+          entry.type == core::MemoryEntryType::kExternalContext) {
+        continue;
+      }
+      auto item = entry.item;
+      if (item.kind == core::conversation::ItemKind::kHumanMessage &&
+          item.payload.value("text", "").empty()) {
         continue;
       }
       // Inject the persisted wall-clock timestamp so the UI can display the
@@ -158,8 +164,8 @@ void AppRuntime::Start() {
           std::chrono::system_clock::duration>(delta);
       auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
           wall_tp.time_since_epoch()).count();
-      item->payload["timestamp_ms"] = wall_ms;
-      persisted_items.push_back(std::move(*item));
+      item.payload["timestamp_ms"] = wall_ms;
+      persisted_items.push_back(std::move(item));
     }
   }
 

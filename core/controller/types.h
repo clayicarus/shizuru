@@ -54,11 +54,17 @@ enum class ObservationType {
 // An input event from the external environment.
 struct Observation {
   ObservationType type;
-  std::string content;   // Serialized payload
-  std::string source;    // Origin identifier (e.g., "user", "tool:web_search")
+  conversation::ConversationItem item;  // Primary payload (required).
   std::chrono::steady_clock::time_point timestamp;
-  std::optional<conversation::ConversationItem> item;
 };
+
+// Deprecated convenience accessors — use item.payload / item.actor directly.
+inline std::string ObservationText(const Observation& obs) {
+  return obs.item.payload.value("text", "");
+}
+inline std::string ObservationSource(const Observation& obs) {
+  return obs.item.actor.actor_id;
+}
 
 // A single tool call proposed by the LLM.
 struct ToolCall {

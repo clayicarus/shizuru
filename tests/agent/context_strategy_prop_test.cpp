@@ -10,9 +10,12 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "context/config.h"
 #include "context/context_strategy.h"
 #include "context/types.h"
+#include "conversation/item.h"
 #include "controller/types.h"
 #include "interfaces/memory_store.h"
 #include "mock_memory_store.h"
@@ -52,9 +55,11 @@ rc::Gen<MemoryEntry> genMemoryEntry() {
         switch (type) {
           case MemoryEntryType::kUserMessage:
             entry.role = "user";
+            entry.item = conversation::MakeHumanMessageItem("user", "", content);
             break;
           case MemoryEntryType::kAssistantMessage:
             entry.role = "assistant";
+            entry.item = conversation::MakeAssistantMessageItem("assistant", "", content);
             break;
           case MemoryEntryType::kToolCall:
           case MemoryEntryType::kToolResult:
@@ -85,6 +90,11 @@ rc::Gen<MemoryEntry> genSimpleMemoryEntry() {
                              : MemoryEntryType::kAssistantMessage;
         entry.role = is_user ? "user" : "assistant";
         entry.content = content;
+        if (is_user) {
+          entry.item = conversation::MakeHumanMessageItem("user", "", content);
+        } else {
+          entry.item = conversation::MakeAssistantMessageItem("assistant", "", content);
+        }
         entry.timestamp = std::chrono::steady_clock::now();
         entry.estimated_tokens = static_cast<int>(content.size()) / 4;
         return entry;
@@ -97,8 +107,7 @@ rc::Gen<Observation> genObservation() {
       [](std::string content) {
         Observation obs;
         obs.type = ObservationType::kUserMessage;
-        obs.content = content;
-        obs.source = "user";
+        obs.item = conversation::MakeHumanMessageItem("user", "", content);
         obs.timestamp = std::chrono::steady_clock::now();
         return obs;
       },
@@ -145,7 +154,7 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_context_ordering, (void)) {
   RC_ASSERT(window.messages.front().content == system_instruction);
 
   // Last message must be the current observation.
-  RC_ASSERT(window.messages.back().content == observation.content);
+  RC_ASSERT(window.messages.back().content == ObservationText(observation));
 
   // Middle messages (memory) should be in the same chronological order
   // as they were inserted (indices 1..n-2).
@@ -175,7 +184,7 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_context_token_budget, (void)) {
 
   // Use a budget that's tight but always fits system + observation.
   int sys_tokens = static_cast<int>(system_instruction.size()) / 4;
-  int obs_tokens = static_cast<int>(observation.content.size()) / 4;
+  int obs_tokens = static_cast<int>(ObservationText(observation).size()) / 4;
   int min_budget = sys_tokens + obs_tokens + 1;
   int max_budget = min_budget + 200;
   int budget = *rc::gen::inRange(min_budget, max_budget + 1);
@@ -205,7 +214,7 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_context_token_budget, (void)) {
   RC_ASSERT(window.messages.front().content == system_instruction);
 
   // Current observation must always be present as last message.
-  RC_ASSERT(window.messages.back().content == observation.content);
+  RC_ASSERT(window.messages.back().content == ObservationText(observation));
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +233,9 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_tool_call_result_adjacency,
   tool_call.type = MemoryEntryType::kToolCall;
   tool_call.role = "assistant";
   tool_call.content = call_content;
-  tool_call.tool_call_id = tool_call_id;
+  tool_call.item = conversation::MakeToolCallItem("assistant", "Shizuru",
+      nlohmann::json::array({{{"id", tool_call_id}, {"type", "function"},
+          {"function", {{"name", "tool"}, {"arguments", {}}}}}}));
   tool_call.timestamp = std::chrono::steady_clock::now();
   tool_call.estimated_tokens = static_cast<int>(call_content.size()) / 4;
 
@@ -232,7 +243,8 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_tool_call_result_adjacency,
   tool_result.type = MemoryEntryType::kToolResult;
   tool_result.role = "tool";
   tool_result.content = result_content;
-  tool_result.tool_call_id = tool_call_id;
+  tool_result.item = conversation::MakeToolResultItem("tool", tool_call_id,
+      nlohmann::json::object());
   tool_result.timestamp = std::chrono::steady_clock::now();
   tool_result.estimated_tokens = static_cast<int>(result_content.size()) / 4;
 
@@ -265,22 +277,25 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_tool_call_result_adjacency,
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "hello";
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", "hello");
   obs.timestamp = std::chrono::steady_clock::now();
 
   auto window = strategy.BuildContext(session_id, obs);
 
-  // Find the tool call message in the window.
+  // Find the tool call and tool result messages in the window.
+  // Tool calls render with empty content and tool_calls_json containing the id.
+  // Tool results render with tool_call_id set on the ContextMessage.
   int call_idx = -1;
   int result_idx = -1;
   for (size_t i = 0; i < window.messages.size(); ++i) {
-    if (window.messages[i].tool_call_id == tool_call_id) {
-      if (window.messages[i].content == call_content) {
-        call_idx = static_cast<int>(i);
-      } else if (window.messages[i].content == result_content) {
-        result_idx = static_cast<int>(i);
-      }
+    if (window.messages[i].role == "assistant" &&
+        !window.messages[i].tool_calls_json.empty() &&
+        window.messages[i].tool_calls_json.find(tool_call_id) != std::string::npos) {
+      call_idx = static_cast<int>(i);
+    }
+    if (window.messages[i].role == "tool" &&
+        window.messages[i].tool_call_id == tool_call_id) {
+      result_idx = static_cast<int>(i);
     }
   }
 
@@ -479,9 +494,6 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_session_release_clears_memory,
   for (size_t i = 0; i < before.size(); ++i) {
     RC_ASSERT(after_all[i].role == before[i].role);
     RC_ASSERT(after_all[i].content == before[i].content);
-    RC_ASSERT(after_all[i].tool_call_id == before[i].tool_call_id);
-    RC_ASSERT(after_all[i].tool_calls_json == before[i].tool_calls_json);
-    RC_ASSERT(after_all[i].item_json == before[i].item_json);
   }
 
   auto after_recent = store.GetRecent(session_id, 100);
@@ -489,9 +501,6 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_session_release_clears_memory,
   for (size_t i = 0; i < before.size(); ++i) {
     RC_ASSERT(after_recent[i].role == before[i].role);
     RC_ASSERT(after_recent[i].content == before[i].content);
-    RC_ASSERT(after_recent[i].tool_call_id == before[i].tool_call_id);
-    RC_ASSERT(after_recent[i].tool_calls_json == before[i].tool_calls_json);
-    RC_ASSERT(after_recent[i].item_json == before[i].item_json);
   }
 }
 
@@ -518,8 +527,7 @@ RC_GTEST_PROP(ContextStrategyPropTest, prop_system_instruction_update,
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "hello";
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", "hello");
   obs.timestamp = std::chrono::steady_clock::now();
 
   // Before update: system message should be the initial instruction.

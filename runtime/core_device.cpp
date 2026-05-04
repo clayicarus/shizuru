@@ -94,18 +94,14 @@ void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
     }
     core::Observation obs;
     obs.type = core::ObservationType::kUserMessage;
-    obs.content = content;
-    obs.source = actor_id;
-    obs.timestamp = std::chrono::steady_clock::now();
     obs.item = core::conversation::MakeHumanMessageItem(
         std::move(actor_id), std::move(actor_name), content);
+    obs.timestamp = std::chrono::steady_clock::now();
     session_->EnqueueObservation(std::move(obs));
   } else if (port_name == kToolResultIn) {
     const std::string content(frame.payload.begin(), frame.payload.end());
     core::Observation obs;
     obs.type = core::ObservationType::kToolResult;
-    obs.content = content;
-    obs.source = "tool";
     obs.timestamp = std::chrono::steady_clock::now();
     auto json = core::conversation::ParseJsonOrString(content);
     if (json.is_object()) {
@@ -113,7 +109,9 @@ void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
       const std::string tool_call_id = json.value("tool_call_id", "");
       obs.item = core::conversation::MakeToolResultItem(
           tool_name, tool_call_id, std::move(json));
-      obs.source = "tool:" + tool_name;
+    } else {
+      obs.item = core::conversation::MakeToolResultItem(
+          "tool", "", std::move(json));
     }
     session_->EnqueueObservation(std::move(obs));
   } else if (port_name == kInterruptIn) {
@@ -135,12 +133,10 @@ void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
     }
     core::Observation obs;
     obs.type = core::ObservationType::kSystemEvent;
-    obs.content = content;
-    obs.source = "scheduler";
-    obs.timestamp = std::chrono::steady_clock::now();
     obs.item = core::conversation::MakeSystemEventItem(
         "system:scheduler", "Scheduler", std::move(event_type), "scheduler",
         core::conversation::ParseJsonOrString(content));
+    obs.timestamp = std::chrono::steady_clock::now();
     session_->EnqueueObservation(std::move(obs));
   } else {
     LOG_WARN("CoreDevice: unsupported input port: {}", port_name);

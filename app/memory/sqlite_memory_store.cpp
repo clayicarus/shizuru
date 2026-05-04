@@ -13,6 +13,9 @@
 #include <utility>
 #include <vector>
 
+#include "conversation/item.h"
+#include "conversation/render.h"
+
 namespace shizuru::app {
 
 namespace {
@@ -27,6 +30,30 @@ void InsertEntry(sqlite3* db,
                  const std::string& session_key,
                  const core::MemoryEntry& entry,
                  std::optional<int64_t> created_at_ms = std::nullopt) {
+  // Serialize item to JSON for message-like entries.
+  std::string item_json;
+  std::string role;
+  std::string content;
+  std::string source_tag;
+  std::string tool_call_id;
+  std::string tool_calls_json;
+
+  if (entry.type != core::MemoryEntryType::kSummary &&
+      entry.type != core::MemoryEntryType::kExternalContext) {
+    item_json = core::conversation::SerializeConversationItem(entry.item);
+    // Also populate flat fields for backward compatibility with old readers.
+    auto rendered = core::conversation::RenderForLlm(entry.item);
+    role = rendered.role;
+    content = rendered.content;
+    source_tag = rendered.name;
+    tool_call_id = rendered.tool_call_id;
+    tool_calls_json = rendered.tool_calls_json;
+  } else {
+    role = entry.role;
+    content = entry.content;
+    source_tag = entry.source_tag;
+  }
+
   const char* sql = R"SQL(
     INSERT INTO memory (
       session_key, type, role, content, source_tag, tool_call_id,
@@ -43,17 +70,17 @@ void InsertEntry(sqlite3* db,
               db, "bind session_key");
   CheckSqlite(sqlite3_bind_int(stmt, 2, static_cast<int>(entry.type)),
               db, "bind type");
-  CheckSqlite(sqlite3_bind_text(stmt, 3, entry.role.c_str(), -1, SQLITE_TRANSIENT),
+  CheckSqlite(sqlite3_bind_text(stmt, 3, role.c_str(), -1, SQLITE_TRANSIENT),
               db, "bind role");
-  CheckSqlite(sqlite3_bind_text(stmt, 4, entry.content.c_str(), -1, SQLITE_TRANSIENT),
+  CheckSqlite(sqlite3_bind_text(stmt, 4, content.c_str(), -1, SQLITE_TRANSIENT),
               db, "bind content");
-  CheckSqlite(sqlite3_bind_text(stmt, 5, entry.source_tag.c_str(), -1, SQLITE_TRANSIENT),
+  CheckSqlite(sqlite3_bind_text(stmt, 5, source_tag.c_str(), -1, SQLITE_TRANSIENT),
               db, "bind source_tag");
-  CheckSqlite(sqlite3_bind_text(stmt, 6, entry.tool_call_id.c_str(), -1, SQLITE_TRANSIENT),
+  CheckSqlite(sqlite3_bind_text(stmt, 6, tool_call_id.c_str(), -1, SQLITE_TRANSIENT),
               db, "bind tool_call_id");
-  CheckSqlite(sqlite3_bind_text(stmt, 7, entry.tool_calls_json.c_str(), -1, SQLITE_TRANSIENT),
+  CheckSqlite(sqlite3_bind_text(stmt, 7, tool_calls_json.c_str(), -1, SQLITE_TRANSIENT),
               db, "bind tool_calls_json");
-  CheckSqlite(sqlite3_bind_text(stmt, 8, entry.item_json.c_str(), -1, SQLITE_TRANSIENT),
+  CheckSqlite(sqlite3_bind_text(stmt, 8, item_json.c_str(), -1, SQLITE_TRANSIENT),
               db, "bind item_json");
   CheckSqlite(sqlite3_bind_int64(stmt, 9, created_at_ms.value_or(ToStoredMs(entry))),
               db, "bind created_at_ms");
@@ -114,11 +141,20 @@ core::MemoryEntry ReadEntry(sqlite3_stmt* stmt) {
   entry.role = ColumnText(stmt, 2);
   entry.content = ColumnText(stmt, 3);
   entry.source_tag = ColumnText(stmt, 4);
-  entry.tool_call_id = ColumnText(stmt, 5);
-  entry.tool_calls_json = ColumnText(stmt, 6);
-  entry.item_json = ColumnText(stmt, 7);
+  // Columns 5 (tool_call_id) and 6 (tool_calls_json) are kept in DB for
+  // backward compatibility but no longer stored in MemoryEntry.
+  std::string item_json = ColumnText(stmt, 7);
   entry.timestamp = FromStoredMs(sqlite3_column_int64(stmt, 8));
   entry.estimated_tokens = sqlite3_column_int(stmt, 9);
+
+  // Restore ConversationItem from item_json for message-like entries.
+  if (!item_json.empty()) {
+    auto parsed = core::conversation::TryParseConversationItem(item_json);
+    if (parsed.has_value()) {
+      entry.item = *parsed;
+    }
+  }
+
   return entry;
 }
 
@@ -335,11 +371,11 @@ void SqliteMemoryStore::Summarize(const std::string& session_key,
                 impl_->db, "bind summarize content");
     CheckSqlite(sqlite3_bind_text(update_stmt, 4, summary.source_tag.c_str(), -1, SQLITE_TRANSIENT),
                 impl_->db, "bind summarize source_tag");
-    CheckSqlite(sqlite3_bind_text(update_stmt, 5, summary.tool_call_id.c_str(), -1, SQLITE_TRANSIENT),
+    CheckSqlite(sqlite3_bind_text(update_stmt, 5, "", -1, SQLITE_TRANSIENT),
                 impl_->db, "bind summarize tool_call_id");
-    CheckSqlite(sqlite3_bind_text(update_stmt, 6, summary.tool_calls_json.c_str(), -1, SQLITE_TRANSIENT),
+    CheckSqlite(sqlite3_bind_text(update_stmt, 6, "", -1, SQLITE_TRANSIENT),
                 impl_->db, "bind summarize tool_calls_json");
-    CheckSqlite(sqlite3_bind_text(update_stmt, 7, summary.item_json.c_str(), -1, SQLITE_TRANSIENT),
+    CheckSqlite(sqlite3_bind_text(update_stmt, 7, "", -1, SQLITE_TRANSIENT),
                 impl_->db, "bind summarize item_json");
     CheckSqlite(sqlite3_bind_int(update_stmt, 8, summary.estimated_tokens),
                 impl_->db, "bind summarize estimated_tokens");

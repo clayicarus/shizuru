@@ -8,6 +8,7 @@
 
 #include "controller/config.h"
 #include "controller/types.h"
+#include "conversation/item.h"
 #include "dialogue/default_reducer.h"
 #include "dialogue/types.h"
 
@@ -43,8 +44,7 @@ class DialogueReducerTest : public ::testing::Test {
   Observation MakeUserObservation(const std::string& content) {
     Observation obs;
     obs.type = ObservationType::kUserMessage;
-    obs.content = content;
-    obs.source = "user";
+    obs.item = conversation::MakeHumanMessageItem("user", "", content);
     obs.timestamp = Clock::now();
     return obs;
   }
@@ -423,8 +423,7 @@ TEST_F(DialogueReducerTest, ToolResultReceived_RecordsResult) {
 
   Observation obs;
   obs.type = ObservationType::kToolResult;
-  obs.content = R"({"result":"ok"})";
-  obs.source = "call_1";
+  obs.item = conversation::MakeToolResultItem("call_1", "call_1", conversation::ParseJsonOrString(R"({"result":"ok"})"));
   auto now = Clock::now();
   obs.timestamp = now;
 
@@ -478,8 +477,7 @@ TEST_F(DialogueReducerTest, SystemEventReceived_EmitsRecordMemoryAndStartLlm) {
 
   Observation obs;
   obs.type = ObservationType::kSystemEvent;
-  obs.content = "reminder";
-  obs.source = "scheduler";
+  obs.item = conversation::MakeSystemEventItem("system:scheduler", "", "event", "scheduler", conversation::ParseJsonOrString("reminder"));
   auto now = Clock::now();
   obs.timestamp = now;
 

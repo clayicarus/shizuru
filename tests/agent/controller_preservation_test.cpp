@@ -129,8 +129,7 @@ RC_GTEST_PROP(ControllerPreservation,
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = user_msg;
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", user_msg);
   obs.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs));
 
@@ -231,8 +230,8 @@ RC_GTEST_PROP(ControllerPreservation,
       if (*ctrl_holder) {
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.content = R"({"success":true,"output":"ok"})";
-        result_obs.source = "tool";
+        result_obs.item = conversation::MakeToolResultItem(
+            "tool", "tool", conversation::ParseJsonOrString(R"({"success":true,"output":"ok"})"));
         result_obs.timestamp = std::chrono::steady_clock::now();
         (*ctrl_holder)->EnqueueObservation(std::move(result_obs));
       }
@@ -292,8 +291,7 @@ RC_GTEST_PROP(ControllerPreservation,
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = user_msg;
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", user_msg);
   obs.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs));
 
@@ -413,8 +411,7 @@ TEST(ControllerPreservation, TtsSegmentationPreservation) {
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "say something";
-  obs.source = "user";
+  obs.item = conversation::MakeHumanMessageItem("user", "", "say something");
   obs.timestamp = std::chrono::steady_clock::now();
   ctrl.EnqueueObservation(std::move(obs));
 
@@ -544,8 +541,7 @@ RC_GTEST_PROP(ControllerPreservation,
 
     Observation obs;
     obs.type = ObservationType::kUserMessage;
-    obs.content = "trigger error";
-    obs.source = "user";
+    obs.item = conversation::MakeHumanMessageItem("user", "", "trigger error");
     obs.timestamp = std::chrono::steady_clock::now();
     ctrl.EnqueueObservation(std::move(obs));
 

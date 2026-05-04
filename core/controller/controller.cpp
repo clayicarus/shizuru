@@ -22,33 +22,7 @@ template <class... Ts>
 overloaded(Ts...) -> overloaded<Ts...>;
 
 conversation::ConversationItem EnsureConversationItem(const Observation& obs) {
-  if (obs.item.has_value()) { return *obs.item; }
-
-  switch (obs.type) {
-    case ObservationType::kUserMessage:
-      return conversation::MakeHumanMessageItem(
-          obs.source.empty() ? "user" : obs.source, "", obs.content);
-    case ObservationType::kSystemEvent:
-      return conversation::MakeSystemEventItem(
-          obs.source.empty() ? "system:event" : "system:" + obs.source,
-          "",
-          "event",
-          obs.source,
-          conversation::ParseJsonOrString(obs.content));
-    case ObservationType::kToolResult:
-      if (obs.source.rfind("tool:", 0) == 0) {
-        return conversation::MakeToolResultItem(
-            obs.source.substr(5), "", conversation::ParseJsonOrString(obs.content));
-      }
-      return conversation::MakeToolResultItem(
-          obs.source.empty() ? "tool" : obs.source, "", 
-          conversation::ParseJsonOrString(obs.content));
-    case ObservationType::kInterruption:
-    case ObservationType::kContinuation:
-      break;
-  }
-
-  return conversation::ConversationItem{};
+  return obs.item;
 }
 
 std::string FirstToolCallId(const conversation::ConversationItem& item) {
@@ -67,19 +41,9 @@ std::string FirstToolCallId(const conversation::ConversationItem& item) {
 MemoryEntry MemoryEntryFromItem(MemoryEntryType type,
                                 const conversation::ConversationItem& item,
                                 std::chrono::steady_clock::time_point ts) {
-  auto rendered = conversation::RenderForLlm(item);
-
   MemoryEntry entry;
   entry.type = type;
-  entry.role = rendered.role;
-  entry.content = rendered.content;
-  entry.source_tag = rendered.name;
-  entry.tool_call_id = rendered.tool_call_id;
-  entry.tool_calls_json = rendered.tool_calls_json;
-  if (entry.tool_call_id.empty()) {
-    entry.tool_call_id = FirstToolCallId(item);
-  }
-  entry.item_json = conversation::SerializeConversationItem(item);
+  entry.item = item;
   entry.timestamp = ts;
   return entry;
 }
@@ -378,7 +342,7 @@ void Controller::RunLoop() {
           auto timeout_obs = observation_aggregator_->CheckTimeout();
           if (timeout_obs.has_value()) {
             LOG_INFO("[{}] User message received (aggregation timeout): \"{}\"",
-                     MODULE_NAME, timeout_obs->content);
+                     MODULE_NAME, ObservationText(*timeout_obs));
             dialogue::AggregationTimeout timeout_event{*timeout_obs, now};
             auto decision = reducer_->Reduce(dialogue_state_, timeout_event);
             lock.unlock();
@@ -439,14 +403,9 @@ void Controller::RunLoop() {
       if (!dialogue_state_.workspace.user_fragments.empty()) {
         auto& ws = dialogue_state_.workspace;
         for (const auto& frag : ws.user_fragments) {
-          Observation frag_obs;
-          frag_obs.type = ObservationType::kUserMessage;
-          frag_obs.content = frag.content;
-          frag_obs.source = frag.source;
-          frag_obs.timestamp = frag.timestamp;
           MemoryEntry entry = MemoryEntryFromItem(
               MemoryEntryType::kUserMessage,
-              EnsureConversationItem(frag_obs), frag.timestamp);
+              frag.item, frag.timestamp);
           context_.RecordTurn(session_id_, entry);
         }
         ws.user_fragments.clear();
@@ -480,9 +439,9 @@ void Controller::RunLoop() {
       auto aggregated = observation_aggregator_->Feed(obs);
       if (!aggregated.has_value()) {
         LOG_INFO("[{}] Observation buffered by aggregator: \"{}\"",
-                 MODULE_NAME, obs.content);
-        EmitDiagnostic("Waiting for more input: \"" + obs.content + "\"");
-        EmitActivity(ActivityKind::kBufferingInput, obs.content);
+                 MODULE_NAME, ObservationText(obs));
+        EmitDiagnostic("Waiting for more input: \"" + ObservationText(obs) + "\"");
+        EmitActivity(ActivityKind::kBufferingInput, ObservationText(obs));
         // Schedule aggregation timeout timer.
         auto agg_now = std::chrono::steady_clock::now();
         timer_book_.Schedule(dialogue::TimerKind::kAggregationTimeout,
@@ -502,7 +461,7 @@ void Controller::RunLoop() {
         auto decision = reducer_->Reduce(dialogue_state_, agg_event);
         ApplyDialogueDecision(decision);
         LOG_INFO("[{}] Post-interrupt cooldown: buffered \"{}\"",
-                 MODULE_NAME, aggregated->content);
+                 MODULE_NAME, ObservationText(*aggregated));
         continue;  // Stay in kListening, wait for more or timeout.
       }
 
@@ -512,7 +471,7 @@ void Controller::RunLoop() {
       // observations as respond-now.
       auto now = std::chrono::steady_clock::now();
       LOG_INFO("[{}] User message received: \"{}\"",
-               MODULE_NAME, aggregated->content);
+               MODULE_NAME, ObservationText(*aggregated));
       dialogue::AggregationComplete agg_event{*aggregated, now};
       auto decision = reducer_->Reduce(dialogue_state_, agg_event);
       ApplyDialogueDecision(decision);
@@ -530,7 +489,7 @@ void Controller::RunLoop() {
         if (!TryTransition(Event::kStart)) { continue; }
       }
       LOG_INFO("[{}] System event received: \"{}\"",
-               MODULE_NAME, obs.content);
+               MODULE_NAME, ObservationText(obs));
       auto now = std::chrono::steady_clock::now();
       dialogue::SystemEventReceived sys_event{obs, now};
       auto decision = reducer_->Reduce(dialogue_state_, sys_event);
@@ -547,13 +506,12 @@ void Controller::HandleThinking(const Observation& obs) {
   // Re-enter via kContinuation so BuildContext does not duplicate it.
   if (obs.type == ObservationType::kUserMessage) {
     MemoryEntry user_entry = MemoryEntryFromItem(
-        MemoryEntryType::kUserMessage, EnsureConversationItem(obs),
+        MemoryEntryType::kUserMessage, obs.item,
         obs.timestamp);
     context_.RecordTurn(session_id_, user_entry);
 
     Observation cont;
     cont.type = ObservationType::kContinuation;
-    cont.source = obs.source;
     cont.timestamp = obs.timestamp;
     HandleThinking(cont);
     return;
@@ -564,13 +522,12 @@ void Controller::HandleThinking(const Observation& obs) {
   // in the context window and can distinguish them from real user input.
   if (obs.type == ObservationType::kSystemEvent) {
     MemoryEntry event_entry = MemoryEntryFromItem(
-        MemoryEntryType::kUserMessage, EnsureConversationItem(obs),
+        MemoryEntryType::kUserMessage, obs.item,
         obs.timestamp);
     context_.RecordTurn(session_id_, event_entry);
 
     Observation cont;
     cont.type = ObservationType::kContinuation;
-    cont.source = obs.source;
     cont.timestamp = obs.timestamp;
     HandleThinking(cont);
     return;
@@ -860,13 +817,19 @@ void Controller::HandleActingResult(const Observation& obs) {
   std::string tool_name;
   bool success = false;
 
-  try {
-    const auto json = nlohmann::json::parse(obs.content);
-    tool_call_id = json.value("tool_call_id", "");
-    tool_name = json.value("tool_name", "");
-    success = json.value("success", false);
-  } catch (...) {
-    // Fall through to compatibility parsing below.
+  // Extract tool result metadata from the item payload.
+  const auto& payload = obs.item.payload;
+  if (payload.contains("content") && payload["content"].is_object()) {
+    const auto& content_json = payload["content"];
+    tool_call_id = content_json.value("tool_call_id", "");
+    tool_name = content_json.value("tool_name", "");
+    success = content_json.value("success", false);
+  }
+  if (tool_call_id.empty()) {
+    tool_call_id = payload.value("tool_call_id", "");
+  }
+  if (tool_name.empty()) {
+    tool_name = payload.value("tool_name", obs.item.actor.display_name);
   }
 
   // If no tool_call_id in result, match by order (fallback for simple dispatchers).
@@ -881,10 +844,8 @@ void Controller::HandleActingResult(const Observation& obs) {
   }
 
   if (!success) {
-    try {
-      success = nlohmann::json::parse(obs.content).value("success", false);
-    } catch (...) {
-      success = false;
+    if (payload.contains("content") && payload["content"].is_object()) {
+      success = payload["content"].value("success", false);
     }
   }
   if (tool_name.empty()) {
@@ -900,16 +861,22 @@ void Controller::HandleActingResult(const Observation& obs) {
            MODULE_NAME, tool_call_id, success);
 
   {
+    std::string obs_content_str;
+    if (payload.contains("content")) {
+      obs_content_str = payload["content"].is_string()
+          ? payload["content"].get<std::string>()
+          : payload["content"].dump();
+    }
     std::string detail = R"({"id":")" + tool_call_id +
                          R"(","name":")" + tool_name +
                          R"(","success":)" + (success ? "true" : "false") +
-                         R"(,"result":)" + obs.content + "}";
+                         R"(,"result":)" + obs_content_str + "}";
     EmitActivity(ActivityKind::kToolResultReceived, std::move(detail));
   }
 
   // Build observation with tool_call_id as source for reducer pairing.
   Observation result_obs = obs;
-  result_obs.source = tool_call_id;
+  result_obs.item.actor.actor_id = tool_call_id;
 
   // Route through reducer.
   auto now = std::chrono::steady_clock::now();
@@ -941,7 +908,6 @@ void Controller::HandleResponding(ActionCandidate ac) {
       current_stream_item_id_);
   EmitConversationItem(resp_item, /*is_delta=*/false);
 
-  // Record response as MemoryEntry.
   MemoryEntry response_entry = MemoryEntryFromItem(
       MemoryEntryType::kAssistantMessage, resp_item,
       std::chrono::steady_clock::now());
@@ -1016,7 +982,7 @@ void Controller::ApplyDialogueDecision(
     std::visit(overloaded{
       [&](const dialogue::RecordMemory& e) {
         MemoryEntry entry = MemoryEntryFromItem(
-            MemoryEntryType::kUserMessage, EnsureConversationItem(e.observation),
+            MemoryEntryType::kUserMessage, e.observation.item,
             e.observation.timestamp);
         context_.RecordTurn(session_id_, entry);
       },
@@ -1040,7 +1006,6 @@ void Controller::ApplyDialogueDecision(
         TryTransition(Event::kUserObservation);
         Observation cont;
         cont.type = ObservationType::kContinuation;
-        cont.source = "controller";
         cont.timestamp = e.now;
         try {
           HandleThinking(cont);
@@ -1124,8 +1089,9 @@ void Controller::ApplyDialogueDecision(
           // Denied — record denial as observation and re-enter thinking.
           MemoryEntry denial_entry;
           denial_entry.type = MemoryEntryType::kToolResult;
-          denial_entry.role = "system";
-          denial_entry.content = "Action denied: " + denied_reason;
+          denial_entry.item = conversation::MakeSystemEventItem(
+              "system:policy", "Policy", "denial", "policy",
+              conversation::ParseJsonOrString("Action denied: " + denied_reason));
           denial_entry.timestamp = std::chrono::steady_clock::now();
           context_.RecordTurn(session_id_, denial_entry);
 
@@ -1134,8 +1100,6 @@ void Controller::ApplyDialogueDecision(
           // Re-enter thinking via continuation.
           Observation denial_obs;
           denial_obs.type = ObservationType::kContinuation;
-          denial_obs.content = "";
-          denial_obs.source = "policy";
           denial_obs.timestamp = std::chrono::steady_clock::now();
           try {
             HandleThinking(denial_obs);
@@ -1150,12 +1114,12 @@ void Controller::ApplyDialogueDecision(
         std::string tool_call_id;
         std::string tool_name;
         bool success = false;
-        try {
-          const auto json = nlohmann::json::parse(e.observation.content);
-          tool_call_id = json.value("tool_call_id", "");
-          tool_name = json.value("tool_name", "");
-          success = json.value("success", false);
-        } catch (...) {}
+        const auto& payload = e.observation.item.payload;
+        tool_call_id = payload.value("tool_call_id", "");
+        tool_name = payload.value("tool_name", e.observation.item.actor.display_name);
+        if (payload.contains("content") && payload["content"].is_object()) {
+          success = payload["content"].value("success", false);
+        }
 
         if (!success) {
           last_tool_cycle_all_success_ = false;
@@ -1163,14 +1127,14 @@ void Controller::ApplyDialogueDecision(
 
         if (tool_name.empty()) {
           for (const auto& tc : pending_action_.tool_calls) {
-            if (tc.id == tool_call_id || tc.id == e.observation.source) {
+            if (tc.id == tool_call_id || tc.id == ObservationSource(e.observation)) {
               tool_name = tc.name;
               break;
             }
           }
         }
         if (tool_call_id.empty()) {
-          tool_call_id = e.observation.source;
+          tool_call_id = ObservationSource(e.observation);
         }
 
         const std::string reply_to_item_id =
@@ -1178,11 +1142,18 @@ void Controller::ApplyDialogueDecision(
                 ? tool_call_item_ids_.at(tool_call_id)
                 : std::string{};
 
+        nlohmann::json content_json;
+        if (payload.contains("content")) {
+          content_json = payload["content"];
+        } else {
+          content_json = nlohmann::json::object();
+        }
+
         auto item = StampAssistantTurnItem(
             conversation::MakeToolResultItem(
                 tool_name.empty() ? "tool" : tool_name,
                 tool_call_id,
-                conversation::ParseJsonOrString(e.observation.content)),
+                std::move(content_json)),
             {},
             reply_to_item_id);
         MemoryEntry result_entry = MemoryEntryFromItem(
@@ -1245,8 +1216,8 @@ void Controller::ApplyDialogueDecision(
         // Record "Turn interrupted" memory entry — single place for this.
         MemoryEntry interrupt_entry;
         interrupt_entry.type = MemoryEntryType::kAssistantMessage;
-        interrupt_entry.role = "system";
-        interrupt_entry.content = "Turn interrupted";
+        interrupt_entry.item = conversation::MakeAssistantMessageItem(
+            "assistant", "Shizuru", "Turn interrupted");
         interrupt_entry.timestamp = std::chrono::steady_clock::now();
         context_.RecordTurn(session_id_, interrupt_entry);
       },
@@ -1296,42 +1267,28 @@ void Controller::ApplyDialogueDecision(
           std::string merged_source;
           auto latest_ts = ws.user_fragments.front().timestamp;
           for (const auto& frag : ws.user_fragments) {
+            std::string frag_text = frag.item.payload.value("text", "");
             if (!merged_content.empty()) merged_content += " ";
-            merged_content += frag.content;
-            merged_source = frag.source;
+            merged_content += frag_text;
+            merged_source = frag.item.actor.actor_id;
             if (frag.timestamp > latest_ts) latest_ts = frag.timestamp;
           }
-          Observation merged_obs;
-          merged_obs.type = ObservationType::kUserMessage;
-          merged_obs.content = merged_content;
-          merged_obs.source = merged_source;
-          merged_obs.timestamp = latest_ts;
+          auto merged_item = conversation::MakeHumanMessageItem(
+              merged_source, "", merged_content);
           MemoryEntry entry = MemoryEntryFromItem(
-              MemoryEntryType::kUserMessage,
-              EnsureConversationItem(merged_obs), latest_ts);
+              MemoryEntryType::kUserMessage, merged_item, latest_ts);
           context_.RecordTurn(session_id_, entry);
         } else if (!e.merge_fragments) {
           for (const auto& frag : ws.user_fragments) {
-            Observation frag_obs;
-            frag_obs.type = ObservationType::kUserMessage;
-            frag_obs.content = frag.content;
-            frag_obs.source = frag.source;
-            frag_obs.timestamp = frag.timestamp;
             MemoryEntry entry = MemoryEntryFromItem(
-                MemoryEntryType::kUserMessage,
-                EnsureConversationItem(frag_obs), frag.timestamp);
+                MemoryEntryType::kUserMessage, frag.item, frag.timestamp);
             context_.RecordTurn(session_id_, entry);
           }
         }
         if (ws.assistant_partial.has_value()) {
-          Observation asst_obs;
-          asst_obs.type = ObservationType::kContinuation;
-          asst_obs.content = ws.assistant_partial->content;
-          asst_obs.source = ws.assistant_partial->source;
-          asst_obs.timestamp = ws.assistant_partial->timestamp;
           MemoryEntry entry = MemoryEntryFromItem(
               MemoryEntryType::kAssistantMessage,
-              EnsureConversationItem(asst_obs),
+              ws.assistant_partial->item,
               ws.assistant_partial->timestamp);
           context_.RecordTurn(session_id_, entry);
         }
@@ -1364,8 +1321,6 @@ void Controller::Interrupt() {
   llm_->Cancel();
   Observation obs;
   obs.type      = ObservationType::kInterruption;
-  obs.content   = "";
-  obs.source    = "interrupt";
   obs.timestamp = std::chrono::steady_clock::now();
   EnqueueObservation(std::move(obs));
 }

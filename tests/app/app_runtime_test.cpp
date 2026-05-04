@@ -27,7 +27,7 @@ core::MemoryEntry MakeEntry(core::MemoryEntryType type,
                             const core::conversation::ConversationItem& item) {
   core::MemoryEntry entry;
   entry.type = type;
-  entry.item_json = core::conversation::SerializeConversationItem(item);
+  entry.item = item;
   entry.timestamp = std::chrono::steady_clock::now();
   entry.estimated_tokens = 8;
   return entry;

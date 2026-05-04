@@ -22,29 +22,24 @@ std::optional<Observation> LlmObservationAggregator::Feed(
     const Observation& obs) {
   // Only aggregate user messages.
   if (obs.type != ObservationType::kUserMessage) return obs;
-  if (obs.content.empty()) return obs;
+  std::string text = obs.item.payload.value("text", "");
+  if (text.empty()) return obs;
 
   std::lock_guard<std::mutex> lock(mu_);
 
   if (!buffer_.empty()) buffer_ += " ";
-  buffer_ += obs.content;
+  buffer_ += text;
   last_input_time_ = std::chrono::steady_clock::now();
   has_pending_ = true;
-  source_ = obs.source;
   if (!pending_item_.has_value()) {
-    if (obs.item.has_value()) {
-      pending_item_ = obs.item;
-    } else {
-      pending_item_ = conversation::MakeHumanMessageItem(
-          obs.source.empty() ? "user" : obs.source, "", obs.content);
-    }
+    pending_item_ = obs.item;
   }
   if (pending_item_.has_value()) {
     pending_item_->payload["text"] = buffer_;
   }
 
   LOG_INFO("[Aggregator] Buffered: \"{}\" (total: \"{}\")",
-           obs.content, buffer_);
+           text, buffer_);
 
   bool complete = IsUtteranceComplete(buffer_);
   if (complete) {
@@ -134,12 +129,12 @@ bool LlmObservationAggregator::IsUtteranceComplete(const std::string& text) {
 Observation LlmObservationAggregator::FlushBuffer() {
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = std::move(buffer_);
-  obs.source = source_;
   obs.timestamp = std::chrono::steady_clock::now();
   if (pending_item_.has_value()) {
-    pending_item_->payload["text"] = obs.content;
-    obs.item = pending_item_;
+    pending_item_->payload["text"] = buffer_;
+    obs.item = *pending_item_;
+  } else {
+    obs.item = conversation::MakeHumanMessageItem("user", "", buffer_);
   }
   buffer_.clear();
   has_pending_ = false;

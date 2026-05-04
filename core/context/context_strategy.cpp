@@ -13,57 +13,52 @@ namespace {
 constexpr size_t kMaxContextFetchEntries = 512;
 
 ContextMessage LegacyObservationMessage(const Observation& observation) {
-  ContextMessage msg;
-  switch (observation.type) {
-    case ObservationType::kUserMessage:
-      msg.role = "user";
-      break;
-    case ObservationType::kToolResult:
-      msg.role = "tool";
-      break;
-    case ObservationType::kSystemEvent:
-      msg.role = "user";
-      break;
-    case ObservationType::kInterruption:
-      msg.role = "system";
-      break;
-    case ObservationType::kContinuation:
-      break;
-  }
-  msg.content = observation.content;
-  return msg;
+  // Legacy fallback — should not be reached for message-like observations
+  // since item is now always populated.
+  return conversation::RenderForLlm(observation.item);
 }
 
 ContextMessage BuildMemoryContextMessage(const MemoryEntry& entry) {
-  if (auto item = conversation::TryParseConversationItem(entry.item_json);
-      item.has_value()) {
-    return conversation::RenderForLlm(*item);
+  // Message-like entries: render from ConversationItem.
+  if (entry.type != MemoryEntryType::kSummary &&
+      entry.type != MemoryEntryType::kExternalContext) {
+    return conversation::RenderForLlm(entry.item);
   }
 
-  if (!entry.tool_calls_json.empty()) {
-    ContextMessage msg;
-    msg.role = entry.role;
-    msg.content = entry.content;
-    msg.tool_call_id = entry.tool_call_id;
-    msg.name = entry.source_tag;
-    msg.tool_calls_json = entry.tool_calls_json;
-    return msg;
-  }
-
+  // Summary/external entries: construct from flat fields.
   ContextMessage msg;
   msg.role = entry.role;
   msg.content = entry.content;
-  msg.tool_call_id = entry.tool_call_id;
   msg.name = entry.source_tag;
-  msg.tool_calls_json = entry.tool_calls_json;
   return msg;
+}
+
+// Extract tool_call_id from a MemoryEntry's ConversationItem.
+std::string EntryToolCallId(const MemoryEntry& entry) {
+  if (entry.type == MemoryEntryType::kToolResult) {
+    return entry.item.payload.value("tool_call_id", "");
+  }
+  if (entry.type == MemoryEntryType::kToolCall) {
+    // For tool call entries, the first tool call id.
+    if (entry.item.payload.contains("tool_calls") &&
+        entry.item.payload["tool_calls"].is_array() &&
+        !entry.item.payload["tool_calls"].empty()) {
+      return entry.item.payload["tool_calls"][0].value("id", "");
+    }
+  }
+  return "";
 }
 
 }  // namespace
 
 int EntryTokens(const MemoryEntry& entry) {
-  return static_cast<int>(
-      (entry.content.size() + entry.tool_calls_json.size() + entry.item_json.size()) / 4);
+  if (entry.type != MemoryEntryType::kSummary &&
+      entry.type != MemoryEntryType::kExternalContext) {
+    auto rendered = conversation::RenderForLlm(entry.item);
+    return static_cast<int>(
+        (rendered.content.size() + rendered.tool_calls_json.size()) / 4);
+  }
+  return static_cast<int>(entry.content.size() / 4);
 }
 
 ContextStrategy::ContextStrategy(ContextConfig config, MemoryStore& store)
@@ -99,11 +94,7 @@ ContextWindow ContextStrategy::BuildContext(
   ContextMessage obs_message;
   bool append_obs = (current_observation.type != ObservationType::kContinuation);
   if (append_obs) {
-    if (current_observation.item.has_value()) {
-      obs_message = conversation::RenderForLlm(*current_observation.item);
-    } else {
-      obs_message = LegacyObservationMessage(current_observation);
-    }
+    obs_message = conversation::RenderForLlm(current_observation.item);
   }
 
   // 3. Calculate fixed token costs.
@@ -140,10 +131,11 @@ ContextWindow ContextStrategy::BuildContext(
   for (size_t i = 0; i < all_entries.size(); ++i) {
     if (all_entries[i].type == MemoryEntryType::kToolResult && included[i]) {
       // Find the paired tool_call (preceding entry with same tool_call_id).
+      std::string tcid = EntryToolCallId(all_entries[i]);
       bool found_pair = false;
       for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
         if (all_entries[j].type == MemoryEntryType::kToolCall &&
-            all_entries[j].tool_call_id == all_entries[i].tool_call_id) {
+            EntryToolCallId(all_entries[j]) == tcid) {
           if (!included[j]) {
             // Try to include the paired tool_call.
             int pair_tokens = EntryTokens(all_entries[j]);
@@ -167,10 +159,11 @@ ContextWindow ContextStrategy::BuildContext(
 
     if (all_entries[i].type == MemoryEntryType::kToolCall && included[i]) {
       // Find the paired tool_result (following entry with same tool_call_id).
+      std::string tcid = EntryToolCallId(all_entries[i]);
       bool found_pair = false;
       for (size_t j = i + 1; j < all_entries.size(); ++j) {
         if (all_entries[j].type == MemoryEntryType::kToolResult &&
-            all_entries[j].tool_call_id == all_entries[i].tool_call_id) {
+            EntryToolCallId(all_entries[j]) == tcid) {
           if (!included[j]) {
             // Try to include the paired tool_result.
             int pair_tokens = EntryTokens(all_entries[j]);

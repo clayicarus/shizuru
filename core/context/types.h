@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "conversation/item.h"
+
 namespace shizuru::core {
 
 enum class MemoryEntryType {
@@ -33,12 +35,10 @@ struct ContextWindow {
 // A stored piece of conversation memory.
 struct MemoryEntry {
   MemoryEntryType type;
-  std::string role;           // "user", "assistant", "tool", "system"
-  std::string content;
-  std::string source_tag;     // For external context: origin identifier
-  std::string tool_call_id;   // For tool call/result pairing
-  std::string tool_calls_json; // JSON array string for kToolCall entries
-  std::string item_json;      // Serialized ConversationItem for structured input.
+  conversation::ConversationItem item;  // Primary payload for message-like entries.
+  std::string role;           // For summary/external entries only.
+  std::string content;        // For summary/external entries only.
+  std::string source_tag;     // For summary/external entries only.
   std::chrono::steady_clock::time_point timestamp;
   int estimated_tokens = 0;
 };

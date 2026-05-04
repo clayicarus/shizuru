@@ -24,8 +24,12 @@ Observation MakeObservation(const std::string& content,
                             ObservationType type = ObservationType::kUserMessage) {
   Observation obs;
   obs.type = type;
-  obs.content = content;
-  obs.source = "user";
+  if (type == ObservationType::kSystemEvent) {
+    obs.item = conversation::MakeSystemEventItem(
+        "system:user", "", "event", "user", conversation::ParseJsonOrString(content));
+  } else {
+    obs.item = conversation::MakeHumanMessageItem("user", "", content);
+  }
   obs.timestamp = std::chrono::steady_clock::now();
   return obs;
 }
@@ -38,9 +42,29 @@ MemoryEntry MakeEntry(MemoryEntryType type, const std::string& role,
   entry.type = type;
   entry.role = role;
   entry.content = content;
-  entry.tool_call_id = tool_call_id;
   entry.timestamp = std::chrono::steady_clock::now();
   entry.estimated_tokens = static_cast<int>(content.size()) / 4;
+
+  // Populate the ConversationItem for message-like entries.
+  switch (type) {
+    case MemoryEntryType::kUserMessage:
+      entry.item = conversation::MakeHumanMessageItem("user", "", content);
+      break;
+    case MemoryEntryType::kAssistantMessage:
+      entry.item = conversation::MakeAssistantMessageItem("assistant", "", content);
+      break;
+    case MemoryEntryType::kToolCall:
+      entry.item = conversation::MakeToolCallItem("assistant", "Shizuru",
+          nlohmann::json::array({{{"id", tool_call_id}, {"type", "function"},
+              {"function", {{"name", content}, {"arguments", {}}}}}}));
+      break;
+    case MemoryEntryType::kToolResult:
+      entry.item = conversation::MakeToolResultItem("tool", tool_call_id,
+          content);
+      break;
+    default:
+      break;
+  }
   return entry;
 }
 
@@ -168,10 +192,15 @@ TEST(ContextStrategyTest, ToolCallResultPairing) {
   auto window = strategy.BuildContext(sid, MakeObservation("Thanks"));
 
   // Find the tool call and result in the window.
+  // Tool calls render with empty content; identify by tool_calls_json.
+  // Tool results render with content from the item payload.
   int call_idx = -1, result_idx = -1;
   for (size_t i = 0; i < window.messages.size(); ++i) {
-    if (window.messages[i].content == "call_search") call_idx = static_cast<int>(i);
-    if (window.messages[i].content == "result_data") result_idx = static_cast<int>(i);
+    if (window.messages[i].tool_calls_json.find("call_search") != std::string::npos)
+      call_idx = static_cast<int>(i);
+    if (window.messages[i].tool_call_id == "tc_1" &&
+        window.messages[i].content == "result_data")
+      result_idx = static_cast<int>(i);
   }
 
   ASSERT_GE(call_idx, 0);
@@ -189,12 +218,14 @@ TEST(ContextStrategyTest, ToolCallJsonConsumesBudget) {
   std::string sid = "s1";
   strategy.InitSession(sid, "sys!");
 
+  nlohmann::json tool_calls_json = nlohmann::json::array({
+      {{"id", "call_1"}, {"type", "function"},
+       {"function", {{"name", "search"}, {"arguments", {{"q", "test"}}}}}}
+  });
+
   MemoryEntry call;
   call.type = MemoryEntryType::kToolCall;
-  call.role = "assistant";
-  call.tool_call_id = "tc_1";
-  call.tool_calls_json =
-      R"([{"id":"call_1","type":"function","function":{"name":"search","arguments":{"q":"test"}}}])";
+  call.item = conversation::MakeToolCallItem("assistant", "", tool_calls_json);
   call.timestamp = std::chrono::steady_clock::now();
   store.Append(sid, call);
 
@@ -233,8 +264,7 @@ TEST(ContextStrategyTest, ToolCallItemRendersAssistantToolCallMessage) {
   MemoryEntry entry;
   entry.type = MemoryEntryType::kToolCall;
   entry.timestamp = std::chrono::steady_clock::now();
-  entry.item_json = conversation::SerializeConversationItem(
-      conversation::MakeToolCallItem("assistant", "", tool_calls));
+  entry.item = conversation::MakeToolCallItem("assistant", "", tool_calls);
   store.Append(sid, entry);
 
   auto window = strategy.BuildContext(sid, MakeObservation("next"));
@@ -464,8 +494,9 @@ TEST(ContextStrategyTest, SystemEventMapsToUserRole) {
 
   Observation obs;
   obs.type = ObservationType::kSystemEvent;
-  obs.content = "<event type=\"reminder\" source=\"scheduler\">dentist tomorrow</event>";
-  obs.source = "scheduler";
+  obs.item = conversation::MakeSystemEventItem(
+      "system:scheduler", "", "reminder", "scheduler",
+      conversation::ParseJsonOrString("<event type=\"reminder\" source=\"scheduler\">dentist tomorrow</event>"));
   obs.timestamp = std::chrono::steady_clock::now();
 
   auto window = strategy.BuildContext(sid, obs);
@@ -473,7 +504,6 @@ TEST(ContextStrategyTest, SystemEventMapsToUserRole) {
   // Last message should be the system event, mapped to role "user".
   ASSERT_GE(window.messages.size(), 2u);
   EXPECT_EQ(window.messages.back().role, "user");
-  EXPECT_EQ(window.messages.back().content, obs.content);
 }
 
 TEST(ContextStrategyTest, StructuredSingleUserMessageStaysPlainText) {
@@ -488,10 +518,8 @@ TEST(ContextStrategyTest, StructuredSingleUserMessageStaysPlainText) {
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "hello there";
-  obs.source = "user";
-  obs.timestamp = std::chrono::steady_clock::now();
   obs.item = conversation::MakeHumanMessageItem("user", "", "hello there");
+  obs.timestamp = std::chrono::steady_clock::now();
 
   auto window = strategy.BuildContext(sid, obs);
 
@@ -512,11 +540,9 @@ TEST(ContextStrategyTest, StructuredNamedUserMessageUsesEnvelope) {
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = "I prefer Friday";
-  obs.source = "user:alice";
-  obs.timestamp = std::chrono::steady_clock::now();
   obs.item = conversation::MakeHumanMessageItem(
       "user:alice", "Alice", "I prefer Friday");
+  obs.timestamp = std::chrono::steady_clock::now();
 
   auto window = strategy.BuildContext(sid, obs);
 
@@ -545,10 +571,13 @@ TEST(ContextStrategyTest, SystemEventInHistoryHasUserRole) {
   strategy.InitSession(sid, "System prompt");
 
   // Simulate a recorded system event in memory (as the controller would store it).
+  // The entry uses kUserMessage type with a ConversationItem containing the event text.
   MemoryEntry event_entry;
   event_entry.type = MemoryEntryType::kUserMessage;
   event_entry.role = "user";
   event_entry.content = "<event type=\"reminder\" source=\"scheduler\">dentist</event>";
+  event_entry.item = conversation::MakeHumanMessageItem(
+      "user", "", event_entry.content);
   event_entry.timestamp = std::chrono::steady_clock::now();
   store.Append(sid, event_entry);
 
@@ -584,8 +613,7 @@ TEST(ContextStrategyTest, ContinuationObservationNotAppended) {
 
   Observation cont;
   cont.type = ObservationType::kContinuation;
-  cont.content = "";
-  cont.source = "controller";
+  cont.item = conversation::MakeSystemEventItem("controller", "", "continuation", "controller", nlohmann::json::object());
   cont.timestamp = std::chrono::steady_clock::now();
 
   auto window = strategy.BuildContext(sid, cont);

@@ -8,6 +8,7 @@
 
 #include "controller/config.h"
 #include "controller/types.h"
+#include "conversation/item.h"
 #include "dialogue/default_reducer.h"
 #include "dialogue/types.h"
 
@@ -50,8 +51,7 @@ class DialogueReducerPhase3Test : public ::testing::Test {
   Observation MakeUserObservation(const std::string& content) {
     Observation obs;
     obs.type = ObservationType::kUserMessage;
-    obs.content = content;
-    obs.source = "user";
+    obs.item = conversation::MakeHumanMessageItem("user", "", content);
     obs.timestamp = Clock::now();
     return obs;
   }
@@ -76,7 +76,7 @@ TEST_F(DialogueReducerPhase3Test, Debounce_BuffersToWorkspace) {
 
   // Workspace should have the fragment.
   ASSERT_EQ(decision.next_state.workspace.user_fragments.size(), 1u);
-  EXPECT_EQ(decision.next_state.workspace.user_fragments[0].content,
+  EXPECT_EQ(decision.next_state.workspace.user_fragments[0].item.payload.value("text", ""),
             "fragment during debounce");
 }
 
@@ -94,8 +94,8 @@ TEST_F(DialogueReducerPhase3Test, Debounce_AccumulatesMultipleFragments) {
   auto obs2 = MakeUserObservation("world");
   auto d2 = reducer_.Reduce(d1.next_state, UserMessageReceived{obs2, now});
   ASSERT_EQ(d2.next_state.workspace.user_fragments.size(), 2u);
-  EXPECT_EQ(d2.next_state.workspace.user_fragments[0].content, "hello");
-  EXPECT_EQ(d2.next_state.workspace.user_fragments[1].content, "world");
+  EXPECT_EQ(d2.next_state.workspace.user_fragments[0].item.payload.value("text", ""), "hello");
+  EXPECT_EQ(d2.next_state.workspace.user_fragments[1].item.payload.value("text", ""), "world");
 }
 
 // ---------------------------------------------------------------------------
@@ -152,9 +152,7 @@ TEST_F(DialogueReducerPhase3Test, DebounceExpiry_CommitsWorkspaceBeforeContinuat
   state.cooldown = CooldownPhase::kDebouncing;
   // Add some fragments to workspace.
   WorkspaceEntry frag1;
-  frag1.content = "hello";
-  frag1.source = "user";
-  frag1.entry_type = MemoryEntryType::kUserMessage;
+  frag1.item = conversation::MakeHumanMessageItem("user", "", "hello");
   frag1.timestamp = Clock::now();
   state.workspace.user_fragments.push_back(frag1);
 
@@ -191,9 +189,7 @@ TEST_F(DialogueReducerPhase3Test, Interrupt_WithUserFragments_CommitsBeforeCance
   auto state = MakeDefaultState();
   state.deliberation = DeliberationPhase::kThinking;
   WorkspaceEntry frag;
-  frag.content = "user input";
-  frag.source = "user";
-  frag.entry_type = MemoryEntryType::kUserMessage;
+  frag.item = conversation::MakeHumanMessageItem("user", "", "user input");
   frag.timestamp = Clock::now();
   state.workspace.user_fragments.push_back(frag);
 
@@ -218,9 +214,7 @@ TEST_F(DialogueReducerPhase3Test, Interrupt_WithAssistantPartial_DiscardsBeforeC
   auto state = MakeDefaultState();
   state.deliberation = DeliberationPhase::kThinking;
   WorkspaceEntry asst;
-  asst.content = "partial response";
-  asst.source = "assistant";
-  asst.entry_type = MemoryEntryType::kAssistantMessage;
+  asst.item = conversation::MakeAssistantMessageItem("assistant", "", "partial response");
   asst.timestamp = Clock::now();
   state.workspace.assistant_partial = asst;
 
@@ -296,7 +290,7 @@ TEST_F(DialogueReducerPhase3Test, UserFragment_BuffersWithoutCommit) {
 
   // Fragment should be in workspace.
   ASSERT_EQ(decision.next_state.workspace.user_fragments.size(), 1u);
-  EXPECT_EQ(decision.next_state.workspace.user_fragments[0].content,
+  EXPECT_EQ(decision.next_state.workspace.user_fragments[0].item.payload.value("text", ""),
             "partial fragment");
 
   // BufferToWorkspace should have is_fragment=true.

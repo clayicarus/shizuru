@@ -45,10 +45,8 @@ bool WaitFor(std::function<bool()> pred, int timeout_ms = 2000) {
 Observation MakeUserObs(const std::string& content) {
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.content = content;
-  obs.source = "user";
-  obs.timestamp = std::chrono::steady_clock::now();
   obs.item = conversation::MakeHumanMessageItem("user", "", content);
+  obs.timestamp = std::chrono::steady_clock::now();
   return obs;
 }
 
@@ -175,7 +173,7 @@ class RejectIgnoreFilter : public ObservationFilter {
  public:
   std::atomic<int> reject_count{0};
   bool ShouldProcess(const Observation& obs) override {
-    if (obs.content.find("ignore") != std::string::npos) {
+    if (ObservationText(obs).find("ignore") != std::string::npos) {
       reject_count.fetch_add(1);
       return false;
     }

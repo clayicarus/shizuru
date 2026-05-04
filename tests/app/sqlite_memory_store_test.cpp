@@ -5,6 +5,7 @@
 #include <string>
 
 #include "app/memory/sqlite_memory_store.h"
+#include "conversation/item.h"
 
 namespace shizuru::app {
 namespace {
@@ -22,9 +23,21 @@ core::MemoryEntry MakeEntry(core::MemoryEntryType type,
   core::MemoryEntry entry;
   entry.type = type;
   entry.role = std::move(role);
-  entry.content = std::move(content);
+  entry.content = content;
   entry.timestamp = std::chrono::steady_clock::now();
   entry.estimated_tokens = 3;
+
+  // Populate the ConversationItem for message-like entries.
+  switch (type) {
+    case core::MemoryEntryType::kUserMessage:
+      entry.item = core::conversation::MakeHumanMessageItem("user", "", content);
+      break;
+    case core::MemoryEntryType::kAssistantMessage:
+      entry.item = core::conversation::MakeAssistantMessageItem("assistant", "", content);
+      break;
+    default:
+      break;
+  }
   return entry;
 }
 
