@@ -17,7 +17,11 @@ bool LlmObservationFilter::ShouldProcess(const Observation& obs) {
   // Only filter user messages.  Tool results, system events, etc. always pass.
   if (obs.type != ObservationType::kUserMessage) return true;
 
-  std::string content = obs.item.payload.value("text", "");
+  std::string content = obs.content;
+  if (obs.item.has_value() &&
+      obs.item->kind == conversation::ItemKind::kHumanMessage) {
+    content = obs.item->payload.value("text", obs.content);
+  }
 
   // Empty content — skip (likely an interrupt signal).
   if (content.empty()) return true;

@@ -10,7 +10,6 @@
 
 #include "controller/config.h"
 #include "controller/types.h"
-#include "conversation/item.h"
 #include "dialogue/default_reducer.h"
 #include "dialogue/types.h"
 
@@ -48,7 +47,8 @@ class DialogueReducerPhase2Test : public ::testing::Test {
   Observation MakeUserObservation(const std::string& content) {
     Observation obs;
     obs.type = ObservationType::kUserMessage;
-    obs.item = conversation::MakeHumanMessageItem("user", "", content);
+    obs.content = content;
+    obs.source = "user";
     obs.timestamp = Clock::now();
     return obs;
   }
@@ -56,7 +56,8 @@ class DialogueReducerPhase2Test : public ::testing::Test {
   Observation MakeSystemObservation(const std::string& content) {
     Observation obs;
     obs.type = ObservationType::kSystemEvent;
-    obs.item = conversation::MakeSystemEventItem("system:scheduler", "", "event", "scheduler", conversation::ParseJsonOrString(content));
+    obs.content = content;
+    obs.source = "scheduler";
     obs.timestamp = Clock::now();
     return obs;
   }
@@ -65,7 +66,8 @@ class DialogueReducerPhase2Test : public ::testing::Test {
                                         const std::string& result) {
     Observation obs;
     obs.type = ObservationType::kToolResult;
-    obs.item = conversation::MakeToolResultItem(call_id, call_id, conversation::ParseJsonOrString(result));
+    obs.content = result;
+    obs.source = call_id;
     obs.timestamp = Clock::now();
     return obs;
   }

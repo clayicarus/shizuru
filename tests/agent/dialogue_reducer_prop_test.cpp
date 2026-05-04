@@ -14,7 +14,6 @@
 
 #include "controller/config.h"
 #include "controller/types.h"
-#include "conversation/item.h"
 #include "dialogue/default_reducer.h"
 #include "dialogue/types.h"
 
@@ -47,27 +46,13 @@ rc::Gen<Observation> genObservation(ObservationType type) {
   return rc::gen::exec([type] {
     Observation obs;
     obs.type = type;
-    auto content = *rc::gen::nonEmpty(
+    obs.content = *rc::gen::nonEmpty(
         rc::gen::container<std::string>(rc::gen::inRange('a', 'z')));
-    auto source = *rc::gen::element(
+    obs.source = *rc::gen::element(
         std::string("user"), std::string("tool:web_search"),
         std::string("scheduler"), std::string("system"));
     obs.timestamp = kBaseTime +
         std::chrono::seconds(*rc::gen::inRange(0, 3600));
-    switch (type) {
-      case ObservationType::kUserMessage:
-        obs.item = conversation::MakeHumanMessageItem(source, "", content);
-        break;
-      case ObservationType::kToolResult:
-        obs.item = conversation::MakeToolResultItem(source, source, conversation::ParseJsonOrString(content));
-        break;
-      case ObservationType::kSystemEvent:
-        obs.item = conversation::MakeSystemEventItem("system:" + source, "", "event", source, conversation::ParseJsonOrString(content));
-        break;
-      default:
-        obs.item = conversation::MakeHumanMessageItem(source, "", content);
-        break;
-    }
     return obs;
   });
 }
@@ -535,7 +520,8 @@ RC_GTEST_PROP(DialogueReducerPropTest, prop_tool_result_collection, (void)) {
 
   Observation obs;
   obs.type = ObservationType::kToolResult;
-  obs.item = conversation::MakeToolResultItem(result_id, result_id, conversation::ParseJsonOrString(R"({"result":"ok"})"));
+  obs.content = R"({"result":"ok"})";
+  obs.source = result_id;
   auto now = kBaseTime + std::chrono::seconds(*rc::gen::inRange(0, 3600));
   obs.timestamp = now;
 
@@ -664,7 +650,8 @@ RC_GTEST_PROP(DialogueReducerPropTest, prop_activity_tracking, (void)) {
       }
       Observation obs;
       obs.type = ObservationType::kToolResult;
-      obs.item = conversation::MakeToolResultItem(state.pending_tool_call_ids[0], state.pending_tool_call_ids[0], conversation::ParseJsonOrString(R"({"r":"ok"})"));
+      obs.content = R"({"r":"ok"})";
+      obs.source = state.pending_tool_call_ids[0];
       obs.timestamp = now;
       event = ToolResultReceived{obs, now};
       break;
@@ -823,9 +810,9 @@ RC_GTEST_PROP(DialogueReducerPropTest, prop_debounce_buffers_without_thinking,
 
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  auto content = *rc::gen::nonEmpty(
+  obs.content = *rc::gen::nonEmpty(
       rc::gen::container<std::string>(rc::gen::inRange('a', 'z')));
-  obs.item = conversation::MakeHumanMessageItem("user", "", content);
+  obs.source = "user";
   auto offset = std::chrono::seconds(*rc::gen::inRange(0, 3600));
   auto now = kBaseTime + offset;
   obs.timestamp = now;

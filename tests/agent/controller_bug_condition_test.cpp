@@ -45,7 +45,8 @@ bool WaitFor(std::function<bool()> pred, int timeout_ms = 2000) {
 Observation MakeUserObs(const std::string& content) {
   Observation obs;
   obs.type = ObservationType::kUserMessage;
-  obs.item = conversation::MakeHumanMessageItem("user", "", content);
+  obs.content = content;
+  obs.source = "user";
   obs.timestamp = std::chrono::steady_clock::now();
   return obs;
 }

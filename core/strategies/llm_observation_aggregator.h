@@ -52,6 +52,7 @@ class LlmObservationAggregator : public ObservationAggregator {
   std::string buffer_;
   std::chrono::steady_clock::time_point last_input_time_;
   bool has_pending_{false};
+  std::string source_;
   std::optional<conversation::ConversationItem> pending_item_;
 };
 

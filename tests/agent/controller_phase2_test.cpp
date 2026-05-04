@@ -26,7 +26,6 @@
 #include "context/config.h"
 #include "context/context_strategy.h"
 #include "conversation/item.h"
-#include "conversation/render.h"
 #include "controller/config.h"
 #include "controller/controller.h"
 #include "controller/types.h"
@@ -44,16 +43,6 @@
 
 namespace shizuru::core {
 namespace {
-
-// Helper: extract searchable text content from a MemoryEntry.
-// For message-like entries, renders from item; for summary/external, uses flat content.
-std::string EntryText(const MemoryEntry& e) {
-  if (e.type == MemoryEntryType::kSummary || e.type == MemoryEntryType::kExternalContext) {
-    return e.content;
-  }
-  auto rendered = conversation::RenderForLlm(e.item);
-  return rendered.content;
-}
 
 // Poll predicate until true or timeout_ms elapses.
 bool WaitFor(std::function<bool()> pred, int timeout_ms = 3000) {
@@ -104,17 +93,21 @@ class ControllerPhase2Test : public ::testing::Test {
   Observation MakeUserObs(const std::string& content) {
     Observation obs;
     obs.type = ObservationType::kUserMessage;
-    obs.item = conversation::MakeHumanMessageItem("user", "", content);
+    obs.content = content;
+    obs.source = "user";
     obs.timestamp = std::chrono::steady_clock::now();
+    obs.item = conversation::MakeHumanMessageItem("user", "", content);
     return obs;
   }
 
   Observation MakeSystemObs(const std::string& content) {
     Observation obs;
     obs.type = ObservationType::kSystemEvent;
-    obs.item = conversation::MakeSystemEventItem(
-        "system:scheduler", "", "reminder", "scheduler", conversation::ParseJsonOrString(content));
+    obs.content = content;
+    obs.source = "scheduler";
     obs.timestamp = std::chrono::steady_clock::now();
+    obs.item = conversation::MakeSystemEventItem(
+        "system:scheduler", "", "reminder", "scheduler", content);
     return obs;
   }
 
@@ -198,7 +191,7 @@ TEST_F(ControllerPhase2Test, RespondNow_FullCycle) {
   auto entries = memory_store_->GetAll("test-session");
   bool found_user = false;
   for (const auto& e : entries) {
-    if (EntryText(e).find("hello") != std::string::npos) found_user = true;
+    if (e.content.find("hello") != std::string::npos) found_user = true;
   }
   EXPECT_TRUE(found_user);
 }
@@ -240,7 +233,7 @@ TEST_F(ControllerPhase2Test, FilterDisabled_StillResponds) {
   auto entries = memory_store_->GetAll("test-session");
   bool found_msg = false;
   for (const auto& e : entries) {
-    if (EntryText(e).find("background noise") != std::string::npos) found_msg = true;
+    if (e.content.find("background noise") != std::string::npos) found_msg = true;
   }
   EXPECT_TRUE(found_msg);
 
@@ -302,15 +295,13 @@ TEST_F(ControllerPhase2Test, ToolCallCycle_ThinkToolResultContinuationRespond) {
         const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.item = conversation::MakeToolResultItem(
-            json.value("tool_name", "my_tool"),
-            json.value("tool_call_id", ""),
-            nlohmann::json({
-                {"success", true},
-                {"tool_name", json.value("tool_name", "my_tool")},
-                {"tool_call_id", json.value("tool_call_id", "")},
-                {"output", "tool output"},
-            }));
+        result_obs.content = nlohmann::json({
+            {"success", true},
+            {"tool_name", json.value("tool_name", "my_tool")},
+            {"tool_call_id", json.value("tool_call_id", "")},
+            {"output", "tool output"},
+        }).dump();
+        result_obs.source = "tool:my_tool";
         result_obs.timestamp = std::chrono::steady_clock::now();
         ctrl_ptr->EnqueueObservation(std::move(result_obs));
       }
@@ -504,7 +495,7 @@ TEST_F(ControllerPhase2Test, ToolCallTimeout_TimeoutResultsRecorded_Continuation
   auto entries = memory_store_->GetAll("test-session");
   bool found_timeout = false;
   for (const auto& e : entries) {
-    if (EntryText(e).find("timeout") != std::string::npos) found_timeout = true;
+    if (e.content.find("timeout") != std::string::npos) found_timeout = true;
   }
   EXPECT_TRUE(found_timeout) << "Timeout result must be recorded in committed history";
   EXPECT_GE(call_count.load(), 2) << "LLM should be called at least twice (tool call + continuation after timeout)";
@@ -563,7 +554,7 @@ TEST_F(ControllerPhase2Test, SystemEvent_ThinkRespond) {
   auto entries = memory_store_->GetAll("test-session");
   bool found_event = false;
   for (const auto& e : entries) {
-    if (EntryText(e).find("time to check in") != std::string::npos) found_event = true;
+    if (e.content.find("time to check in") != std::string::npos) found_event = true;
   }
   EXPECT_TRUE(found_event);
 
@@ -684,8 +675,8 @@ TEST_F(ControllerPhase2Test, InterruptRecordsInterruptMemory) {
   auto entries = memory_store_->GetAll("test-session");
   bool found_interrupt_memory = false;
   for (const auto& e : entries) {
-    if (EntryText(e).find("interrupted") != std::string::npos ||
-        EntryText(e).find("Interrupt") != std::string::npos) {
+    if (e.content.find("interrupted") != std::string::npos ||
+        e.content.find("Interrupt") != std::string::npos) {
       found_interrupt_memory = true;
     }
   }
@@ -695,7 +686,7 @@ TEST_F(ControllerPhase2Test, InterruptRecordsInterruptMemory) {
   // Also verify the interrupting message is recorded.
   bool found_interrupt_msg = false;
   for (const auto& e : entries) {
-    if (EntryText(e).find("interrupt!") != std::string::npos) {
+    if (e.content.find("interrupt!") != std::string::npos) {
       found_interrupt_msg = true;
     }
   }

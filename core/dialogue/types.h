@@ -154,7 +154,9 @@ enum class CooldownPhase {
 
 // A single entry in the provisional turn workspace.
 struct WorkspaceEntry {
-  conversation::ConversationItem item;
+  std::string content;
+  std::string source;
+  MemoryEntryType entry_type = MemoryEntryType::kUserMessage;
   std::chrono::steady_clock::time_point timestamp;
 };
 

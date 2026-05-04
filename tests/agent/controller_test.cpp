@@ -44,17 +44,6 @@ bool WaitFor(std::function<bool()> pred, int timeout_ms = 2000) {
   return pred();
 }
 
-// Extract searchable text from a MemoryEntry.
-// For message-like entries, text lives in item.payload["text"].
-// For summary/external entries, text lives in entry.content.
-std::string EntryText(const MemoryEntry& e) {
-  std::string text = e.item.payload.value("text", "");
-  if (text.empty()) {
-    text = e.content;
-  }
-  return text;
-}
-
 // ---------------------------------------------------------------------------
 // Test fixture with shared setup
 // ---------------------------------------------------------------------------
@@ -91,8 +80,10 @@ class ControllerTest : public ::testing::Test {
   Observation MakeUserObs(const std::string& content) {
     Observation obs;
     obs.type = ObservationType::kUserMessage;
-    obs.item = conversation::MakeHumanMessageItem("user", "", content);
+    obs.content = content;
+    obs.source = "user";
     obs.timestamp = std::chrono::steady_clock::now();
+    obs.item = conversation::MakeHumanMessageItem("user", "", content);
     return obs;
   }
 
@@ -145,8 +136,11 @@ TEST_F(ControllerTest, UserObservationRecordedAsConversationItem) {
 
   auto entries = memory_store_.GetAll("test-session");
   ASSERT_FALSE(entries.empty());
-  EXPECT_EQ(entries.front().item.kind, conversation::ItemKind::kHumanMessage);
-  EXPECT_EQ(entries.front().item.payload.value("text", ""), "hello");
+  EXPECT_FALSE(entries.front().item_json.empty());
+  auto item = conversation::TryParseConversationItem(entries.front().item_json);
+  ASSERT_TRUE(item.has_value());
+  EXPECT_EQ(item->kind, conversation::ItemKind::kHumanMessage);
+  EXPECT_EQ(item->payload.value("text", ""), "hello");
 
   ctrl->Shutdown();
 }
@@ -159,9 +153,11 @@ TEST_F(ControllerTest, SystemEventRecordedAsConversationItem) {
 
   Observation sys_obs;
   sys_obs.type = ObservationType::kSystemEvent;
-  sys_obs.item = conversation::MakeSystemEventItem(
-      "system:system", "", "event", "system", conversation::ParseJsonOrString("system ping"));
+  sys_obs.content = "system ping";
+  sys_obs.source = "system";
   sys_obs.timestamp = std::chrono::steady_clock::now();
+  sys_obs.item = conversation::MakeSystemEventItem(
+      "system:system", "", "event", "system", "system ping");
   ctrl->EnqueueObservation(std::move(sys_obs));
 
   ASSERT_TRUE(WaitFor([&] {
@@ -171,8 +167,11 @@ TEST_F(ControllerTest, SystemEventRecordedAsConversationItem) {
 
   auto entries = memory_store_.GetAll("test-session");
   ASSERT_FALSE(entries.empty());
-  EXPECT_EQ(entries.front().item.kind, conversation::ItemKind::kSystemEvent);
-  EXPECT_EQ(entries.front().item.payload.value("source", ""), "system");
+  EXPECT_FALSE(entries.front().item_json.empty());
+  auto item = conversation::TryParseConversationItem(entries.front().item_json);
+  ASSERT_TRUE(item.has_value());
+  EXPECT_EQ(item->kind, conversation::ItemKind::kSystemEvent);
+  EXPECT_EQ(item->payload.value("source", ""), "system");
 
   ctrl->Shutdown();
 }
@@ -274,15 +273,13 @@ TEST_F(ControllerTest, TransitionSequence_ToolCallCycle) {
         const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.item = conversation::MakeToolResultItem(
-            json.value("tool_name", "my_tool"),
-            json.value("tool_call_id", ""),
-            nlohmann::json({
-                {"success", true},
-                {"tool_name", json.value("tool_name", "my_tool")},
-                {"tool_call_id", json.value("tool_call_id", "")},
-                {"output", "tool output"},
-            }));
+        result_obs.content = nlohmann::json({
+            {"success", true},
+            {"tool_name", json.value("tool_name", "my_tool")},
+            {"tool_call_id", json.value("tool_call_id", "")},
+            {"output", "tool output"},
+        }).dump();
+        result_obs.source = "tool:my_tool";
         result_obs.timestamp = std::chrono::steady_clock::now();
         ctrl_ptr->EnqueueObservation(std::move(result_obs));
       }
@@ -391,15 +388,13 @@ TEST_F(ControllerTest, ConversationItemsShareTurnGroupAcrossToolCycle) {
     const auto json = nlohmann::json::parse(payload);
     Observation result_obs;
     result_obs.type = ObservationType::kToolResult;
-    result_obs.item = conversation::MakeToolResultItem(
-        json.value("tool_name", "my_tool"),
-        json.value("tool_call_id", ""),
-        nlohmann::json({
-            {"success", true},
-            {"tool_name", json.value("tool_name", "my_tool")},
-            {"tool_call_id", json.value("tool_call_id", "")},
-            {"output", "tool output"},
-        }));
+    result_obs.content = nlohmann::json({
+        {"success", true},
+        {"tool_name", json.value("tool_name", "my_tool")},
+        {"tool_call_id", json.value("tool_call_id", "")},
+        {"output", "tool output"},
+    }).dump();
+    result_obs.source = "tool:my_tool";
     result_obs.timestamp = std::chrono::steady_clock::now();
     ctrl_ptr->EnqueueObservation(std::move(result_obs));
   };
@@ -686,15 +681,13 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
         const auto json = nlohmann::json::parse(payload);
         Observation result_obs;
         result_obs.type = ObservationType::kToolResult;
-        result_obs.item = conversation::MakeToolResultItem(
-            json.value("tool_name", "tool"),
-            json.value("tool_call_id", ""),
-            nlohmann::json({
-                {"success", true},
-                {"tool_name", json.value("tool_name", "tool")},
-                {"tool_call_id", json.value("tool_call_id", "")},
-                {"output", "ok"},
-            }));
+        result_obs.content = nlohmann::json({
+            {"success", true},
+            {"tool_name", json.value("tool_name", "tool")},
+            {"tool_call_id", json.value("tool_call_id", "")},
+            {"output", "ok"},
+        }).dump();
+        result_obs.source = "tool";
         result_obs.timestamp = std::chrono::steady_clock::now();
         ctrl_ptr2->EnqueueObservation(std::move(result_obs));
       }
@@ -948,13 +941,11 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
   bool found_memory = false;
   bool found_empty_user_message = false;
   for (const auto& e : entries) {
-    // Check both flat content and item payload for interrupt marker.
-    std::string text = EntryText(e);
-    if (text.find("interrupted") != std::string::npos ||
-        text.find("Interrupt") != std::string::npos) {
+    if (e.content.find("interrupted") != std::string::npos ||
+        e.content.find("Interrupt") != std::string::npos) {
       found_memory = true;
     }
-    if (e.type == MemoryEntryType::kUserMessage && text.empty()) {
+    if (e.role == "user" && e.content.empty()) {
       found_empty_user_message = true;
     }
   }
@@ -1004,9 +995,11 @@ TEST_F(ControllerTest, DiagnosticOnInvalidTransition) {
 
   Observation sys_obs;
   sys_obs.type = ObservationType::kSystemEvent;
-  sys_obs.item = conversation::MakeSystemEventItem(
-      "system:system", "", "event", "system", conversation::ParseJsonOrString("system ping"));
+  sys_obs.content = "system ping";
+  sys_obs.source = "system";
   sys_obs.timestamp = std::chrono::steady_clock::now();
+  sys_obs.item = conversation::MakeSystemEventItem(
+      "system:system", "", "event", "system", "system ping");
   ctrl->EnqueueObservation(std::move(sys_obs));
 
   // Brief wait for the observation to be consumed, then shut down.
@@ -1286,8 +1279,10 @@ TEST_F(ControllerTest, BargeInDebounce_FullReducerPath) {
   // --- Step 1: Send message A → wait for kActing (tool call in flight) ---
   Observation obs_a;
   obs_a.type = ObservationType::kUserMessage;
-  obs_a.item = conversation::MakeHumanMessageItem("user", "", "message_A");
+  obs_a.content = "message_A";
+  obs_a.source = "user";
   obs_a.timestamp = std::chrono::steady_clock::now();
+  obs_a.item = conversation::MakeHumanMessageItem("user", "", "message_A");
   ctrl.EnqueueObservation(std::move(obs_a));
 
   // Wait for kActing (LLM returned tool call, emit_frame fired, no result).
@@ -1296,8 +1291,10 @@ TEST_F(ControllerTest, BargeInDebounce_FullReducerPath) {
   // --- Step 2: Send barge-in message B while in kActing ---
   Observation obs_b;
   obs_b.type = ObservationType::kUserMessage;
-  obs_b.item = conversation::MakeHumanMessageItem("user", "", "message_B");
+  obs_b.content = "message_B";
+  obs_b.source = "user";
   obs_b.timestamp = std::chrono::steady_clock::now();
+  obs_b.item = conversation::MakeHumanMessageItem("user", "", "message_B");
   ctrl.EnqueueObservation(std::move(obs_b));
 
   // Wait for interrupt transition (→ kListening via kInterrupt).
@@ -1319,12 +1316,11 @@ TEST_F(ControllerTest, BargeInDebounce_FullReducerPath) {
     bool has_interrupt = false;
     bool has_b = false;
     for (const auto& e : entries) {
-      std::string text = EntryText(e);
-      if (text.find("interrupted") != std::string::npos ||
-          text.find("Interrupt") != std::string::npos) {
+      if (e.content.find("interrupted") != std::string::npos ||
+          e.content.find("Interrupt") != std::string::npos) {
         has_interrupt = true;
       }
-      if (text.find("message_B") != std::string::npos) {
+      if (e.content.find("message_B") != std::string::npos) {
         has_b = true;
       }
     }
@@ -1337,15 +1333,17 @@ TEST_F(ControllerTest, BargeInDebounce_FullReducerPath) {
   // --- Step 3: Send message C during cooldown ---
   Observation obs_c;
   obs_c.type = ObservationType::kUserMessage;
-  obs_c.item = conversation::MakeHumanMessageItem("user", "", "message_C");
+  obs_c.content = "message_C";
+  obs_c.source = "user";
   obs_c.timestamp = std::chrono::steady_clock::now();
+  obs_c.item = conversation::MakeHumanMessageItem("user", "", "message_C");
   ctrl.EnqueueObservation(std::move(obs_c));
 
   // Wait for message C to be recorded in memory.
   ASSERT_TRUE(WaitFor([&] {
     auto entries = memory2.GetAll("test-session");
     for (const auto& e : entries) {
-      if (EntryText(e).find("message_C") != std::string::npos) return true;
+      if (e.content.find("message_C") != std::string::npos) return true;
     }
     return false;
   }));

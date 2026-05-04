@@ -161,7 +161,9 @@ DialogueDecision DefaultDialogueReducer::HandleUserMessage(
     auto next = state;
 
     WorkspaceEntry entry;
-    entry.item = event.observation.item;
+    entry.content = event.observation.content;
+    entry.source = event.observation.source;
+    entry.entry_type = MemoryEntryType::kUserMessage;
     entry.timestamp = event.now;
     next.workspace.user_fragments.push_back(entry);
 
@@ -193,8 +195,12 @@ DialogueDecision DefaultDialogueReducer::HandleUserMessage(
     next.turn_continuation_count = 0;
 
     // Buffer to workspace then commit immediately (Phase 3).
+    // The workspace is populated in next_state so the CommitWorkspace effect
+    // handler can read it.  The effect handler clears the workspace after commit.
     WorkspaceEntry entry;
-    entry.item = event.observation.item;
+    entry.content = event.observation.content;
+    entry.source = event.observation.source;
+    entry.entry_type = MemoryEntryType::kUserMessage;
     entry.timestamp = event.now;
     next.workspace.user_fragments.push_back(entry);
     effects.push_back(BufferToWorkspace{entry, false});
@@ -228,8 +234,12 @@ DialogueDecision DefaultDialogueReducer::HandleUserMessage(
     next.turn_continuation_count = 0;
 
     // Buffer to workspace then commit immediately (Phase 3).
+    // The workspace is populated in next_state so the CommitWorkspace effect
+    // handler can read it.  The effect handler clears the workspace after commit.
     WorkspaceEntry entry;
-    entry.item = event.observation.item;
+    entry.content = event.observation.content;
+    entry.source = event.observation.source;
+    entry.entry_type = MemoryEntryType::kUserMessage;
     entry.timestamp = event.now;
     next.workspace.user_fragments.push_back(entry);
     effects.push_back(BufferToWorkspace{entry, false});
@@ -272,6 +282,7 @@ DialogueDecision DefaultDialogueReducer::HandleTurnTriggerClassified(
     // We use a minimal observation since the real content is already recorded.
     Observation trigger;
     trigger.type = ObservationType::kContinuation;
+    trigger.source = "turn_trigger";
     trigger.timestamp = event.now;
     return {next, {StartLlm{trigger}}};
   }
@@ -334,6 +345,7 @@ DialogueDecision DefaultDialogueReducer::HandleLlmCompleted(
         next.deliberation = DeliberationPhase::kThinking;
         Observation trigger;
         trigger.type = ObservationType::kContinuation;
+        trigger.source = "continuation";
         trigger.timestamp = event.now;
         effects.push_back(StartLlm{trigger});
       }
@@ -372,15 +384,10 @@ DialogueDecision DefaultDialogueReducer::HandleToolResult(
   next.last_activity = event.now;
   next.conversation_active = true;
 
-  // Record the result keyed by tool call id from the item payload.
-  std::string tool_call_id = event.observation.item.payload.value("tool_call_id", "");
-  if (tool_call_id.empty()) {
-    tool_call_id = ObservationSource(event.observation);
-  }
-  next.pending_tool_results[tool_call_id] = 
-      event.observation.item.payload.contains("content")
-          ? event.observation.item.payload["content"].dump()
-          : "";
+  // Record the result keyed by tool call source (e.g., "tool:web_search").
+  // The source field carries the tool call id for pairing.
+  next.pending_tool_results[event.observation.source] =
+      event.observation.content;
 
   std::vector<DialogueEffect> effects;
   effects.push_back(RecordToolResult{event.observation});
@@ -408,6 +415,7 @@ DialogueDecision DefaultDialogueReducer::HandleToolResult(
 
     Observation trigger;
     trigger.type = ObservationType::kContinuation;
+    trigger.source = "tool_results_complete";
     trigger.timestamp = event.now;
     effects.push_back(StartLlm{trigger});
   }
@@ -433,6 +441,7 @@ DialogueDecision DefaultDialogueReducer::HandleToolCallTimeout(
 
   Observation trigger;
   trigger.type = ObservationType::kContinuation;
+  trigger.source = "tool_call_timeout";
   trigger.timestamp = event.now;
   effects.push_back(StartLlm{trigger});
 
@@ -493,8 +502,13 @@ DialogueDecision DefaultDialogueReducer::HandleSystemEvent(
   std::vector<DialogueEffect> effects;
   effects.push_back(RecordMemory{event.observation});
 
+  // Use a continuation trigger for StartLlm — the real system event content
+  // is already recorded via RecordMemory above.  Passing the raw observation
+  // would cause HandleThinking's legacy kSystemEvent branch to record it a
+  // second time.
   Observation trigger;
   trigger.type = ObservationType::kContinuation;
+  trigger.source = event.observation.source;
   trigger.timestamp = event.now;
   effects.push_back(StartLlm{trigger});
 
@@ -518,6 +532,7 @@ DialogueDecision DefaultDialogueReducer::HandleContinuation(
 
   Observation trigger;
   trigger.type = ObservationType::kContinuation;
+  trigger.source = event.source;
   trigger.timestamp = event.now;
 
   return {next, {StartLlm{trigger}}};
@@ -564,7 +579,9 @@ DialogueDecision DefaultDialogueReducer::HandleUserFragmentReceived(
   next.conversation_active = true;
 
   WorkspaceEntry entry;
-  entry.item = event.observation.item;
+  entry.content = event.observation.content;
+  entry.source = event.observation.source;
+  entry.entry_type = MemoryEntryType::kUserMessage;
   entry.timestamp = event.now;
   next.workspace.user_fragments.push_back(entry);
 
