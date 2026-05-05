@@ -90,6 +90,10 @@ class Controller {
   // Thread-safe. No-op if not in an interruptible state.
   void Interrupt();
 
+  // Recover from kError state to kIdle. Thread-safe.
+  // No-op if not in kError.
+  void Recover();
+
   // Register callback for diagnostic events.
   using DiagnosticCallback = std::function<void(const std::string& message)>;
   void OnDiagnostic(DiagnosticCallback cb);

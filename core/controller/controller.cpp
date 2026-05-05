@@ -511,8 +511,17 @@ void Controller::RunLoop() {
       // currently bypasses the actual filter and treats all meaningful
       // observations as respond-now.
       auto now = std::chrono::steady_clock::now();
-      LOG_INFO("[{}] User message received: \"{}\"",
-               MODULE_NAME, aggregated->content);
+      {
+        std::string actor_info;
+        if (aggregated->item.has_value()) {
+          const auto& actor = aggregated->item->actor;
+          if (!actor.actor_id.empty() && actor.actor_id != "user") {
+            actor_info = " [" + actor.display_name + " (" + actor.actor_id + ")]";
+          }
+        }
+        LOG_INFO("[{}] User message received{}: \"{}\"",
+                 MODULE_NAME, actor_info, aggregated->content);
+      }
       dialogue::AggregationComplete agg_event{*aggregated, now};
       auto decision = reducer_->Reduce(dialogue_state_, agg_event);
       ApplyDialogueDecision(decision);
@@ -546,10 +555,19 @@ void Controller::HandleThinking(const Observation& obs) {
   // in this turn (including after tool denial) sees the original question.
   // Re-enter via kContinuation so BuildContext does not duplicate it.
   if (obs.type == ObservationType::kUserMessage) {
-    MemoryEntry user_entry = MemoryEntryFromItem(
-        MemoryEntryType::kUserMessage, EnsureConversationItem(obs),
-        obs.timestamp);
-    context_.RecordTurn(session_id_, user_entry);
+    // Multi-item observation: record each item individually.
+    if (!obs.items.empty()) {
+      for (const auto& ci : obs.items) {
+        MemoryEntry entry = MemoryEntryFromItem(
+            MemoryEntryType::kUserMessage, ci, obs.timestamp);
+        context_.RecordTurn(session_id_, entry);
+      }
+    } else {
+      MemoryEntry user_entry = MemoryEntryFromItem(
+          MemoryEntryType::kUserMessage, EnsureConversationItem(obs),
+          obs.timestamp);
+      context_.RecordTurn(session_id_, user_entry);
+    }
 
     Observation cont;
     cont.type = ObservationType::kContinuation;
@@ -934,6 +952,20 @@ void Controller::HandleResponding(ActionCandidate ac) {
   LOG_INFO("[{}] Responding: \"{}\"", MODULE_NAME, ac.response_text);
   EmitActivity(ActivityKind::kSpeaking);
 
+  // Emit final response as a text frame on tts_out for downstream devices.
+  // When TTS segmentation is active, streaming chunks were already emitted
+  // during the SSE callback.  This final emission ensures text-only pipelines
+  // (no TTS segmentation) still receive the complete response via the port.
+  if (emit_frame_) {
+    io::DataFrame frame;
+    frame.type = "text/plain";
+    frame.payload = std::vector<uint8_t>(
+        ac.response_text.begin(), ac.response_text.end());
+    frame.metadata["tts_final"] = "1";
+    frame.timestamp = std::chrono::steady_clock::now();
+    emit_frame_("tts_out", std::move(frame));
+  }
+
   // Emit final response as complete ConversationItem for UI.
   auto resp_item = StampAssistantTurnItem(
       conversation::MakeAssistantMessageItem(
@@ -1015,10 +1047,21 @@ void Controller::ApplyDialogueDecision(
   for (const auto& effect : decision.effects) {
     std::visit(overloaded{
       [&](const dialogue::RecordMemory& e) {
-        MemoryEntry entry = MemoryEntryFromItem(
-            MemoryEntryType::kUserMessage, EnsureConversationItem(e.observation),
-            e.observation.timestamp);
-        context_.RecordTurn(session_id_, entry);
+        // Multi-item observation: record each item individually.
+        if (!e.observation.items.empty()) {
+          for (const auto& ci : e.observation.items) {
+            MemoryEntry entry = MemoryEntryFromItem(
+                MemoryEntryType::kUserMessage, ci,
+                e.observation.timestamp);
+            context_.RecordTurn(session_id_, entry);
+          }
+        } else {
+          MemoryEntry entry = MemoryEntryFromItem(
+              MemoryEntryType::kUserMessage,
+              EnsureConversationItem(e.observation),
+              e.observation.timestamp);
+          context_.RecordTurn(session_id_, entry);
+        }
       },
       [&](const dialogue::CancelLlm&) {
         // Phase 2: CancelLlm no longer records interrupt memory inline.
@@ -1368,6 +1411,11 @@ void Controller::Interrupt() {
   obs.source    = "interrupt";
   obs.timestamp = std::chrono::steady_clock::now();
   EnqueueObservation(std::move(obs));
+}
+
+void Controller::Recover() {
+  if (state_.load() != State::kError) { return; }
+  TryTransition(Event::kRecover);  // kError → kIdle
 }
 
 }  // namespace shizuru::core

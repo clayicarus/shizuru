@@ -55,8 +55,17 @@ CoreDevice::CoreDevice(std::string device_id,
       [this](core::State /*from*/, core::State to, core::Event event) {
         if (to == core::State::kListening &&
             event == core::Event::kInterrupt) {
-          // User interrupted — cancel in-progress TTS/playout immediately.
           EmitFrame(kControlOut, io::ControlFrame::Make("cancel"));
+        }
+        if (to == core::State::kError) {
+          io::DataFrame frame;
+          frame.type = "text/plain";
+          frame.payload = {'E', 'r', 'r', 'o', 'r'};
+          frame.metadata["error"] = "llm_failure";
+          frame.timestamp = std::chrono::steady_clock::now();
+          EmitFrame(kErrorOut, std::move(frame));
+
+          session_->GetController().Recover();
         }
       });
 }
@@ -74,6 +83,7 @@ std::vector<io::PortDescriptor> CoreDevice::GetPortDescriptors() const {
       {kTtsOut,        io::PortDirection::kOutput, "text/plain"},
       {kActionOut,     io::PortDirection::kOutput, "action/tool_call"},
       {kControlOut,    io::PortDirection::kOutput, "control/command"},
+      {kErrorOut,      io::PortDirection::kOutput, "text/plain"},
   };
 }
 
@@ -97,8 +107,29 @@ void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
     obs.content = content;
     obs.source = actor_id;
     obs.timestamp = std::chrono::steady_clock::now();
-    obs.item = core::conversation::MakeHumanMessageItem(
+    auto item = core::conversation::MakeHumanMessageItem(
         std::move(actor_id), std::move(actor_name), content);
+
+    // Extract mentions from metadata (comma-separated IDs).
+    if (frame.metadata.count("mentions") != 0) {
+      const std::string& mentions_str = frame.metadata.at("mentions");
+      std::string id;
+      for (char ch : mentions_str) {
+        if (ch == ',') {
+          if (!id.empty()) { item.mentions.push_back(std::move(id)); id.clear(); }
+        } else {
+          id += ch;
+        }
+      }
+      if (!id.empty()) { item.mentions.push_back(std::move(id)); }
+    }
+
+    // Pass through message timestamp for LLM context.
+    if (frame.metadata.count("timestamp") != 0) {
+      item.payload["time"] = frame.metadata.at("timestamp");
+    }
+
+    obs.item = std::move(item);
     session_->EnqueueObservation(std::move(obs));
   } else if (port_name == kToolResultIn) {
     const std::string content(frame.payload.begin(), frame.payload.end());

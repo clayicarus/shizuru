@@ -18,6 +18,7 @@ add_library(shizuru_core STATIC
   session/session.cpp
   strategies/llm_observation_filter.cpp
   strategies/llm_observation_aggregator.cpp
+  strategies/window_aggregator.cpp
   dialogue/default_reducer.cpp
   dialogue/timer_book.cpp
 )

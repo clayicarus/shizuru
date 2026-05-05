@@ -71,6 +71,7 @@ ContextMessage RenderForLlm(const ConversationItem& item) {
       AppendAttr(oss, "actor_id", item.actor.actor_id);
       AppendAttr(oss, "actor_name", item.actor.display_name);
       AppendAttr(oss, "actor_kind", ActorKindName(item.actor.kind));
+      AppendAttr(oss, "time", item.payload.value("time", ""));
       if (item.reply_to_item_id.has_value()) {
         AppendAttr(oss, "reply_to", item.reply_to_item_id.value());
       }

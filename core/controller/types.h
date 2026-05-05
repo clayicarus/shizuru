@@ -3,6 +3,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "conversation/item.h"
 
@@ -58,6 +59,12 @@ struct Observation {
   std::string source;    // Origin identifier (e.g., "user", "tool:web_search")
   std::chrono::steady_clock::time_point timestamp;
   std::optional<conversation::ConversationItem> item;
+
+  // Multiple conversation items — used when an aggregator batches messages
+  // from different actors within a time window.  When non-empty, each item
+  // is recorded to context individually.  `item` above is ignored if `items`
+  // is populated.
+  std::vector<conversation::ConversationItem> items;
 };
 
 // A single tool call proposed by the LLM.

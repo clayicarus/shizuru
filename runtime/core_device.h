@@ -61,6 +61,7 @@ class CoreDevice : public io::IoDevice {
   static constexpr char kTtsOut[] = "tts_out";
   static constexpr char kActionOut[] = "action_out";
   static constexpr char kControlOut[] = "control_out";
+  static constexpr char kErrorOut[] = "error_out";
 
   void EmitFrame(const std::string& port_name, io::DataFrame frame);
 
