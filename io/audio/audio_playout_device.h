@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "core/control_signal.h"
 #include "io/io_device.h"
 #include "audio_device/audio_player.h"
 
@@ -21,13 +22,16 @@ class AudioPlayoutDevice : public IoDevice {
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
   void OnInput(const std::string& port_name, DataFrame frame) override;
+  void OnAudioFrame(const std::string& port_name, AudioFrame frame) override;
+  void OnControlSignal(const std::string& port_name,
+                       core::ControlSignal signal) override;
   void SetOutputCallback(OutputCallback cb) override;
   void Start() override;
   void Stop() override;
 
  private:
   static constexpr char kAudioIn[]   = "audio_in";
-  static constexpr char kControlIn[] = "control_in";
+  static constexpr char kSignalIn[]  = "signal_in";
 
   std::string device_id_;
   std::unique_ptr<AudioPlayer> player_;

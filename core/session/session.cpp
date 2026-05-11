@@ -11,16 +11,14 @@ AgentSession::AgentSession(const std::string& session_id,
                            std::unique_ptr<LlmClient> llm,
                            Controller::EmitFrameCallback emit_frame,
                            Controller::CancelCallback cancel,
-                           std::unique_ptr<MemoryStore> memory,
+                           std::unique_ptr<HistoryStore> history,
                            std::unique_ptr<AuditSink> audit,
-                           std::unique_ptr<ObservationAggregator> observation_aggregator,
-                           std::unique_ptr<ObservationFilter> observation_filter,
                            std::unique_ptr<TtsSegmentStrategy> tts_segment,
                            std::unique_ptr<ResponseFilter> response_filter)
     : session_id_(session_id),
-      memory_(std::move(memory)),
+      history_(std::move(history)),
       audit_(std::move(audit)),
-      context_(std::move(ctx_config), *memory_),
+      context_(std::move(ctx_config), *history_),
       policy_(std::move(pol_config), *audit_),
       controller_(session_id_,
                   std::move(ctrl_config),
@@ -29,8 +27,6 @@ AgentSession::AgentSession(const std::string& session_id,
                   std::move(cancel),
                   context_,
                   policy_,
-                  std::move(observation_aggregator),
-                  std::move(observation_filter),
                   std::move(tts_segment),
                   std::move(response_filter)) {
   context_.InitSession(session_id_);
@@ -53,8 +49,16 @@ void AgentSession::Shutdown() {
   policy_.ReleaseSession(session_id_);
 }
 
-void AgentSession::EnqueueObservation(Observation obs) {
-  controller_.EnqueueObservation(std::move(obs));
+void AgentSession::EnqueueItem(ConversationItem item) {
+  controller_.EnqueueItem(std::move(item));
+}
+
+void AgentSession::EnqueueToolResult(ConversationItem item) {
+  controller_.EnqueueToolResult(std::move(item));
+}
+
+void AgentSession::EnqueueSystemEvent(ConversationItem item) {
+  controller_.EnqueueSystemEvent(std::move(item));
 }
 
 State AgentSession::GetState() const {

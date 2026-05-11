@@ -3,13 +3,19 @@
 #include <chrono>
 #include <functional>
 #include <utility>
+#include <variant>
 
 #include "async_logger.h"
-#include "conversation/item.h"
-#include "io/control_frame.h"
-#include "io/interrupt_frame.h"
 
 namespace shizuru::runtime {
+
+io::DataFrame CoreDevice::MakeControlFrame(const std::string& command) {
+  io::DataFrame frame;
+  frame.type = "control/command";
+  frame.payload = std::vector<uint8_t>(command.begin(), command.end());
+  frame.timestamp = std::chrono::steady_clock::now();
+  return frame;
+}
 
 CoreDevice::CoreDevice(std::string device_id,
                        std::string session_id,
@@ -17,10 +23,8 @@ CoreDevice::CoreDevice(std::string device_id,
                        core::ContextConfig ctx_config,
                        core::PolicyConfig pol_config,
                        std::unique_ptr<core::LlmClient> llm,
-                       std::unique_ptr<core::MemoryStore> memory,
+                       std::unique_ptr<core::HistoryStore> history,
                        std::unique_ptr<core::AuditSink> audit,
-                       std::unique_ptr<core::ObservationAggregator> observation_aggregator,
-                       std::unique_ptr<core::ObservationFilter> observation_filter,
                        std::unique_ptr<core::TtsSegmentStrategy> tts_segment,
                        std::unique_ptr<core::ResponseFilter> response_filter)
     : device_id_(std::move(device_id)) {
@@ -29,9 +33,10 @@ CoreDevice::CoreDevice(std::string device_id,
     EmitFrame(port, std::move(frame));
   };
 
-  // CancelCallback: called by Controller on interrupt — emits cancel on control_out.
+  // CancelCallback: called by Controller on interrupt.
   auto cancel = [this]() {
-    EmitFrame(kControlOut, io::ControlFrame::Make("cancel"));
+    EmitFrame(kControlOut, MakeControlFrame("cancel"));
+    EmitControlSignal(kSignalOut, core::CancelSignal{});
   };
 
   session_ = std::make_unique<core::AgentSession>(
@@ -42,10 +47,8 @@ CoreDevice::CoreDevice(std::string device_id,
       std::move(llm),
       std::move(emit_frame),
       std::move(cancel),
-      std::move(memory),
+      std::move(history),
       std::move(audit),
-      std::move(observation_aggregator),
-      std::move(observation_filter),
       std::move(tts_segment),
       std::move(response_filter));
 
@@ -55,7 +58,8 @@ CoreDevice::CoreDevice(std::string device_id,
       [this](core::State /*from*/, core::State to, core::Event event) {
         if (to == core::State::kListening &&
             event == core::Event::kInterrupt) {
-          EmitFrame(kControlOut, io::ControlFrame::Make("cancel"));
+          EmitFrame(kControlOut, MakeControlFrame("cancel"));
+          EmitControlSignal(kSignalOut, core::CancelSignal{});
         }
         if (to == core::State::kError) {
           io::DataFrame frame;
@@ -68,6 +72,26 @@ CoreDevice::CoreDevice(std::string device_id,
           session_->GetController().Recover();
         }
       });
+
+  // Mirror semantic conversation output onto a typed bus output port so the
+  // runtime can observe/replay semantic items without reparsing text frames.
+  session_->GetController().OnConversationItem(
+      [this](const core::ConversationItem& item, bool /*is_delta*/) {
+        EmitConversationItem(kItemOut, item);
+
+        if (item.kind == core::ConversationItemKind::kToolCall) {
+          for (const auto& part : item.parts) {
+            if (const auto* tcp = std::get_if<core::ToolCallPart>(&part)) {
+              EmitControlSignal(
+                  kSignalOut,
+                  core::ToolCallStartSignal{
+                      tcp->tool_call_id,
+                      tcp->name,
+                      tcp->arguments_json});
+            }
+          }
+        }
+      });
 }
 
 std::string CoreDevice::GetDeviceId() const {
@@ -78,109 +102,82 @@ std::vector<io::PortDescriptor> CoreDevice::GetPortDescriptors() const {
   return {
       {kTextIn,        io::PortDirection::kInput,  "text/plain"},
       {kToolResultIn,  io::PortDirection::kInput,  "action/tool_result"},
-      {kInterruptIn,   io::PortDirection::kInput,  io::InterruptFrame::kType},
+      {kInterruptIn,   io::PortDirection::kInput,  "control/interrupt"},
       {kSchedulerIn,   io::PortDirection::kInput,  "scheduler/event"},
+      {"item_in",      io::PortDirection::kInput,  "",
+                       runtime::PortPayloadKind::kConversationItem},
+      {"control_in",   io::PortDirection::kInput,  "",
+                       runtime::PortPayloadKind::kControlSignal},
       {kTtsOut,        io::PortDirection::kOutput, "text/plain"},
       {kActionOut,     io::PortDirection::kOutput, "action/tool_call"},
       {kControlOut,    io::PortDirection::kOutput, "control/command"},
+      {kSignalOut,     io::PortDirection::kOutput, "",
+                       runtime::PortPayloadKind::kControlSignal},
       {kErrorOut,      io::PortDirection::kOutput, "text/plain"},
+      {kItemOut,       io::PortDirection::kOutput, "",
+                       runtime::PortPayloadKind::kConversationItem},
   };
 }
 
 void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
-  if (!active_.load()) {
-    return;
-  }
+  // Legacy input interface — stubbed.
+  (void)port_name;
+  (void)frame;
+}
 
-  if (port_name == kTextIn) {
-    const std::string content(frame.payload.begin(), frame.payload.end());
-    std::string actor_id = "user";
-    if (frame.metadata.count("actor_id") != 0) {
-      actor_id = frame.metadata.at("actor_id");
-    }
-    std::string actor_name;
-    if (frame.metadata.count("actor_name") != 0) {
-      actor_name = frame.metadata.at("actor_name");
-    }
-    core::Observation obs;
-    obs.type = core::ObservationType::kUserMessage;
-    obs.content = content;
-    obs.source = actor_id;
-    obs.timestamp = std::chrono::steady_clock::now();
-    auto item = core::conversation::MakeHumanMessageItem(
-        std::move(actor_id), std::move(actor_name), content);
+void CoreDevice::OnConversationItem(const std::string& port_name,
+                                    core::ConversationItem item) {
+  (void)port_name;
+  OnConversationItem(std::move(item));
+}
 
-    // Extract mentions from metadata (comma-separated IDs).
-    if (frame.metadata.count("mentions") != 0) {
-      const std::string& mentions_str = frame.metadata.at("mentions");
-      std::string id;
-      for (char ch : mentions_str) {
-        if (ch == ',') {
-          if (!id.empty()) { item.mentions.push_back(std::move(id)); id.clear(); }
-        } else {
-          id += ch;
-        }
-      }
-      if (!id.empty()) { item.mentions.push_back(std::move(id)); }
-    }
+void CoreDevice::OnControlSignal(const std::string& port_name,
+                                 core::ControlSignal signal) {
+  (void)port_name;
+  OnControl(std::move(signal));
+}
 
-    // Pass through message timestamp for LLM context.
-    if (frame.metadata.count("timestamp") != 0) {
-      item.payload["time"] = frame.metadata.at("timestamp");
-    }
+void CoreDevice::OnConversationItem(core::ConversationItem item) {
+  if (!active_.load()) { return; }
+  session_->EnqueueItem(std::move(item));
+}
 
-    obs.item = std::move(item);
-    session_->EnqueueObservation(std::move(obs));
-  } else if (port_name == kToolResultIn) {
-    const std::string content(frame.payload.begin(), frame.payload.end());
-    core::Observation obs;
-    obs.type = core::ObservationType::kToolResult;
-    obs.content = content;
-    obs.source = "tool";
-    obs.timestamp = std::chrono::steady_clock::now();
-    auto json = core::conversation::ParseJsonOrString(content);
-    if (json.is_object()) {
-      const std::string tool_name = json.value("tool_name", "tool");
-      const std::string tool_call_id = json.value("tool_call_id", "");
-      obs.item = core::conversation::MakeToolResultItem(
-          tool_name, tool_call_id, std::move(json));
-      obs.source = "tool:" + tool_name;
-    }
-    session_->EnqueueObservation(std::move(obs));
-  } else if (port_name == kInterruptIn) {
-    const std::string reason = io::InterruptFrame::ParseReason(frame);
-    const std::string source = io::InterruptFrame::ParseSource(frame);
-    LOG_INFO("CoreDevice: interrupt_in received reason='{}' source='{}'",
-             reason, source);
+void CoreDevice::OnControl(core::ControlSignal signal) {
+  if (!active_.load()) { return; }
 
-    // Fast-path device cancellation: playout/TTS should stop as soon as
-    // barge-in is detected, before the controller loop processes the event.
-    EmitFrame(kControlOut, io::ControlFrame::Make(io::ControlFrame::kCommandCancel));
+  if (std::holds_alternative<core::InterruptSignal>(signal)) {
     session_->GetController().Interrupt();
-  } else if (port_name == kSchedulerIn) {
-    // Scheduler events bypass aggregator and filter.
-    const std::string content(frame.payload.begin(), frame.payload.end());
-    std::string event_type = "reminder";
-    if (frame.metadata.count("event_type") != 0) {
-      event_type = frame.metadata.at("event_type");
-    }
-    core::Observation obs;
-    obs.type = core::ObservationType::kSystemEvent;
-    obs.content = content;
-    obs.source = "scheduler";
-    obs.timestamp = std::chrono::steady_clock::now();
-    obs.item = core::conversation::MakeSystemEventItem(
-        "system:scheduler", "Scheduler", std::move(event_type), "scheduler",
-        core::conversation::ParseJsonOrString(content));
-    session_->EnqueueObservation(std::move(obs));
-  } else {
-    LOG_WARN("CoreDevice: unsupported input port: {}", port_name);
+  } else if (std::holds_alternative<core::ToolResultSignal>(signal)) {
+    const auto& result = std::get<core::ToolResultSignal>(signal);
+
+    core::ConversationItem item;
+    item.item_id = "toolresult:" + result.tool_call_id;
+    item.conversation_id = "";
+    item.kind = core::ConversationItemKind::kToolResult;
+    item.actor = core::ActorRef{"tool", "Tool", core::ActorKind::kTool};
+    item.parts.emplace_back(core::ToolResultPart{
+        result.tool_call_id, "", result.success, result.content});
+    item.wall_time = std::chrono::system_clock::now();
+
+    session_->EnqueueToolResult(std::move(item));
   }
 }
 
 void CoreDevice::SetOutputCallback(io::OutputCallback cb) {
   std::lock_guard<std::mutex> lock(output_cb_mutex_);
   output_cb_ = std::move(cb);
+}
+
+void CoreDevice::SetConversationItemOutputCallback(
+    io::ConversationItemOutputCallback cb) {
+  std::lock_guard<std::mutex> lock(output_cb_mutex_);
+  item_output_cb_ = std::move(cb);
+}
+
+void CoreDevice::SetControlSignalOutputCallback(
+    io::ControlSignalOutputCallback cb) {
+  std::lock_guard<std::mutex> lock(output_cb_mutex_);
+  signal_output_cb_ = std::move(cb);
 }
 
 void CoreDevice::Start() {
@@ -209,6 +206,30 @@ void CoreDevice::EmitFrame(const std::string& port_name, io::DataFrame frame) {
   }
   if (cb) {
     cb(device_id_, port_name, std::move(frame));
+  }
+}
+
+void CoreDevice::EmitConversationItem(const std::string& port_name,
+                                      core::ConversationItem item) {
+  io::ConversationItemOutputCallback cb;
+  {
+    std::lock_guard<std::mutex> lock(output_cb_mutex_);
+    cb = item_output_cb_;
+  }
+  if (cb) {
+    cb(device_id_, port_name, std::move(item));
+  }
+}
+
+void CoreDevice::EmitControlSignal(const std::string& port_name,
+                                   core::ControlSignal signal) {
+  io::ControlSignalOutputCallback cb;
+  {
+    std::lock_guard<std::mutex> lock(output_cb_mutex_);
+    cb = signal_output_cb_;
+  }
+  if (cb) {
+    cb(device_id_, port_name, std::move(signal));
   }
 }
 

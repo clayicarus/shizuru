@@ -7,8 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "core/control_signal.h"
 #include "io/vad/vad_device.h"
-#include "io/data_frame.h"
 
 namespace shizuru::io {
 
@@ -57,6 +57,9 @@ class EnergyVadDevice : public VadDevice {
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
   void OnInput(const std::string& port_name, DataFrame frame) override;
+  void OnAudioFrame(const std::string& port_name, AudioFrame frame) override;
+  void SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) override;
+  void SetControlSignalOutputCallback(ControlSignalOutputCallback cb) override;
   void SetOutputCallback(OutputCallback cb) override;
   void Start() override;
   void Stop() override;
@@ -64,13 +67,17 @@ class EnergyVadDevice : public VadDevice {
   static constexpr char kAudioIn[]  = "audio_in";
   static constexpr char kAudioOut[] = "audio_out";
   static constexpr char kVadOut[]   = "vad_out";
+  static constexpr char kInterruptSignalOut[] = "interrupt_signal_out";
+  static constexpr char kControlSignalOut[] = "control_signal_out";
 
  private:
-  static float ComputeRms(const std::vector<uint8_t>& payload);
+  static float ComputeRms(const AudioFrame& frame);
 
-  void EmitAudio(DataFrame frame);
+  void EmitAudio(AudioFrame frame);
   void EmitEvent(const std::string& event);
-  void FlushPreRoll();
+  void EmitInterruptSignal();
+  void EmitFlushSignal();
+  void FlushPreRollTyped();
 
   std::string device_id_;
   EnergyVadConfig config_;
@@ -86,10 +93,12 @@ class EnergyVadDevice : public VadDevice {
 
   // Pre-roll ring buffer: holds the last pre_roll_frames audio frames so
   // they can be replayed when speech_start fires.
-  std::deque<DataFrame> pre_roll_buf_;
+  std::deque<AudioFrame> pre_roll_audio_buf_;
 
   mutable std::mutex output_cb_mutex_;
   OutputCallback output_cb_;
+  AudioFrameOutputCallback audio_output_cb_;
+  ControlSignalOutputCallback signal_output_cb_;
 };
 
 }  // namespace shizuru::io

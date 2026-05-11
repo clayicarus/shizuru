@@ -1,8 +1,7 @@
-// app/scheduler/scheduler_device.cpp — Timer-based IoDevice.
+// app/scheduler/scheduler_device.cpp — Timer-based scheduler device.
 //
-// Timer loop sleeps until the earliest item's trigger time, then emits a
-// DataFrame on event_out.  New Schedule() calls wake the loop so it can
-// recalculate the sleep duration.
+// Timer loop sleeps until the earliest item's trigger time, then constructs
+// a ConversationItem(kSystemEvent) and delivers it via the on_item_ callback.
 
 #include "app/scheduler/scheduler_device.h"
 
@@ -23,7 +22,6 @@ void SchedulerDevice::Schedule(ScheduledItem item) {
     std::lock_guard<std::mutex> lock(items_mutex_);
     items_.push_back(std::move(item));
   }
-  // Wake the timer thread so it recalculates the next wakeup time.
   items_cv_.notify_one();
 }
 
@@ -40,18 +38,9 @@ bool SchedulerDevice::Cancel(const std::string& id) {
 
 std::string SchedulerDevice::GetDeviceId() const { return device_id_; }
 
-std::vector<io::PortDescriptor> SchedulerDevice::GetPortDescriptors() const {
-  return {{kEventOut, io::PortDirection::kOutput, "scheduler/event"}};
-}
-
-void SchedulerDevice::OnInput(const std::string& /*port_name*/,
-                              io::DataFrame /*frame*/) {
-  // SchedulerDevice has no input ports — ignore.
-}
-
-void SchedulerDevice::SetOutputCallback(io::OutputCallback cb) {
-  std::lock_guard<std::mutex> lock(output_cb_mutex_);
-  output_cb_ = std::move(cb);
+void SchedulerDevice::SetOnItemCallback(SchedulerItemCallback cb) {
+  std::lock_guard<std::mutex> lock(on_item_mutex_);
+  on_item_ = std::move(cb);
 }
 
 void SchedulerDevice::Start() {
@@ -72,7 +61,7 @@ void SchedulerDevice::TimerLoop() {
     // Find the earliest unfired item.
     auto now = std::chrono::system_clock::now();
     std::chrono::system_clock::time_point earliest =
-        now + std::chrono::hours(24);  // default: wake up in 24h
+        now + std::chrono::hours(24);
     bool has_pending = false;
 
     for (const auto& item : items_) {
@@ -83,7 +72,6 @@ void SchedulerDevice::TimerLoop() {
     }
 
     if (!has_pending) {
-      // Nothing scheduled — sleep until woken by Schedule() or Stop().
       items_cv_.wait(lock, [this] {
         return stop_.load() || !items_.empty();
       });
@@ -91,19 +79,17 @@ void SchedulerDevice::TimerLoop() {
     }
 
     if (earliest > now) {
-      // Sleep until the earliest trigger time or until woken.
       items_cv_.wait_until(lock, earliest, [this, &earliest] {
         if (stop_.load()) { return true; }
-        // Check if a newly scheduled item has an earlier trigger time.
         for (const auto& item : items_) {
           if (!item.fired && item.trigger_time < earliest) {
-            return true;  // Wake up to recalculate.
+            return true;
           }
         }
         return false;
       });
       if (stop_.load()) { break; }
-      continue;  // Re-enter loop to check what's ready.
+      continue;
     }
 
     // Fire all items whose trigger time has passed.
@@ -114,29 +100,30 @@ void SchedulerDevice::TimerLoop() {
       }
     }
 
-    // Release the lock before emitting frames (callback may re-enter).
+    // Release the lock before delivering items (callback may re-enter).
     lock.unlock();
 
-    for (auto* item : ready) {
-      io::DataFrame frame;
-      frame.type = "scheduler/event";
-      frame.payload = std::vector<uint8_t>(
-          item->payload.begin(), item->payload.end());
-      frame.source_device = device_id_;
-      frame.source_port = kEventOut;
-      frame.metadata["scheduler_item_id"] = item->id;
-      frame.timestamp = std::chrono::steady_clock::now();
+    for (auto* sched_item : ready) {
+      // Construct a ConversationItem(kSystemEvent) from the scheduled item.
+      core::ConversationItem item;
+      item.item_id = "scheduler:" + sched_item->id;
+      item.conversation_id = "";  // Core will assign the active conversation.
+      item.kind = core::ConversationItemKind::kSystemEvent;
+      item.actor = core::ActorRef{"scheduler", "Scheduler",
+                                  core::ActorKind::kSystem};
+      item.parts.emplace_back(core::TextPart{sched_item->payload});
+      item.wall_time = std::chrono::system_clock::now();
 
-      io::OutputCallback cb;
+      SchedulerItemCallback cb;
       {
-        std::lock_guard<std::mutex> cb_lock(output_cb_mutex_);
-        cb = output_cb_;
+        std::lock_guard<std::mutex> cb_lock(on_item_mutex_);
+        cb = on_item_;
       }
-      if (cb) { cb(device_id_, kEventOut, std::move(frame)); }
+      if (cb) { cb(std::move(item)); }
 
-      // Mark as fired (need to re-acquire items lock).
+      // Mark as fired.
       std::lock_guard<std::mutex> items_lock(items_mutex_);
-      item->fired = true;
+      sched_item->fired = true;
     }
 
     // Clean up fired items.

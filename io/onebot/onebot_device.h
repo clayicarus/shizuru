@@ -15,18 +15,13 @@
 //   X-Client-Role: Universal | API | Event
 //   Authorization: Bearer <token>   (if configured)
 //
-// Port contract:
-//   Input  "text_in"  — text/plain payload; metadata must contain
-//                        "message_type" ("group"|"private") and
-//                        "target_id" (group_id or user_id as string).
-//   Output "text_out" — text/plain payload with metadata:
-//                        "actor_id"      = QQ user ID string
-//                        "actor_name"    = nickname or card name
-//                        "message_type"  = "group" | "private"
-//                        "group_id"      = group ID (for group messages)
-//                        "message_id"    = OneBot message ID
+// Output contract:
+//   Parsed OneBot messages are delivered as core::ConversationItem via the
+//   on_item_ callback.  Each message produces exactly one ConversationItem
+//   with kind = kUserMessage.
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -36,7 +31,8 @@
 
 #include <nlohmann/json_fwd.hpp>
 
-#include "io/io_device.h"
+#include "core/content_part.h"
+#include "core/conversation_item.h"
 #include "io/onebot/onebot_types.h"
 
 // Forward-declare IXWebSocket types to avoid leaking the header.
@@ -47,26 +43,37 @@ class WebSocket;
 
 namespace shizuru::io::onebot {
 
-class OneBotDevice : public IoDevice {
+// Callback type for delivering parsed ConversationItems to Core.
+using OnItemCallback = std::function<void(core::ConversationItem)>;
+
+class OneBotDevice {
  public:
   explicit OneBotDevice(OneBotConfig config,
                         std::string device_id = "onebot");
-  ~OneBotDevice() override;
+  ~OneBotDevice();
 
   OneBotDevice(const OneBotDevice&) = delete;
   OneBotDevice& operator=(const OneBotDevice&) = delete;
 
-  // IoDevice interface.
-  std::string GetDeviceId() const override;
-  std::vector<PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, DataFrame frame) override;
-  void SetOutputCallback(OutputCallback cb) override;
-  void Start() override;
-  void Stop() override;
+  // Device identity.
+  std::string GetDeviceId() const;
 
-  // Port names.
-  static constexpr char kTextIn[]  = "text_in";
-  static constexpr char kTextOut[] = "text_out";
+  // Lifecycle.
+  void Start();
+  void Stop();
+
+  // Register the callback that delivers parsed ConversationItems to Core.
+  void SetOnItemCallback(OnItemCallback cb);
+
+  // Send a text message to a target (group or private).
+  // This is the outbound path — used by Core to reply.
+  void SendMessage(const std::string& message_type,
+                   int64_t target_id,
+                   const std::string& message);
+
+  // Send a merged forward message to a group (合并转发).
+  void SendGroupForward(int64_t group_id, const std::string& nickname,
+                        const std::string& content);
 
   // Get the reply context for the most recent incoming message.
   struct ReplyContext {
@@ -75,11 +82,6 @@ class OneBotDevice : public IoDevice {
     std::string user_id;       // sender's user_id
   };
   ReplyContext GetLastReplyContext() const;
-
-  // Send a merged forward message to a group (合并转发).
-  // Used for long messages that would flood the chat as plain text.
-  void SendGroupForward(int64_t group_id, const std::string& nickname,
-                        const std::string& content);
 
  private:
   // Event handling.
@@ -90,24 +92,15 @@ class OneBotDevice : public IoDevice {
   // Send a JSON payload to the connected OneBot client.
   void WsSend(const std::string& json_str);
 
-  // Send a message via OneBot API (send_msg action).
-  void SendOneBotMessage(const std::string& message_type,
-                         int64_t target_id,
-                         const std::string& message);
-
-  // Emit a DataFrame on the output port.
-  void EmitText(const std::string& text,
-                std::unordered_map<std::string, std::string> metadata);
-
   // Whitelist checks.
   bool IsGroupAllowed(int64_t group_id) const;
   bool IsUserAllowed(int64_t user_id) const;
 
-  // Extract plain text from OneBot message array or CQ-coded string.
-  // Also extracts @mentions.
+  // Parse OneBot message segments into ContentParts + mentions + reply info.
   struct ParsedMessage {
-    std::string text;
-    std::vector<std::string> mentions;  // QQ IDs that were @'d
+    core::ContentParts parts;             // TextPart and ImagePart entries
+    std::vector<std::string> mentions;    // QQ IDs that were @'d
+    std::optional<std::string> reply_to;  // message_id of replied message
   };
   static ParsedMessage ParseMessage(const nlohmann::json& message,
                                     const std::string& self_id);
@@ -120,7 +113,6 @@ class OneBotDevice : public IoDevice {
   std::atomic<bool> active_{false};
 
   // The single connected OneBot client (Universal or API+Event).
-  // Protected by client_mutex_.
   std::mutex client_mutex_;
   std::shared_ptr<ix::WebSocket> client_;
 
@@ -130,8 +122,9 @@ class OneBotDevice : public IoDevice {
   std::unordered_set<int64_t> group_whitelist_;
   std::unordered_set<int64_t> user_whitelist_;
 
-  std::mutex output_cb_mutex_;
-  OutputCallback output_cb_;
+  // Callback for delivering parsed items.
+  std::mutex on_item_mutex_;
+  OnItemCallback on_item_;
 
   // API call echo counter.
   std::atomic<int64_t> echo_counter_{0};

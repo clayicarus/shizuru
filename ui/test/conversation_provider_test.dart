@@ -5,15 +5,18 @@ import 'package:shizuru_ui/providers/conversation_provider.dart';
 
 String _makeItem(
   String kind,
-  Map<String, dynamic> payload, {
+  List<Map<String, dynamic>> parts, {
   String? itemId,
   String? turnGroupId,
+  Map<String, dynamic>? actor,
 }) {
   return jsonEncode({
     if (itemId != null) 'item_id': itemId,
     if (turnGroupId != null) 'turn_group_id': turnGroupId,
     'kind': kind,
-    'payload': payload,
+    'actor': actor ?? {'actor_id': 'assistant', 'display_name': 'Assistant', 'kind': 'assistant'},
+    'timestamp_ms': 1710000000000,
+    'parts': parts,
   });
 }
 
@@ -30,7 +33,9 @@ void main() {
       provider.onConversationItem(
         _makeItem(
           'assistant_message',
-          {'text': '<think>let me think'},
+          [
+            {'type': 'text', 'text': '<think>let me think'},
+          ],
           itemId: 'stream_1',
           turnGroupId: turnId,
         ),
@@ -39,7 +44,9 @@ void main() {
       provider.onConversationItem(
         _makeItem(
           'assistant_message',
-          {'text': '</think>'},
+          [
+            {'type': 'text', 'text': '</think>'},
+          ],
           itemId: 'stream_1',
           turnGroupId: turnId,
         ),
@@ -50,18 +57,14 @@ void main() {
       provider.onConversationItem(
         _makeItem(
           'tool_call',
-          {
-            'tool_calls': [
-              {
-                'id': 'c1',
-                'type': 'function',
-                'function': {
-                  'name': 'search',
-                  'arguments': {'q': 'weather'},
-                },
-              },
-            ],
-          },
+          [
+            {
+              'type': 'tool_call',
+              'tool_call_id': 'c1',
+              'name': 'search',
+              'arguments': {'q': 'weather'},
+            },
+          ],
           itemId: 'tool_call_1',
           turnGroupId: turnId,
         ),
@@ -72,11 +75,15 @@ void main() {
       provider.onConversationItem(
         _makeItem(
           'tool_result',
-          {
-            'tool_name': 'search',
-            'tool_call_id': 'c1',
-            'content': {'success': true, 'output': 'sunny'},
-          },
+          [
+            {
+              'type': 'tool_result',
+              'tool_name': 'search',
+              'tool_call_id': 'c1',
+              'success': true,
+              'result': {'success': true, 'output': 'sunny'},
+            },
+          ],
           itemId: 'tool_result_1',
           turnGroupId: turnId,
         ),
@@ -87,7 +94,9 @@ void main() {
       provider.onConversationItem(
         _makeItem(
           'assistant_message',
-          {'text': 'It is sunny today.'},
+          [
+            {'type': 'text', 'text': 'It is sunny today.'},
+          ],
           itemId: 'stream_2',
           turnGroupId: turnId,
         ),
@@ -118,21 +127,25 @@ void main() {
     final provider = ConversationProvider();
 
     provider.onConversationItem(
-      _makeItem(
-        'assistant_message',
-        {'text': 'Hello'},
-        itemId: 'stream_1',
-        turnGroupId: 'turn_1',
-      ),
+        _makeItem(
+          'assistant_message',
+          [
+            {'type': 'text', 'text': 'Hello'},
+          ],
+          itemId: 'stream_1',
+          turnGroupId: 'turn_1',
+        ),
       true,
     );
     provider.onConversationItem(
-      _makeItem(
-        'assistant_message',
-        {'text': ' world'},
-        itemId: 'stream_1',
-        turnGroupId: 'turn_1',
-      ),
+        _makeItem(
+          'assistant_message',
+          [
+            {'type': 'text', 'text': ' world'},
+          ],
+          itemId: 'stream_1',
+          turnGroupId: 'turn_1',
+        ),
       true,
     );
 
@@ -147,21 +160,25 @@ void main() {
     final provider = ConversationProvider();
 
     provider.onConversationItem(
-      _makeItem(
-        'assistant_message',
-        {'text': '<think>reasoning'},
-        itemId: 'stream_1',
-        turnGroupId: 'turn_1',
-      ),
+        _makeItem(
+          'assistant_message',
+          [
+            {'type': 'text', 'text': '<think>reasoning'},
+          ],
+          itemId: 'stream_1',
+          turnGroupId: 'turn_1',
+        ),
       true,
     );
     provider.onConversationItem(
-      _makeItem(
-        'assistant_message',
-        {'text': '</think>answer'},
-        itemId: 'stream_1',
-        turnGroupId: 'turn_1',
-      ),
+        _makeItem(
+          'assistant_message',
+          [
+            {'type': 'text', 'text': '</think>answer'},
+          ],
+          itemId: 'stream_1',
+          turnGroupId: 'turn_1',
+        ),
       true,
     );
 
@@ -179,42 +196,45 @@ void main() {
 
     // Streaming phase
     provider.onConversationItem(
-      _makeItem(
-        'assistant_message',
-        {'text': '<think>hmm</think>partial'},
-        itemId: 'stream_before_tool',
-        turnGroupId: turnId,
-      ),
+        _makeItem(
+          'assistant_message',
+          [
+            {'type': 'text', 'text': '<think>hmm</think>partial'},
+          ],
+          itemId: 'stream_before_tool',
+          turnGroupId: turnId,
+        ),
       true,
     );
 
     // Tool call arrives
     provider.onConversationItem(
-      _makeItem(
-        'tool_call',
-        {
-          'tool_calls': [
+        _makeItem(
+          'tool_call',
+          [
             {
-              'id': 'c1',
-              'type': 'function',
-              'function': {'name': 'calc', 'arguments': {}},
+              'type': 'tool_call',
+              'tool_call_id': 'c1',
+              'name': 'calc',
+              'arguments': {},
             },
           ],
-        },
-        itemId: 'tool_call_1',
-        turnGroupId: turnId,
-      ),
+          itemId: 'tool_call_1',
+          turnGroupId: turnId,
+        ),
       false,
     );
 
     // Final response (think stripped by C++ ResponseFilter)
     provider.onConversationItem(
-      _makeItem(
-        'assistant_message',
-        {'text': 'The answer is 42.'},
-        itemId: 'stream_after_tool',
-        turnGroupId: turnId,
-      ),
+        _makeItem(
+          'assistant_message',
+          [
+            {'type': 'text', 'text': 'The answer is 42.'},
+          ],
+          itemId: 'stream_after_tool',
+          turnGroupId: turnId,
+        ),
       false,
     );
 
@@ -240,7 +260,9 @@ void main() {
       provider.onConversationItem(
         _makeItem(
           'assistant_message',
-          {'text': 'First part. '},
+          [
+            {'type': 'text', 'text': 'First part. '},
+          ],
           itemId: 'stream_a',
           turnGroupId: turnId,
         ),
@@ -249,15 +271,14 @@ void main() {
       provider.onConversationItem(
         _makeItem(
           'tool_call',
-          {
-            'tool_calls': [
-              {
-                'id': 'c1',
-                'type': 'function',
-                'function': {'name': 'lookup', 'arguments': {}},
-              },
-            ],
-          },
+          [
+            {
+              'type': 'tool_call',
+              'tool_call_id': 'c1',
+              'name': 'lookup',
+              'arguments': {},
+            },
+          ],
           itemId: 'tool_call_1',
           turnGroupId: turnId,
         ),
@@ -266,7 +287,9 @@ void main() {
       provider.onConversationItem(
         _makeItem(
           'assistant_message',
-          {'text': 'draft'},
+          [
+            {'type': 'text', 'text': 'draft'},
+          ],
           itemId: 'stream_b',
           turnGroupId: turnId,
         ),
@@ -275,7 +298,9 @@ void main() {
       provider.onConversationItem(
         _makeItem(
           'assistant_message',
-          {'text': 'Final answer'},
+          [
+            {'type': 'text', 'text': 'Final answer'},
+          ],
           itemId: 'stream_b',
           turnGroupId: turnId,
         ),
@@ -299,12 +324,14 @@ void main() {
     final provider = ConversationProvider();
 
     provider.onConversationItem(
-      _makeItem(
-        'assistant_message',
-        {'text': 'partial'},
-        itemId: 'stream_1',
-        turnGroupId: 'turn_1',
-      ),
+        _makeItem(
+          'assistant_message',
+          [
+            {'type': 'text', 'text': 'partial'},
+          ],
+          itemId: 'stream_1',
+          turnGroupId: 'turn_1',
+        ),
       true,
     );
 
@@ -322,22 +349,26 @@ void main() {
     final provider = ConversationProvider();
 
     provider.onConversationItem(
-      _makeItem(
-        'assistant_message',
-        {'text': 'old'},
-        itemId: 'stream_old',
-        turnGroupId: 'turn_old',
-      ),
+        _makeItem(
+          'assistant_message',
+          [
+            {'type': 'text', 'text': 'old'},
+          ],
+          itemId: 'stream_old',
+          turnGroupId: 'turn_old',
+        ),
       true,
     );
     provider.addUserMessage('interrupt');
     provider.onConversationItem(
-      _makeItem(
-        'assistant_message',
-        {'text': 'new'},
-        itemId: 'stream_new',
-        turnGroupId: 'turn_new',
-      ),
+        _makeItem(
+          'assistant_message',
+          [
+            {'type': 'text', 'text': 'new'},
+          ],
+          itemId: 'stream_new',
+          turnGroupId: 'turn_new',
+        ),
       true,
     );
 
@@ -352,11 +383,14 @@ void main() {
     final provider = ConversationProvider();
 
     provider.onConversationItem(
-      _makeItem(
-        'human_message',
-        {'text': 'loaded from history'},
-        itemId: 'user_1',
-      ),
+        _makeItem(
+          'human_message',
+          [
+            {'type': 'text', 'text': 'loaded from history'},
+          ],
+          itemId: 'user_1',
+          actor: {'actor_id': 'user', 'display_name': 'User', 'kind': 'human'},
+        ),
       false,
     );
 

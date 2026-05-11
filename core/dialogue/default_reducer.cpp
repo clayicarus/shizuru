@@ -15,7 +15,7 @@ DefaultDialogueReducer::DefaultDialogueReducer(const ControllerConfig& config)
     : config_(config) {}
 
 // ---------------------------------------------------------------------------
-// Reduce — dispatch via std::visit (Task 4.12)
+// Reduce — dispatch via std::visit
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::Reduce(
@@ -28,9 +28,6 @@ DialogueDecision DefaultDialogueReducer::Reduce(
     [&](const DebounceCooldownExpired& e) {
       return HandleDebounceCooldownExpired(state, e.now);
     },
-    [&](const UserMessageReceived& e) {
-      return HandleUserMessage(state, e);
-    },
     [&](const ShutdownRequested&) -> DialogueDecision {
       return {state, {}};
     },
@@ -40,17 +37,11 @@ DialogueDecision DefaultDialogueReducer::Reduce(
     [&](const LlmFailed& e) {
       return HandleLlmFailed(state, e);
     },
-    [&](const ToolResultReceived& e) {
-      return HandleToolResult(state, e);
-    },
     [&](const ToolCallTimeout& e) {
       return HandleToolCallTimeout(state, e);
     },
     [&](const ContinuationRequested& e) {
       return HandleContinuation(state, e);
-    },
-    [&](const SystemEventReceived& e) {
-      return HandleSystemEvent(state, e);
     },
     [&](const TimerExpired& e) {
       return HandleTimerExpired(state, e);
@@ -58,20 +49,20 @@ DialogueDecision DefaultDialogueReducer::Reduce(
     [&](const TurnTriggerClassified& e) {
       return HandleTurnTriggerClassified(state, e);
     },
-    [&](const UserFragmentReceived& e) {
-      return HandleUserFragmentReceived(state, e);
+    [&](const ConversationItemReceived& e) {
+      return HandleConversationItemReceived(state, e);
     },
-    [&](const AggregationComplete& e) {
-      return HandleAggregationComplete(state, e);
+    [&](const ToolResultReceived& e) {
+      return HandleToolResult(state, e);
     },
-    [&](const AggregationTimeout& e) {
-      return HandleAggregationTimeout(state, e);
+    [&](const SystemEventReceived& e) {
+      return HandleSystemEvent(state, e);
     },
   }, event);
 }
 
 // ---------------------------------------------------------------------------
-// HandleInterrupt (Task 4.8 — updated from Phase 1)
+// HandleInterrupt
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleInterrupt(
@@ -81,33 +72,11 @@ DialogueDecision DefaultDialogueReducer::HandleInterrupt(
   next.cooldown = CooldownPhase::kDebouncing;
   next.last_activity = now;
   next.deliberation = DeliberationPhase::kIdle;
-
-  // Clear pending turn-trigger if any (defensive — kAwaitingTurnTrigger
-  // is not reachable via InterruptRequested per ingress precondition).
   next.pending_turn_trigger_id = 0;
-
-  // Clear pending tool state.
   next.pending_tool_call_ids.clear();
   next.pending_tool_results.clear();
 
   std::vector<DialogueEffect> effects;
-
-  // Phase 3: handle workspace before other interrupt effects.
-  // Commit user fragments so they are preserved in history.
-  // Discard assistant partial (interrupted output should not be committed).
-  // The workspace stays populated in next_state so effect handlers can read it.
-  if (!state.workspace.user_fragments.empty()) {
-    effects.push_back(CommitWorkspace{true});
-  }
-  if (state.workspace.assistant_partial.has_value()) {
-    effects.push_back(DiscardWorkspace{});
-  }
-  // If workspace was empty, still clear it defensively via next_state.
-  // (Effect handlers also clear it, but this ensures consistency.)
-  // NOTE: We do NOT clear next_state.workspace here — the effect handlers
-  // (CommitWorkspace / DiscardWorkspace) will clear dialogue_state_.workspace
-  // when they execute.
-
   effects.push_back(CancelLlm{});
   effects.push_back(RecordInterruptMemory{});
   effects.push_back(ScheduleTimer{
@@ -115,7 +84,6 @@ DialogueDecision DefaultDialogueReducer::HandleInterrupt(
       "debounce",
       now + config_.debounce_duration});
 
-  // If we were awaiting tool results, cancel the tool call timeout timer.
   if (state.deliberation == DeliberationPhase::kAwaitingToolResults) {
     effects.push_back(CancelTimer{"tool_call_timeout"});
   }
@@ -124,7 +92,7 @@ DialogueDecision DefaultDialogueReducer::HandleInterrupt(
 }
 
 // ---------------------------------------------------------------------------
-// HandleDebounceCooldownExpired (Phase 1 — unchanged)
+// HandleDebounceCooldownExpired
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleDebounceCooldownExpired(
@@ -134,11 +102,6 @@ DialogueDecision DefaultDialogueReducer::HandleDebounceCooldownExpired(
   next.cooldown = CooldownPhase::kNone;
 
   std::vector<DialogueEffect> effects;
-
-  // Phase 3: commit workspace fragments (merged) before continuation.
-  // The workspace stays populated in next_state so the CommitWorkspace effect
-  // handler can read it.  The effect handler clears the workspace after commit.
-  effects.push_back(CommitWorkspace{true});
 
   if (IsBudgetExhausted(next, now)) {
     effects.push_back(SignalBudgetExhausted{});
@@ -150,125 +113,60 @@ DialogueDecision DefaultDialogueReducer::HandleDebounceCooldownExpired(
 }
 
 // ---------------------------------------------------------------------------
-// HandleUserMessage (Task 4.2 — renamed from HandleUserMessageDuringDebounce)
+// HandleConversationItemReceived
 // ---------------------------------------------------------------------------
 
-DialogueDecision DefaultDialogueReducer::HandleUserMessage(
+DialogueDecision DefaultDialogueReducer::HandleConversationItemReceived(
     const DialogueState& state,
-    const UserMessageReceived& event) const {
-  // --- Debounce path (Phase 3: buffer to workspace instead of RecordMemory) ---
+    const ConversationItemReceived& event) const {
+  // During debounce, record the item and stay in debounce.
   if (state.cooldown == CooldownPhase::kDebouncing) {
     auto next = state;
-
-    WorkspaceEntry entry;
-    entry.content = event.observation.content;
-    entry.source = event.observation.source;
-    entry.entry_type = MemoryEntryType::kUserMessage;
-    entry.timestamp = event.now;
-    next.workspace.user_fragments.push_back(entry);
+    next.last_activity = event.now;
+    next.conversation_active = true;
 
     std::vector<DialogueEffect> effects;
-    effects.push_back(BufferToWorkspace{entry, true});
+    effects.push_back(RecordConversationItem{event.item});
     return {next, effects};
   }
 
-  // --- Normal path (cooldown == kNone) ---
-
-  // Superseding message during kAwaitingTurnTrigger:
-  // Cancel the old turn-trigger classification, then process normally.
-  if (state.deliberation == DeliberationPhase::kAwaitingTurnTrigger) {
+  // Turn-trigger filtering is currently disabled. Meaningful conversation items
+  // should respond immediately instead of entering kAwaitingTurnTrigger.
+  if (state.deliberation == DeliberationPhase::kIdle ||
+      state.deliberation == DeliberationPhase::kAwaitingTurnTrigger) {
     auto next = state;
     next.conversation_active = true;
     next.last_activity = event.now;
 
     std::vector<DialogueEffect> effects;
 
-    // Cancel the old classification.
-    effects.push_back(CancelTurnTriggerClassification{
-        state.pending_turn_trigger_id});
-
-    // Reset per-turn counters for the new turn.
+    // Reset per-turn counters.
     next.turn_llm_calls = 0;
     next.turn_prompt_tokens = 0;
     next.turn_completion_tokens = 0;
     next.turn_action_count = 0;
     next.turn_continuation_count = 0;
 
-    // Buffer to workspace then commit immediately (Phase 3).
-    // The workspace is populated in next_state so the CommitWorkspace effect
-    // handler can read it.  The effect handler clears the workspace after commit.
-    WorkspaceEntry entry;
-    entry.content = event.observation.content;
-    entry.source = event.observation.source;
-    entry.entry_type = MemoryEntryType::kUserMessage;
-    entry.timestamp = event.now;
-    next.workspace.user_fragments.push_back(entry);
-    effects.push_back(BufferToWorkspace{entry, false});
-    effects.push_back(CommitWorkspace{false});
+    next.pending_turn_trigger_id = 0;
+    next.deliberation = DeliberationPhase::kThinking;
 
-    // Start fresh turn-trigger classification with new id.
-    uint64_t new_id = NextTurnTriggerId(state);
-    next.next_turn_trigger_id = new_id;
-    next.pending_turn_trigger_id = new_id;
-    next.deliberation = DeliberationPhase::kAwaitingTurnTrigger;
-
-    effects.push_back(StartTurnTriggerClassification{
-        new_id, event.observation});
+    effects.push_back(StartLlmWithBatch{{event.item}});
 
     return {next, effects};
   }
 
-  // Normal idle path (deliberation == kIdle):
-  if (state.deliberation == DeliberationPhase::kIdle) {
-    auto next = state;
-    next.conversation_active = true;
-    next.last_activity = event.now;
-
-    std::vector<DialogueEffect> effects;
-
-    // Reset per-turn counters for the new turn.
-    next.turn_llm_calls = 0;
-    next.turn_prompt_tokens = 0;
-    next.turn_completion_tokens = 0;
-    next.turn_action_count = 0;
-    next.turn_continuation_count = 0;
-
-    // Buffer to workspace then commit immediately (Phase 3).
-    // The workspace is populated in next_state so the CommitWorkspace effect
-    // handler can read it.  The effect handler clears the workspace after commit.
-    WorkspaceEntry entry;
-    entry.content = event.observation.content;
-    entry.source = event.observation.source;
-    entry.entry_type = MemoryEntryType::kUserMessage;
-    entry.timestamp = event.now;
-    next.workspace.user_fragments.push_back(entry);
-    effects.push_back(BufferToWorkspace{entry, false});
-    effects.push_back(CommitWorkspace{false});
-
-    // Start turn-trigger classification.
-    uint64_t new_id = NextTurnTriggerId(state);
-    next.next_turn_trigger_id = new_id;
-    next.pending_turn_trigger_id = new_id;
-    next.deliberation = DeliberationPhase::kAwaitingTurnTrigger;
-
-    effects.push_back(StartTurnTriggerClassification{
-        new_id, event.observation});
-
-    return {next, effects};
-  }
-
-  // Other deliberation states with kNone cooldown: no-op.
+  // Other deliberation states: no-op.
   return {state, {}};
 }
 
 // ---------------------------------------------------------------------------
-// HandleTurnTriggerClassified (Task 4.3)
+// HandleTurnTriggerClassified
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleTurnTriggerClassified(
     const DialogueState& state,
     const TurnTriggerClassified& event) const {
-  // Stale rejection: obs_id does not match pending.
+  // Stale rejection.
   if (event.obs_id != state.pending_turn_trigger_id) {
     return {state, {}};
   }
@@ -278,13 +176,7 @@ DialogueDecision DefaultDialogueReducer::HandleTurnTriggerClassified(
 
   if (event.verdict == TurnTriggerVerdict::kRespondNow) {
     next.deliberation = DeliberationPhase::kThinking;
-    // Build a trigger observation for StartLlm from the original observation.
-    // We use a minimal observation since the real content is already recorded.
-    Observation trigger;
-    trigger.type = ObservationType::kContinuation;
-    trigger.source = "turn_trigger";
-    trigger.timestamp = event.now;
-    return {next, {StartLlm{trigger}}};
+    return {next, {StartLlmContinuation{event.now}}};
   }
 
   // kStoreOnly: message stays in committed history, no assistant turn.
@@ -293,7 +185,7 @@ DialogueDecision DefaultDialogueReducer::HandleTurnTriggerClassified(
 }
 
 // ---------------------------------------------------------------------------
-// HandleLlmCompleted (Task 4.4)
+// HandleLlmCompleted
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleLlmCompleted(
@@ -301,7 +193,6 @@ DialogueDecision DefaultDialogueReducer::HandleLlmCompleted(
     const LlmCompleted& event) const {
   auto next = state;
 
-  // Per-turn token and LLM call accounting.
   next.turn_llm_calls = state.turn_llm_calls + 1;
   next.turn_prompt_tokens = state.turn_prompt_tokens + event.prompt_tokens;
   next.turn_completion_tokens =
@@ -314,14 +205,11 @@ DialogueDecision DefaultDialogueReducer::HandleLlmCompleted(
   switch (event.candidate.type) {
     case ActionType::kToolCall: {
       next.deliberation = DeliberationPhase::kAwaitingToolResults;
-
-      // Populate pending tool call ids from the candidate.
       next.pending_tool_call_ids.clear();
       next.pending_tool_results.clear();
       for (const auto& tc : event.candidate.tool_calls) {
         next.pending_tool_call_ids.push_back(tc.id);
       }
-
       effects.push_back(RecordToolCallDecision{event.candidate});
       effects.push_back(EmitToolCallFrames{event.candidate});
       effects.push_back(ScheduleTimer{
@@ -337,17 +225,12 @@ DialogueDecision DefaultDialogueReducer::HandleLlmCompleted(
     }
     case ActionType::kContinue: {
       next.turn_continuation_count = state.turn_continuation_count + 1;
-      // Check if continuation limit is reached.
       if (next.turn_continuation_count >= config_.max_continuations) {
         next.deliberation = DeliberationPhase::kIdle;
         effects.push_back(SignalBudgetExhausted{});
       } else {
         next.deliberation = DeliberationPhase::kThinking;
-        Observation trigger;
-        trigger.type = ObservationType::kContinuation;
-        trigger.source = "continuation";
-        trigger.timestamp = event.now;
-        effects.push_back(StartLlm{trigger});
+        effects.push_back(StartLlmContinuation{event.now});
       }
       break;
     }
@@ -357,7 +240,7 @@ DialogueDecision DefaultDialogueReducer::HandleLlmCompleted(
 }
 
 // ---------------------------------------------------------------------------
-// HandleLlmFailed (Task 4.5)
+// HandleLlmFailed
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleLlmFailed(
@@ -374,7 +257,7 @@ DialogueDecision DefaultDialogueReducer::HandleLlmFailed(
 }
 
 // ---------------------------------------------------------------------------
-// HandleToolResult (Task 4.6)
+// HandleToolResult
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleToolResult(
@@ -384,13 +267,26 @@ DialogueDecision DefaultDialogueReducer::HandleToolResult(
   next.last_activity = event.now;
   next.conversation_active = true;
 
-  // Record the result keyed by tool call source (e.g., "tool:web_search").
-  // The source field carries the tool call id for pairing.
-  next.pending_tool_results[event.observation.source] =
-      event.observation.content;
+  // Record the result. Pair by tool_call_id when available.
+  std::string result_key;
+  for (const auto& part : event.item.parts) {
+    if (const auto* trp = std::get_if<ToolResultPart>(&part)) {
+      result_key = trp->tool_call_id;
+      if (!result_key.empty()) {
+        break;
+      }
+    }
+  }
+  if (result_key.empty()) {
+    result_key = event.item.item_id;
+  }
+  if (result_key.empty()) {
+    result_key = event.item.actor.actor_id;
+  }
+  next.pending_tool_results[result_key] = "received";
 
   std::vector<DialogueEffect> effects;
-  effects.push_back(RecordToolResult{event.observation});
+  effects.push_back(RecordToolResultItem{event.item});
 
   // Check if all pending tool calls have results.
   bool all_complete = true;
@@ -406,26 +302,15 @@ DialogueDecision DefaultDialogueReducer::HandleToolResult(
     next.deliberation = DeliberationPhase::kThinking;
     next.pending_tool_call_ids.clear();
     next.pending_tool_results.clear();
-
-    // Cancel the tool call timeout timer — all results are in, so the
-    // timeout is no longer needed.  Without this, a stale TimerExpired
-    // {kToolCallTimeout} would fire later and trigger a spurious
-    // RecordTimeoutResults + StartLlm continuation.
     effects.push_back(CancelTimer{"tool_call_timeout"});
-
-    Observation trigger;
-    trigger.type = ObservationType::kContinuation;
-    trigger.source = "tool_results_complete";
-    trigger.timestamp = event.now;
-    effects.push_back(StartLlm{trigger});
+    effects.push_back(StartLlmContinuation{event.now});
   }
-  // Otherwise deliberation stays kAwaitingToolResults.
 
   return {next, effects};
 }
 
 // ---------------------------------------------------------------------------
-// HandleToolCallTimeout (Task 4.7)
+// HandleToolCallTimeout
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleToolCallTimeout(
@@ -438,18 +323,13 @@ DialogueDecision DefaultDialogueReducer::HandleToolCallTimeout(
 
   std::vector<DialogueEffect> effects;
   effects.push_back(RecordTimeoutResults{event.missing_tool_call_ids});
-
-  Observation trigger;
-  trigger.type = ObservationType::kContinuation;
-  trigger.source = "tool_call_timeout";
-  trigger.timestamp = event.now;
-  effects.push_back(StartLlm{trigger});
+  effects.push_back(StartLlmContinuation{event.now});
 
   return {next, effects};
 }
 
 // ---------------------------------------------------------------------------
-// HandleTimerExpired (Task 4.9)
+// HandleTimerExpired
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleTimerExpired(
@@ -459,7 +339,6 @@ DialogueDecision DefaultDialogueReducer::HandleTimerExpired(
     case TimerKind::kDebounce:
       return HandleDebounceCooldownExpired(state, event.now);
     case TimerKind::kToolCallTimeout: {
-      // Compute missing tool call ids from pending state.
       std::vector<std::string> missing;
       for (const auto& id : state.pending_tool_call_ids) {
         if (state.pending_tool_results.find(id) ==
@@ -467,24 +346,18 @@ DialogueDecision DefaultDialogueReducer::HandleTimerExpired(
           missing.push_back(id);
         }
       }
-      return HandleToolCallTimeout(
-          state, ToolCallTimeout{missing, event.now});
+      return HandleToolCallTimeout(state, ToolCallTimeout{missing, event.now});
     }
     case TimerKind::kConversationIdle:
-      // Declared for forward compatibility — not emitted in Phase 2.
       return {state, {}};
     case TimerKind::kAggregationTimeout:
-      // Phase 3: The reducer cannot call the aggregator (purity).
-      // Controller's timer handler calls CheckTimeout() and feeds the
-      // result back as AggregationTimeout.  Return no-op here.
       return {state, {}};
   }
-  // Unreachable, but satisfy compiler.
   return {state, {}};
 }
 
 // ---------------------------------------------------------------------------
-// HandleSystemEvent (Task 4.10)
+// HandleSystemEvent
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleSystemEvent(
@@ -500,23 +373,14 @@ DialogueDecision DefaultDialogueReducer::HandleSystemEvent(
   next.deliberation = DeliberationPhase::kThinking;
 
   std::vector<DialogueEffect> effects;
-  effects.push_back(RecordMemory{event.observation});
-
-  // Use a continuation trigger for StartLlm — the real system event content
-  // is already recorded via RecordMemory above.  Passing the raw observation
-  // would cause HandleThinking's legacy kSystemEvent branch to record it a
-  // second time.
-  Observation trigger;
-  trigger.type = ObservationType::kContinuation;
-  trigger.source = event.observation.source;
-  trigger.timestamp = event.now;
-  effects.push_back(StartLlm{trigger});
+  effects.push_back(RecordConversationItem{event.item});
+  effects.push_back(StartLlmContinuation{event.now});
 
   return {next, effects};
 }
 
 // ---------------------------------------------------------------------------
-// HandleContinuation (Task 4.11)
+// HandleContinuation
 // ---------------------------------------------------------------------------
 
 DialogueDecision DefaultDialogueReducer::HandleContinuation(
@@ -530,16 +394,11 @@ DialogueDecision DefaultDialogueReducer::HandleContinuation(
   auto next = state;
   next.deliberation = DeliberationPhase::kThinking;
 
-  Observation trigger;
-  trigger.type = ObservationType::kContinuation;
-  trigger.source = event.source;
-  trigger.timestamp = event.now;
-
-  return {next, {StartLlm{trigger}}};
+  return {next, {StartLlmContinuation{event.now}}};
 }
 
 // ---------------------------------------------------------------------------
-// IsBudgetExhausted (Phase 1 — unchanged)
+// IsBudgetExhausted
 // ---------------------------------------------------------------------------
 
 bool DefaultDialogueReducer::IsBudgetExhausted(
@@ -565,52 +424,6 @@ bool DefaultDialogueReducer::IsBudgetExhausted(
 uint64_t DefaultDialogueReducer::NextTurnTriggerId(
     const DialogueState& state) const {
   return state.next_turn_trigger_id + 1;
-}
-
-// ---------------------------------------------------------------------------
-// HandleUserFragmentReceived (Phase 3 — Task 3.9)
-// ---------------------------------------------------------------------------
-
-DialogueDecision DefaultDialogueReducer::HandleUserFragmentReceived(
-    const DialogueState& state,
-    const UserFragmentReceived& event) const {
-  auto next = state;
-  next.last_activity = event.now;
-  next.conversation_active = true;
-
-  WorkspaceEntry entry;
-  entry.content = event.observation.content;
-  entry.source = event.observation.source;
-  entry.entry_type = MemoryEntryType::kUserMessage;
-  entry.timestamp = event.now;
-  next.workspace.user_fragments.push_back(entry);
-
-  std::vector<DialogueEffect> effects;
-  effects.push_back(BufferToWorkspace{entry, true});
-
-  return {next, effects};
-}
-
-// ---------------------------------------------------------------------------
-// HandleAggregationComplete (Phase 3 — Task 3.7)
-// ---------------------------------------------------------------------------
-
-DialogueDecision DefaultDialogueReducer::HandleAggregationComplete(
-    const DialogueState& state,
-    const AggregationComplete& event) const {
-  UserMessageReceived msg{event.observation, event.now};
-  return HandleUserMessage(state, msg);
-}
-
-// ---------------------------------------------------------------------------
-// HandleAggregationTimeout (Phase 3 — Task 3.8)
-// ---------------------------------------------------------------------------
-
-DialogueDecision DefaultDialogueReducer::HandleAggregationTimeout(
-    const DialogueState& state,
-    const AggregationTimeout& event) const {
-  UserMessageReceived msg{event.observation, event.now};
-  return HandleUserMessage(state, msg);
 }
 
 }  // namespace shizuru::core::dialogue

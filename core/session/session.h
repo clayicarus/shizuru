@@ -9,13 +9,12 @@
 #include "controller/config.h"
 #include "controller/controller.h"
 #include "controller/types.h"
+#include "core/conversation_item.h"
+#include "core/history.h"
 #include "interfaces/audit_sink.h"
 #include "interfaces/llm_client.h"
-#include "interfaces/memory_store.h"
 #include "policy/config.h"
 #include "policy/policy_layer.h"
-#include "strategies/observation_aggregator.h"
-#include "strategies/observation_filter.h"
 #include "strategies/response_filter.h"
 #include "strategies/tts_segment_strategy.h"
 
@@ -32,10 +31,8 @@ class AgentSession {
                std::unique_ptr<LlmClient> llm,
                Controller::EmitFrameCallback emit_frame,
                Controller::CancelCallback cancel,
-               std::unique_ptr<MemoryStore> memory,
+               std::unique_ptr<HistoryStore> history,
                std::unique_ptr<AuditSink> audit,
-               std::unique_ptr<ObservationAggregator> observation_aggregator = nullptr,
-               std::unique_ptr<ObservationFilter> observation_filter = nullptr,
                std::unique_ptr<TtsSegmentStrategy> tts_segment = nullptr,
                std::unique_ptr<ResponseFilter> response_filter = nullptr);
 
@@ -43,18 +40,20 @@ class AgentSession {
 
   void Start();
   void Shutdown();
-  void EnqueueObservation(Observation obs);
+  void EnqueueItem(ConversationItem item);
+  void EnqueueToolResult(ConversationItem item);
+  void EnqueueSystemEvent(ConversationItem item);
   State GetState() const;
 
   const std::string& SessionId() const { return session_id_; }
   Controller& GetController() { return controller_; }
   ContextStrategy& GetContext() { return context_; }
   PolicyLayer& GetPolicy() { return policy_; }
-  MemoryStore& GetMemoryStore() { return *memory_; }
+  HistoryStore& GetHistoryStore() { return *history_; }
 
  private:
   std::string session_id_;
-  std::unique_ptr<MemoryStore> memory_;
+  std::unique_ptr<HistoryStore> history_;
   std::unique_ptr<AuditSink> audit_;
   ContextStrategy context_;
   PolicyLayer policy_;

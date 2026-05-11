@@ -13,8 +13,7 @@
 namespace shizuru::io {
 
 // IoDevice wrapper around AudioRecorder.
-// Emits audio/pcm DataFrames on "audio_out" for each captured AudioFrame.
-// Payload is raw s16le PCM bytes.
+// Emits typed AudioFrames on "audio_out" for each captured recorder frame.
 class AudioCaptureDevice : public IoDevice {
  public:
   AudioCaptureDevice(std::unique_ptr<AudioRecorder> recorder,
@@ -23,6 +22,7 @@ class AudioCaptureDevice : public IoDevice {
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
   void OnInput(const std::string& port_name, DataFrame frame) override;
+  void SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) override;
   void SetOutputCallback(OutputCallback cb) override;
   void Start() override;
   void Stop() override;
@@ -36,6 +36,7 @@ class AudioCaptureDevice : public IoDevice {
 
   mutable std::mutex output_cb_mutex_;
   OutputCallback output_cb_;
+  AudioFrameOutputCallback audio_output_cb_;
 };
 
 }  // namespace shizuru::io

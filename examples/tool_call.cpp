@@ -31,10 +31,12 @@
 #include "runtime/core_device.h"
 #include "runtime/tool_registry.h"
 #include "runtime/tool_dispatch_device.h"
+#include "core/conversation_item.h"
+#include "core/content_part.h"
+#include "services/memory/in_memory_history.h"
 #include "llm/config.h"
 #include "policy/config.h"
 #include "policy/types.h"
-#include "services/memory/in_memory_store.h"
 #include "services/audit/log_audit_sink.h"
 #include "llm/openai/openai_client.h"
 #include "spdlog/common.h"
@@ -258,7 +260,7 @@ int main(int argc, char* argv[]) {
   auto core = std::make_unique<shizuru::runtime::CoreDevice>(
       "core", session_id, ctrl_cfg, ctx_cfg, pol_cfg,
       std::make_unique<shizuru::services::OpenAiClient>(llm_cfg),
-      std::make_unique<shizuru::services::InMemoryStore>(),
+      std::make_unique<shizuru::services::InMemoryHistory>(),
       std::make_unique<shizuru::services::LogAuditSink>());
 
   auto* core_ptr = core.get();
@@ -276,7 +278,7 @@ int main(int argc, char* argv[]) {
   constexpr shizuru::runtime::RouteOptions kDma{.requires_control_plane = false};
   constexpr shizuru::runtime::RouteOptions kCtrl{.requires_control_plane = true};
 
-  runtime.AddRoute({"core", "text_out"}, {"app_output", "text_in"}, kDma);
+  runtime.AddRoute({"core", "item_out"}, {"app_output", "item_in"}, kDma);
   runtime.AddRoute({"core", "action_out"},
                    {"tool_dispatch", shizuru::runtime::ToolDispatchDevice::kActionIn}, kCtrl);
   runtime.AddRoute({"tool_dispatch", shizuru::runtime::ToolDispatchDevice::kResultOut},
@@ -287,12 +289,17 @@ int main(int argc, char* argv[]) {
   std::condition_variable resp_cv;
   std::atomic<bool>     waiting{false};
 
-  runtime.OnFrameSink([&](shizuru::io::DataFrame frame) {
-    if (frame.type != "text/plain") { return; }
-    bool is_partial = (frame.metadata.count("streaming") != 0 &&
-                       frame.metadata.at("streaming") == "1");
-    if (is_partial) { return; }  // Only show final response
-    std::string text(frame.payload.begin(), frame.payload.end());
+  runtime.OnConversationItemSink([&](shizuru::core::ConversationItem item) {
+    if (item.kind != shizuru::core::ConversationItemKind::kAssistantMessage) {
+      return;
+    }
+    std::string text;
+    for (const auto& part : item.parts) {
+      if (auto* tp = std::get_if<shizuru::core::TextPart>(&part)) {
+        text += tp->text;
+      }
+    }
+    if (text.empty()) { return; }
     std::printf("\n[agent] %s\n", text.c_str());
     std::fflush(stdout);
     {
@@ -328,11 +335,16 @@ int main(int argc, char* argv[]) {
     // Send and wait for response.
     waiting.store(true);
     {
-      shizuru::io::DataFrame frame;
-      frame.type = "text/plain";
-      frame.payload.assign(line.begin(), line.end());
-      frame.timestamp = std::chrono::steady_clock::now();
-      core_ptr->OnInput("text_in", std::move(frame));
+      shizuru::core::ConversationItem item;
+      item.item_id = "stdin:" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count());
+      item.conversation_id = session_id;
+      item.kind = shizuru::core::ConversationItemKind::kUserMessage;
+      item.actor = shizuru::core::ActorRef{"local-user", "User",
+                                           shizuru::core::ActorKind::kHuman};
+      item.parts.emplace_back(shizuru::core::TextPart{line});
+      item.wall_time = std::chrono::system_clock::now();
+      core_ptr->OnConversationItem(std::move(item));
     }
 
     {

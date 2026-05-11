@@ -39,7 +39,6 @@
 #include <spdlog/spdlog.h>
 #include "async_logger.h"
 #include "io/io_device.h"
-#include "io/data_frame.h"
 #include "io/probe/log_device.h"
 #include "io/probe/pcm_dump_device.h"
 #include "audio/audio_capture_device.h"

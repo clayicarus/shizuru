@@ -2,24 +2,26 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "core/control_signal.h"
 #include "io/io_device.h"
 #include "runtime/tool_registry.h"
 
 namespace shizuru::runtime {
 
+// Callback for delivering ToolResultSignal to Core.
+using ToolResultCallback = std::function<void(core::ToolResultSignal)>;
+
 // IoDevice that executes tool calls on a worker thread and emits results.
-// Receives action/tool_call frames on action_in, emits action/tool_result
-// frames on result_out.
-//
-// Conceptually a DMA controller: the CPU (Controller) issues an IO request
-// (tool call), the DMA controller dispatches it to the appropriate handler
-// (tool function), and signals completion via interrupt (result frame).
+// After execution, emits a ToolResultSignal via the on_result_ callback.
+// Tool Executor does NOT construct ConversationItem — that is Core's job
+// (requirement 9.1, 9.2).
 class ToolDispatchDevice : public io::IoDevice {
  public:
   explicit ToolDispatchDevice(ToolRegistry& registry,
@@ -29,9 +31,14 @@ class ToolDispatchDevice : public io::IoDevice {
   std::string GetDeviceId() const override;
   std::vector<io::PortDescriptor> GetPortDescriptors() const override;
   void OnInput(const std::string& port_name, io::DataFrame frame) override;
+  void OnControlSignal(const std::string& port_name,
+                       core::ControlSignal signal) override;
   void SetOutputCallback(io::OutputCallback cb) override;
   void Start() override;
   void Stop() override;
+
+  // Register callback for delivering tool results as ControlSignals.
+  void SetOnResultCallback(ToolResultCallback cb);
 
   static constexpr char kActionIn[]  = "action_in";
   static constexpr char kResultOut[] = "result_out";
@@ -45,6 +52,9 @@ class ToolDispatchDevice : public io::IoDevice {
 
   io::OutputCallback output_cb_;
   mutable std::mutex output_cb_mutex_;
+
+  std::mutex on_result_mutex_;
+  ToolResultCallback on_result_;
 
   std::mutex worker_mutex_;
   std::condition_variable worker_cv_;

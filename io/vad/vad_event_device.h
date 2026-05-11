@@ -3,8 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "io/control_frame.h"
-#include "io/interrupt_frame.h"
+#include "core/control_signal.h"
 #include "io/io_device.h"
 
 namespace shizuru::io {
@@ -16,10 +15,12 @@ namespace shizuru::io {
 //   Output "vad_out"        — raw vad/event passthrough for observability
 //   Output "interrupt_out"  — interrupt/request frames for barge-in handling
 //   Output "control_out"    — control/command frames for device-side actions
+//   Output "interrupt_signal_out" — typed InterruptSignal for Core
+//   Output "control_signal_out"   — typed FlushSignal for ASR
 //
 // Mapping:
-//   speech_start → interrupt_out (reason=barge_in, source=voice)
-//   speech_end   → control_out   (command=flush)
+//   speech_start → interrupt_out + interrupt_signal_out
+//   speech_end   → control_out   + control_signal_out
 //   other events → vad_out only
 class VadEventDevice : public IoDevice {
  public:
@@ -29,6 +30,7 @@ class VadEventDevice : public IoDevice {
   std::vector<PortDescriptor> GetPortDescriptors() const override;
   void OnInput(const std::string& port_name, DataFrame frame) override;
   void SetOutputCallback(OutputCallback cb) override;
+  void SetControlSignalOutputCallback(ControlSignalOutputCallback cb) override;
   void Start() override;
   void Stop() override;
 
@@ -36,14 +38,19 @@ class VadEventDevice : public IoDevice {
   static constexpr char kVadOut[] = "vad_out";
   static constexpr char kInterruptOut[] = "interrupt_out";
   static constexpr char kControlOut[] = "control_out";
+  static constexpr char kInterruptSignalOut[] = "interrupt_signal_out";
+  static constexpr char kControlSignalOut[] = "control_signal_out";
 
  private:
   void EmitRawVadEvent(const DataFrame& frame);
   void EmitInterrupt();
   void EmitControl(std::string_view command);
+  void EmitInterruptSignal();
+  void EmitFlushSignal();
 
   std::string device_id_;
   OutputCallback output_cb_;
+  ControlSignalOutputCallback signal_output_cb_;
 };
 
 }  // namespace shizuru::io

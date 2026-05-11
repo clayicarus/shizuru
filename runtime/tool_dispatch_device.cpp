@@ -6,7 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "io/data_frame.h"
+#include "async_logger.h"
 
 namespace shizuru::runtime {
 
@@ -24,6 +24,8 @@ std::string ToolDispatchDevice::GetDeviceId() const {
 
 std::vector<io::PortDescriptor> ToolDispatchDevice::GetPortDescriptors() const {
   return {
+      {"control_in", io::PortDirection::kInput, "",
+       runtime::PortPayloadKind::kControlSignal},
       {kActionIn,  io::PortDirection::kInput,  "action/tool_call"},
       {kResultOut, io::PortDirection::kOutput, "action/tool_result"},
   };
@@ -39,9 +41,40 @@ void ToolDispatchDevice::OnInput(const std::string& port_name,
   worker_cv_.notify_one();
 }
 
+void ToolDispatchDevice::OnControlSignal(const std::string& port_name,
+                                         core::ControlSignal signal) {
+  (void)port_name;
+  if (auto* tcs = std::get_if<core::ToolCallStartSignal>(&signal)) {
+    LOG_INFO("ToolDispatchDevice: control_in received tool_call name='{}' id='{}'",
+             tcs->name, tcs->tool_call_id);
+    auto args = nlohmann::json::parse(tcs->arguments, nullptr, false);
+    if (args.is_discarded()) {
+      args = nlohmann::json::object();
+    }
+    nlohmann::json request = {
+        {"tool_call_id", tcs->tool_call_id},
+        {"tool_name", tcs->name},
+        {"arguments", std::move(args)},
+    };
+    io::DataFrame frame;
+    frame.type = "action/tool_call";
+    const auto payload = request.dump();
+    frame.payload = std::vector<uint8_t>(payload.begin(), payload.end());
+    frame.metadata["tool_call_id"] = tcs->tool_call_id;
+    frame.metadata["tool_name"] = tcs->name;
+    frame.timestamp = std::chrono::steady_clock::now();
+    OnInput(kActionIn, std::move(frame));
+  }
+}
+
 void ToolDispatchDevice::SetOutputCallback(io::OutputCallback cb) {
   std::lock_guard<std::mutex> lock(output_cb_mutex_);
   output_cb_ = std::move(cb);
+}
+
+void ToolDispatchDevice::SetOnResultCallback(ToolResultCallback cb) {
+  std::lock_guard<std::mutex> lock(on_result_mutex_);
+  on_result_ = std::move(cb);
 }
 
 void ToolDispatchDevice::Start() {
@@ -187,6 +220,26 @@ void ToolDispatchDevice::Dispatch(io::DataFrame frame) {
     result_json["tool_call_id"] = tool_call_id;
   }
 
+  // Emit ToolResultSignal to Core (new semantic path).
+  {
+    core::ToolResultSignal signal;
+    signal.tool_call_id = tool_call_id;
+    signal.content = result_json.dump();
+    signal.success = result_json.value("success", false);
+
+    ToolResultCallback result_cb;
+    {
+      std::lock_guard<std::mutex> lock(on_result_mutex_);
+      result_cb = on_result_;
+    }
+    if (result_cb) {
+      LOG_INFO("ToolDispatchDevice: delivering tool result id='{}' success={}",
+               signal.tool_call_id, signal.success);
+      result_cb(std::move(signal));
+    }
+  }
+
+  // Legacy DataFrame output (for backward compatibility during migration).
   io::DataFrame result_frame;
   result_frame.type = "action/tool_result";
   const auto result_body = result_json.dump();

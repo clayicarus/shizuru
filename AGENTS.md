@@ -53,17 +53,39 @@ utils/        Shared utilities (async logger)
 
 ## Key Design Decisions
 
+### Unified Semantic Pipeline
+The system uses a clear four-layer architecture:
+- **Perception Layer**: Raw signal capture (audio, WebSocket, UI input)
+- **Interpretation Layer**: Converts raw signals to `ConversationItem` (source-final semantic units)
+- **Semantic Layer**: `ConversationItem`, `InvokeBatch`, `ControlSignal` — shared architecture boundary types
+- **Reasoning Layer**: Core batching, LLM invocation, output interpretation, history, provider render
+
+Key types:
+- `core::ConversationItem` — the single semantic unit for all conversation events
+- `core::InvokeBatch` — one LLM call's input (groups multiple ConversationItems)
+- `core::ControlSignal` — control plane events (flush, cancel, interrupt, tool results)
+- `core::ContentPart` — variant of TextPart, ImagePart, AudioPart, ToolCallPart, ToolResultPart
+
 ### AgentRuntime is a pure device bus
 Zero business logic. Registers devices, manages routes, dispatches frames, controls lifecycle. Session assembly (creating CoreDevice, wiring routes, registering tools) lives in `app/assembly/AppRuntime`.
 
-### ToolDispatchDevice is a DMA controller
-Lives in `runtime/`, not `io/`. Bridges the agent reasoning loop with external capabilities. Tool functions may have side effects (writing to scheduler, database) — this is the DMA layer's implementation detail, not the CPU's concern.
+### ToolDispatchDevice emits ControlSignals only
+Lives in `runtime/`, not `io/`. Executes tool calls and returns `ToolResultSignal` to Core. Core constructs the `ConversationItem(kToolResult)` for history — the tool executor never constructs semantic items (requirement 9.1-9.3).
+
+### Interpreters output ConversationItem directly
+- OneBot parser → `ConversationItem` (with actor, parts, mentions, reply_to)
+- Flutter input adapter → `ConversationItem`
+- ASR adapter → `ConversationItem` (only on final result; partials stay internal)
+- Scheduler adapter → `ConversationItem(kSystemEvent)`
+
+### Core is the sole batching decision maker
+Whether to combine multiple ConversationItems into one LLM call is Core's decision. Source adapters must not do cross-actor aggregation (requirement 7.1-7.3).
+
+### Provider payload is a terminal projection
+Internal models are never collapsed into provider format. The `provider_render` module projects `InvokeBatch` + history into OpenAI messages JSON at the boundary.
 
 ### Strategies are pluggable
-ObservationFilter, ObservationAggregator, TtsSegmentStrategy, ResponseFilter are injected via constructor. Defaults are used when null. Strategies may own their own LlmClient for classification.
-
-### Core as the sole decision center
-All semantic decisions are made inside `core/` (Controller + strategies). IO devices do not make semantic judgments. The only exception is ToolDispatchDevice, which dispatches tool calls but does not decide whether to call them.
+TtsSegmentStrategy, ResponseFilter are injected via constructor. Defaults are used when null.
 
 ### Audio devices require explicit start
 Registered with `DeviceOptions{.auto_start = false}`. Started manually by the bridge after platform permissions are granted.
@@ -83,12 +105,11 @@ services/
 
 ## Known Issues / TODO
 
-- **Internal event type**: LLM cannot distinguish user input from system events (reminders, followups) in the context window. Need `kInternalEvent` MemoryEntryType mapped to `role: "system"` in conversation history.
-- **Turn-trigger filter is temporarily disabled**: Controller currently bypasses semantic turn-trigger filtering and treats all meaningful observations as respond-now. Re-enable only after there is a robust, cancellable classifier path with explicit shutdown semantics.
-- **Persistence is the current top priority**: Introduce the SQLite-backed MemoryStore and store real session/user data before adding more behavioral complexity.
-- **Interaction meters are deferred**: Add session-scoped meters (for example reply threshold, text input rate, speech rate, emotional pressure) after persistence is in place, so dialogue policy can consume stable signal snapshots instead of ad-hoc heuristics.
+- **OneBot 11 protocol reference**: https://github.com/botuniverse/onebot-11 — Event/API schema: https://api.luckylillia.com/doc-7202281
+
+- **Integration compilation**: The unified pipeline refactoring introduced new types but several existing files (context_strategy.cpp, default_reducer.cpp, controller.cpp, session.cpp) still reference deleted types and need to be rewritten to use the new ConversationItem-based interfaces.
+- **Turn-trigger filter is temporarily disabled**: Controller currently bypasses semantic turn-trigger filtering. Re-enable after the dialogue kernel is rebuilt with the new event types.
 - **MaybeSummarize is a stub**: does not actually call LLM for summarization.
 - **Markdown stripping**: LLM sometimes outputs markdown despite prompt instructions.
-- **`<skip/>` response tag is hardcoded in onebot_agent example**: The `<skip/>` tag for "no reply needed" is detected by string matching in the example callback and instructed via system prompt. This should be formalized as a core ResponseFilter (e.g., `SkipTagFilter`) that parses structured response tags and suppresses delivery, so the behavior is reusable across scenarios and not dependent on prompt wording or example-level string matching.
-- **Dual output paths (route vs callback) need consolidation**: CoreDevice emits responses via both IoDevice output ports (`tts_out`) and Controller callbacks (`OnConversationItem`). This creates ambiguity about which path is authoritative for delivery. The route path should be the single delivery mechanism; callbacks should be for observability/UI only, not for driving reply logic.
-- **Unify ConversationItem as the single semantic unit**: Currently `Observation` has both `optional<item>` and `vector<items>`, `WorkspaceEntry` is a separate struct that loses ConversationItem data on commit, and `MemoryEntry` wraps item redundantly. The target: `ConversationItem` gains a `timestamp` field, `WorkspaceEntry` becomes `using WorkspaceEntry = ConversationItem`, `Observation.item`/`items` merge into a single `vector<ConversationItem> items`, and the workspace commit path preserves full item fidelity (actor_name, time, mentions). This eliminates the current bug where structured metadata is lost through the workspace → context pipeline.
+- **`<skip/>` response tag is hardcoded in onebot_agent example**: Should be formalized as a core ResponseFilter.
+- **Dual output paths (route vs callback) need consolidation**: The route path should be the single delivery mechanism; callbacks should be for observability/UI only.

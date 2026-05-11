@@ -6,23 +6,22 @@
 //   [PcmDumpDevice]         pass_out  ──► [EnergyVadDevice]    audio_in
 //   [EnergyVadDevice]       audio_out ──► [PcmDumpDevice]      pass_in   (vad_dump.pcm)
 //   [PcmDumpDevice]         pass_out  ──► [BaiduAsrDevice]     audio_in
-//   [EnergyVadDevice]       vad_out   ──► [VadEventDevice]     vad_in
-//   [BaiduAsrDevice]        text_out  ──► [core]               text_in
-//   [core]                  text_out  ──► app_output (AgentRuntime built-in sink)
+//   [BaiduAsrDevice]        item_out  ──► [core]               item_in
+//   [core]                  item_out  ──► app_output (AgentRuntime built-in sink)
 //   [ElevenLabsTtsDevice]   audio_out ──► [PcmDumpDevice]      pass_in   (playout_dump.pcm)
 //   [PcmDumpDevice]         pass_out  ──► [AudioPlayoutDevice] audio_in
 //
 // Control routes:
 //
-//   [VadEventDevice]        interrupt_out ──► [core]           interrupt_in
-//   [VadEventDevice]        control_out   ──► [BaiduAsrDevice] control_in
-//   [core]                  control_out ► [BaiduAsrDevice]     control_in
-//   [core]                  control_out ► [ElevenLabsTtsDevice] control_in
-//   [core]                  control_out ► [AudioPlayoutDevice] control_in
-//   [core]                  action_out  ► [ToolDispatchDevice] action_in
-//   [ToolDispatchDevice]    result_out  ► [core]               tool_result_in
+//   [EnergyVadDevice]       interrupt_signal_out ──► [core]      control_in
+//   [EnergyVadDevice]       control_signal_out   ──► [BaiduAsrDevice] signal_in
+//   [core]                  signal_out ► [BaiduAsrDevice]      signal_in
+//   [core]                  signal_out ► [ElevenLabsTtsDevice] signal_in
+//   [core]                  signal_out ► [AudioPlayoutDevice]  signal_in
+//   [core]                  signal_out  ► [ToolDispatchDevice] control_in
+//   [ToolDispatchDevice]    ToolResultSignal callback         ► [core]
 //
-// The TTS device is driven by the route core:tts_out → elevenlabs_tts:text_in.
+// The TTS device is driven by the route core:item_out → elevenlabs_tts:item_in.
 // This callback only handles console display of streaming tokens and final text.
 //
 // All audio routes use requires_control_plane = false (DMA path).
@@ -49,11 +48,9 @@
 
 #include <spdlog/spdlog.h>
 #include "async_logger.h"
-#include "io/data_frame.h"
 #include "io/asr/baidu/baidu_asr_device.h"
 #include "io/tts/elevenlabs/elevenlabs_tts_device.h"
 #include "io/vad/energy_vad_device.h"
-#include "io/vad/vad_event_device.h"
 #include "audio/audio_capture_device.h"
 #include "io/probe/pcm_dump_device.h"
 #include "audio/audio_playout_device.h"
@@ -66,12 +63,12 @@
 #include "runtime/route_table.h"
 #include "runtime/tool_registry.h"
 #include "runtime/tool_dispatch_device.h"
+#include "core/conversation_item.h"
+#include "core/content_part.h"
 #include "llm/config.h"
 #include "llm/openai/openai_client.h"
-#include "services/memory/in_memory_store.h"
 #include "services/audit/log_audit_sink.h"
-#include "strategies/llm_observation_filter.h"
-#include "strategies/llm_observation_aggregator.h"
+#include "services/memory/in_memory_history.h"
 #include "strategies/tts_segment_strategy.h"
 #include "strategies/response_filter.h"
 
@@ -80,8 +77,8 @@ using namespace shizuru;
 int main(int argc, char* argv[]) {
   // ── CLI args ──────────────────────────────────────────────────────────────
   bool debug_mode = false;
-  std::string base_url = "https://dashscope.aliyuncs.com";
-  std::string model    = "qwen3.5-35b-a3b";
+  std::string base_url = "https://token-plan-cn.xiaomimimo.com";
+  std::string model    = "mimo-v2.5";
   std::string voice_id;  // empty → ElevenLabsConfig default (Rachel)
 
   for (int i = 1; i < argc; ++i) {
@@ -178,14 +175,10 @@ int main(int argc, char* argv[]) {
   if (!voice_id.empty()) { el_cfg.voice_id = voice_id; }
   auto tts = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
 
-  // VadEventDevice: maps speech_start to interrupt_out and speech_end to
-  // control_out flush, while keeping raw vad_out for observability.
-  auto asr_flush = std::make_unique<io::VadEventDevice>();
-
   // ── LLM config ────────────────────────────────────────────────────────────
   services::OpenAiConfig llm_cfg;
   llm_cfg.base_url        = base_url;
-  llm_cfg.api_path        = "/compatible-mode/v1/chat/completions";
+  llm_cfg.api_path        = "/v1/chat/completions";
   llm_cfg.api_key         = openai_key;
   llm_cfg.model           = model;
   llm_cfg.connect_timeout = std::chrono::seconds(10);
@@ -245,43 +238,8 @@ int main(int argc, char* argv[]) {
   }
 
   // ── Strategy factories ────────────────────────────────────────────────────
-  // ObservationAggregator: LLM-based endpointing — buffers ASR fragments
-  // until the user finishes speaking.
-  auto obs_agg = [=]() {
-    services::OpenAiConfig agg_llm_cfg;
-    agg_llm_cfg.base_url        = base_url;
-    agg_llm_cfg.api_path        = "/compatible-mode/v1/chat/completions";
-    agg_llm_cfg.api_key         = openai_key;
-    agg_llm_cfg.model           = model;
-    agg_llm_cfg.max_tokens      = 8;
-    agg_llm_cfg.temperature     = 0.0;
-    agg_llm_cfg.connect_timeout = std::chrono::seconds(5);
-    agg_llm_cfg.read_timeout    = std::chrono::seconds(10);
-
-    core::LlmAggregatorConfig agg_cfg;
-    agg_cfg.aggregation_timeout = std::chrono::milliseconds(5000);
-    agg_cfg.llm_timeout         = std::chrono::milliseconds(2000);
-
-    return std::make_unique<core::LlmObservationAggregator>(
-        std::make_unique<services::OpenAiClient>(agg_llm_cfg),
-        std::move(agg_cfg));
-  }();
-
-  // ObservationFilter: LLM-based relevance check — decides if the complete
-  // observation is worth sending to the main LLM.
-  auto obs_filter = [=]() {
-    services::OpenAiConfig filter_llm_cfg;
-    filter_llm_cfg.base_url        = base_url;
-    filter_llm_cfg.api_path        = "/compatible-mode/v1/chat/completions";
-    filter_llm_cfg.api_key         = openai_key;
-    filter_llm_cfg.model           = model;
-    filter_llm_cfg.max_tokens      = 8;
-    filter_llm_cfg.temperature     = 0.0;
-    filter_llm_cfg.connect_timeout = std::chrono::seconds(5);
-    filter_llm_cfg.read_timeout    = std::chrono::seconds(10);
-    return std::make_unique<core::LlmObservationFilter>(
-        std::make_unique<services::OpenAiClient>(filter_llm_cfg));
-  }();
+  // ObservationAggregator and ObservationFilter removed in unified pipeline.
+  // Messages are now delivered directly as ConversationItems.
 
   // TtsSegmentStrategy: punctuation-based sentence segmentation for TTS.
   auto tts_seg = []() {
@@ -389,10 +347,8 @@ int main(int argc, char* argv[]) {
   auto core = std::make_unique<runtime::CoreDevice>(
       "core", session_id, ctrl_cfg, ctx_cfg, pol_cfg,
       std::make_unique<services::OpenAiClient>(llm_cfg),
-      std::make_unique<services::InMemoryStore>(),
+      std::make_unique<services::InMemoryHistory>(),
       std::make_unique<services::LogAuditSink>(),
-      std::move(obs_agg),
-      std::move(obs_filter),
       std::move(tts_seg),
       std::move(resp_filter));
 
@@ -422,6 +378,11 @@ int main(int argc, char* argv[]) {
 
   // ── Create ToolDispatchDevice ─────────────────────────────────────────────
   auto tool_dispatch = std::make_unique<runtime::ToolDispatchDevice>(tools);
+  tool_dispatch->SetOnResultCallback([core_ptr](core::ToolResultSignal signal) {
+    if (core_ptr) {
+      core_ptr->OnControl(std::move(signal));
+    }
+  });
 
   // ── AgentRuntime (pure device bus) ────────────────────────────────────────
   runtime::AgentRuntime runtime;
@@ -434,7 +395,6 @@ int main(int argc, char* argv[]) {
   runtime.RegisterDevice(std::move(capture_dump));
   runtime.RegisterDevice(std::move(vad));
   runtime.RegisterDevice(std::move(vad_dump));
-  runtime.RegisterDevice(std::move(asr_flush));
   runtime.RegisterDevice(std::move(asr));
   runtime.RegisterDevice(std::move(tts));
   runtime.RegisterDevice(std::move(playout_dump));
@@ -458,13 +418,9 @@ int main(int argc, char* argv[]) {
   runtime.AddRoute({"vad_dump", io::PcmDumpDevice::kPassOut},
                    {"baidu_asr","audio_in"}, kDma);
 
-  // vad vad_out (events) → asr_flush adapter
-  runtime.AddRoute({"vad",       io::EnergyVadDevice::kVadOut},
-                   {"vad_event", io::VadEventDevice::kVadIn}, kDma);
-
-  // asr text_out → core text_in (LLM reasoning)
-  runtime.AddRoute({"baidu_asr", "text_out"},
-                   {"core",      "text_in"}, kDma);
+  // asr item_out → core item_in (final semantic ASR output)
+  runtime.AddRoute({"baidu_asr", "item_out"},
+                   {"core",      "item_in"}, kDma);
 
   // tts audio_out → playout_dump → playout
   runtime.AddRoute({"elevenlabs_tts", "audio_out"},
@@ -472,47 +428,44 @@ int main(int argc, char* argv[]) {
   runtime.AddRoute({"playout_dump",   io::PcmDumpDevice::kPassOut},
                    {"audio_playout",  "audio_in"}, kDma);
 
-  // Core output → app_output sink (for console display)
-  runtime.AddRoute({"core", "text_out"},
-                   {"app_output", "text_in"}, kDma);
+  // Core semantic output → app_output sink (for console display)
+  runtime.AddRoute({"core", "item_out"},
+                   {"app_output", "item_in"}, kDma);
 
-  // TTS segment route
-  runtime.AddRoute({"core", "tts_out"},
-                   {"elevenlabs_tts", "text_in"}, kDma);
+  // TTS route
+  runtime.AddRoute({"core", "item_out"},
+                   {"elevenlabs_tts", "item_in"}, kDma);
 
-  // Tool call round-trip (control plane)
-  runtime.AddRoute({"core", "action_out"},
-                   {"tool_dispatch", runtime::ToolDispatchDevice::kActionIn}, kCtrl);
-  runtime.AddRoute({"tool_dispatch", runtime::ToolDispatchDevice::kResultOut},
-                   {"core", "tool_result_in"}, kCtrl);
+  // Tool call round-trip (typed control plane)
+  runtime.AddRoute({"core", "signal_out"},
+                   {"tool_dispatch", "control_in"}, kCtrl);
 
-  // VAD adapter → ASR/core
-  runtime.AddRoute({"vad_event", io::VadEventDevice::kControlOut},
-                   {"baidu_asr", "control_in"}, kCtrl);
-  runtime.AddRoute({"vad_event", io::VadEventDevice::kInterruptOut},
-                   {"core", "interrupt_in"}, kDma);
+  // VAD → ASR/core (typed control plane)
+  runtime.AddRoute({"vad", io::EnergyVadDevice::kControlSignalOut},
+                   {"baidu_asr", "signal_in"}, kCtrl);
+  runtime.AddRoute({"vad", io::EnergyVadDevice::kInterruptSignalOut},
+                   {"core", "control_in"}, kCtrl);
 
-  // Control plane: core controls ASR, TTS, and playout
-  runtime.AddRoute({"core", "control_out"},
-                   {"baidu_asr", "control_in"}, kCtrl);
-  runtime.AddRoute({"core", "control_out"},
-                   {"elevenlabs_tts", "control_in"}, kCtrl);
-  runtime.AddRoute({"core", "control_out"},
-                   {"audio_playout", "control_in"}, kCtrl);
+  // Control plane: core controls ASR, TTS, and playout via typed signals.
+  runtime.AddRoute({"core", "signal_out"},
+                   {"baidu_asr", "signal_in"}, kCtrl);
+  runtime.AddRoute({"core", "signal_out"},
+                   {"elevenlabs_tts", "signal_in"}, kCtrl);
+  runtime.AddRoute({"core", "signal_out"},
+                   {"audio_playout", "signal_in"}, kCtrl);
 
   // ── Output callback: display only ──────────────────────────────────────────
-  // TTS is now driven by the route core:tts_out → elevenlabs_tts:text_in.
+  // TTS is now driven by the route core:item_out → elevenlabs_tts:item_in.
   // This callback only handles console display of streaming tokens and final text.
-  runtime.OnFrameSink([](io::DataFrame frame) {
-    if (frame.type != "text/plain") { return; }
-    std::string text(frame.payload.begin(), frame.payload.end());
-    bool is_partial = (frame.metadata.count("streaming") != 0 &&
-                       frame.metadata.at("streaming") == "1");
-    if (is_partial) {
-      std::printf("%s", text.c_str());
-      std::fflush(stdout);
-      return;
+  runtime.OnConversationItemSink([](core::ConversationItem item) {
+    if (item.kind != core::ConversationItemKind::kAssistantMessage) { return; }
+    std::string text;
+    for (const auto& part : item.parts) {
+      if (auto* tp = std::get_if<core::TextPart>(&part)) {
+        text += tp->text;
+      }
     }
+    if (text.empty()) { return; }
     std::printf("\n[agent] %s\n", text.c_str());
     std::fflush(stdout);
   });
@@ -539,12 +492,16 @@ int main(int argc, char* argv[]) {
     if (line == "q") { break; }
     if (line.empty()) { continue; }
 
-    // Build a text/plain DataFrame and send directly to CoreDevice.
-    io::DataFrame frame;
-    frame.type = "text/plain";
-    frame.payload.assign(line.begin(), line.end());
-    frame.timestamp = std::chrono::steady_clock::now();
-    core_ptr->OnInput("text_in", std::move(frame));
+    // Build a ConversationItem and send to CoreDevice.
+    core::ConversationItem item;
+    item.item_id = "stdin:" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    item.conversation_id = session_id;
+    item.kind = core::ConversationItemKind::kUserMessage;
+    item.actor = core::ActorRef{"local-user", "User", core::ActorKind::kHuman};
+    item.parts.emplace_back(core::TextPart{line});
+    item.wall_time = std::chrono::system_clock::now();
+    core_ptr->OnConversationItem(std::move(item));
   }
 
   // Stop audio devices before Shutdown() to avoid deadlock: PortAudio's

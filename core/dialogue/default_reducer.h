@@ -18,7 +18,7 @@ class DefaultDialogueReducer : public DialogueReducer {
   // Immutable config snapshot — no references to Controller.
   ControllerConfig config_;
 
-  // --- Phase 1 handlers (updated for Phase 2) ---
+  // --- Event handlers ---
   DialogueDecision HandleInterrupt(
       const DialogueState& state,
       std::chrono::steady_clock::time_point now) const;
@@ -27,13 +27,10 @@ class DefaultDialogueReducer : public DialogueReducer {
       const DialogueState& state,
       std::chrono::steady_clock::time_point now) const;
 
-  // Renamed from HandleUserMessageDuringDebounce — now handles both
-  // debounce and normal paths.
-  DialogueDecision HandleUserMessage(
+  DialogueDecision HandleConversationItemReceived(
       const DialogueState& state,
-      const UserMessageReceived& event) const;
+      const ConversationItemReceived& event) const;
 
-  // --- Phase 2 handlers (new) ---
   DialogueDecision HandleSystemEvent(
       const DialogueState& state,
       const SystemEventReceived& event) const;
@@ -66,25 +63,11 @@ class DefaultDialogueReducer : public DialogueReducer {
       const DialogueState& state,
       const TurnTriggerClassified& event) const;
 
-  // --- Phase 3 handlers (new) ---
-  DialogueDecision HandleUserFragmentReceived(
-      const DialogueState& state,
-      const UserFragmentReceived& event) const;
-
-  DialogueDecision HandleAggregationComplete(
-      const DialogueState& state,
-      const AggregationComplete& event) const;
-
-  DialogueDecision HandleAggregationTimeout(
-      const DialogueState& state,
-      const AggregationTimeout& event) const;
-
   // Budget check — pure, returns whether any limit is exceeded.
   bool IsBudgetExhausted(const DialogueState& state,
                          std::chrono::steady_clock::time_point now) const;
 
   // Returns ++state.next_turn_trigger_id (applied to next_state).
-  // This counter is monotonic and never reset, even on interrupt.
   uint64_t NextTurnTriggerId(const DialogueState& state) const;
 };
 

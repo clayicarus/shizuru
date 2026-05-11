@@ -1,53 +1,42 @@
 #pragma once
 
-// app/memory/sqlite_memory_store.h — SQLite-backed MemoryStore.
+// app/memory/sqlite_memory_store.h — SQLite-backed HistoryStore.
 //
-// Implements core::MemoryStore with persistent storage.
-// Data survives process restarts and can be synced across devices.
+// Implements core::HistoryStore with persistent storage.
+// ConversationItems are serialized to JSON for storage.
 //
-// Schema (single table, simple):
-//   CREATE TABLE memory (
+// Schema:
+//   CREATE TABLE history (
 //     id INTEGER PRIMARY KEY AUTOINCREMENT,
-//     session_key TEXT NOT NULL,
-//     type INTEGER NOT NULL,        -- MemoryEntryType ordinal
-//     role TEXT NOT NULL,
-//     content TEXT NOT NULL,
-//     source_tag TEXT DEFAULT '',
-//     tool_call_id TEXT DEFAULT '',
-//     tool_calls_json TEXT DEFAULT '',
-//     item_json TEXT DEFAULT '',
-//     created_at_ms INTEGER NOT NULL, -- milliseconds since epoch
-//     estimated_tokens INTEGER DEFAULT 0
+//     session_id TEXT NOT NULL,
+//     item_id TEXT NOT NULL,
+//     kind INTEGER NOT NULL,
+//     item_json TEXT NOT NULL,
+//     created_at_ms INTEGER NOT NULL
 //   );
-//
-// The session_id parameter in MemoryStore methods maps to session_key here.
-// AppRuntime may choose to pass a stable user_id as the session key for
-// persistent history.
 
 #include <memory>
 #include <string>
 
-#include "core/interfaces/memory_store.h"
+#include "core/history.h"
 
 namespace shizuru::app {
 
-class SqliteMemoryStore : public core::MemoryStore {
+class SqliteMemoryStore : public core::HistoryStore {
  public:
   // Opens or creates the database at db_path.
   // If db_path is empty or ":memory:", uses an in-memory database.
   explicit SqliteMemoryStore(const std::string& db_path);
   ~SqliteMemoryStore() override;
 
-  void Append(const std::string& user_id, const core::MemoryEntry& entry) override;
-  std::vector<core::MemoryEntry> GetRecent(const std::string& user_id, size_t count) override;
-  size_t Count(const std::string& user_id) override;
-  // Test-only unbounded read path. Runtime code should use GetRecent().
-  std::vector<core::MemoryEntry> GetAll(const std::string& user_id) override;
-  void Summarize(const std::string& user_id, size_t start_index, size_t end_index,
-                 const core::MemoryEntry& summary) override;
-  void Clear(const std::string& user_id) override;
+  void Append(const std::string& session_id, core::ConversationItem item) override;
+  std::vector<core::ConversationItem> GetWindow(
+      const std::string& session_id, int max_tokens) override;
+  std::vector<core::ConversationItem> GetRecent(
+      const std::string& session_id, size_t max_count) override;
+  void Clear(const std::string& session_id) override;
 
-private:
+ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

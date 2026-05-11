@@ -5,11 +5,8 @@
 namespace shizuru::io {
 
 // Vendor-agnostic TTS device interface.
-// Accepts text DataFrames on "text_in", emits audio DataFrames on "audio_out".
-//
-// Port contract:
-//   Input  "text_in"  — accepts DataFrames with type "text/plain"
-//   Output "audio_out" — emits DataFrames with type "audio/pcm"
+// The semantic pipeline drives TTS with assistant ConversationItems on
+// "item_in"; implementations emit typed AudioFrames on "audio_out".
 class TtsDevice : public IoDevice {
  public:
   // Cancels any in-progress synthesis immediately.

@@ -13,7 +13,8 @@
 #include <thread>
 #include <vector>
 
-#include "io/data_frame.h"
+#include "core/content_part.h"
+#include "core/conversation_item.h"
 #include "tts/tts_client.h"
 #include "tts/config.h"
 #include "io/tts/elevenlabs/elevenlabs_tts_device.h"
@@ -51,16 +52,15 @@ class MockTtsClient : public services::TtsClient {
 };
 
 // ---------------------------------------------------------------------------
-// Helper: build a text/plain DataFrame from a string.
+// Helper: build an assistant ConversationItem carrying text.
 // ---------------------------------------------------------------------------
-io::DataFrame TextFrame(const std::string& text) {
-  io::DataFrame f;
-  f.type = "text/plain";
-  f.payload = std::vector<uint8_t>(text.begin(), text.end());
-  f.source_device = "test";
-  f.source_port = "out";
-  f.timestamp = std::chrono::steady_clock::now();
-  return f;
+core::ConversationItem AssistantItem(const std::string& text) {
+  core::ConversationItem item;
+  item.kind = core::ConversationItemKind::kAssistantMessage;
+  item.actor = {"assistant", "Assistant", core::ActorKind::kAssistant};
+  item.parts.emplace_back(core::TextPart{text});
+  item.wall_time = std::chrono::system_clock::now();
+  return item;
 }
 
 // Wait up to timeout_ms for predicate to become true.
@@ -97,7 +97,7 @@ RC_GTEST_PROP(ElevenLabsTtsDevicePropTest,
   });
 
   device.Start();
-  device.OnInput("text_in", TextFrame(text));
+  device.OnConversationItem("item_in", AssistantItem(text));
 
   bool got_audio = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
@@ -136,7 +136,7 @@ TEST(ElevenLabsTtsDeviceTest, SynthesisEmitsAudioDataFrames) {
   });
 
   device.Start();
-  device.OnInput("text_in", TextFrame("hello"));
+  device.OnConversationItem("item_in", AssistantItem("hello"));
 
   bool got = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
@@ -187,12 +187,48 @@ TEST(ElevenLabsTtsDeviceTest, FrameDiscardedWhenStopped) {
                                 io::DataFrame) { ++callback_count; });
 
   // Do NOT call Start() — device is stopped.
-  device.OnInput("text_in", TextFrame("should be discarded"));
+  device.OnConversationItem("item_in", AssistantItem("should be discarded"));
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   EXPECT_EQ(mock_ptr->synthesize_count.load(), 0);
   EXPECT_EQ(callback_count.load(), 0);
+}
+
+TEST(ElevenLabsTtsDeviceTest, AssistantConversationItemEmitsAudioDataFrames) {
+  auto mock = std::make_unique<MockTtsClient>();
+  mock->canned_audio = {0x10, 0x11, 0x12, 0x13};
+
+  ElevenLabsTtsDevice device(std::move(mock), "tts_item");
+
+  std::mutex mu;
+  std::vector<io::DataFrame> emitted;
+  device.SetOutputCallback([&](const std::string&, const std::string&,
+                               io::DataFrame f) {
+    std::lock_guard<std::mutex> lock(mu);
+    emitted.push_back(std::move(f));
+  });
+
+  core::ConversationItem item;
+  item.kind = core::ConversationItemKind::kAssistantMessage;
+  item.actor = {"assistant", "Assistant", core::ActorKind::kAssistant};
+  item.parts.emplace_back(core::TextPart{"hello"});
+  item.wall_time = std::chrono::system_clock::now();
+
+  device.Start();
+  device.OnConversationItem("item_in", std::move(item));
+
+  bool got = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return !emitted.empty();
+  });
+
+  device.Stop();
+
+  ASSERT_TRUE(got);
+  std::lock_guard<std::mutex> lock(mu);
+  ASSERT_FALSE(emitted.empty());
+  EXPECT_EQ(emitted[0].type, "audio/pcm");
 }
 
 }  // namespace

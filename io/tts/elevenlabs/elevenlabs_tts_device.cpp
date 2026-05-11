@@ -4,7 +4,6 @@
 #include <utility>
 
 #include "async_logger.h"
-#include "io/control_frame.h"
 
 namespace shizuru::io {
 
@@ -32,32 +31,63 @@ std::string ElevenLabsTtsDevice::GetDeviceId() const { return device_id_; }
 
 std::vector<PortDescriptor> ElevenLabsTtsDevice::GetPortDescriptors() const {
   return {
-      {kTextIn,    PortDirection::kInput,  "text/plain"},
+      {kItemIn,    PortDirection::kInput,  "",
+                   runtime::PortPayloadKind::kConversationItem},
       {kAudioOut,  PortDirection::kOutput, "audio/pcm"},
-      {kControlIn, PortDirection::kInput,  "control/command"},
+      {kSignalIn,  PortDirection::kInput,  "",
+                   runtime::PortPayloadKind::kControlSignal},
   };
 }
 
-// Non-blocking: post text to the worker thread instead of joining inline.
 void ElevenLabsTtsDevice::OnInput(const std::string& port_name, DataFrame frame) {
-  if (port_name == kControlIn) {
-    const std::string cmd = ControlFrame::Parse(frame);
-    if (cmd == ControlFrame::kCommandCancel) { CancelSynthesis(); }
-    return;
-  }
+  // Legacy compatibility path remains only to satisfy the current IoDevice
+  // interface contract. The voice pipeline no longer routes semantic output
+  // through text_in, so this path should not be used by the exemplar.
+  if (port_name != kTextIn) { return; }
   if (!active_.load()) { return; }
-  if (port_name != kTextIn) {
-    LOG_WARN("ElevenLabsTtsDevice: unsupported input port: {}", port_name);
-    return;
-  }
+
   const std::string text(frame.payload.begin(), frame.payload.end());
   if (text.empty()) { return; }
 
+  LOG_WARN("ElevenLabsTtsDevice: legacy text_in path used; prefer item_in");
   {
     std::lock_guard<std::mutex> lock(worker_mutex_);
-    text_queue_.push(text);
+    text_queue_.push(std::move(text));
   }
   worker_cv_.notify_one();
+}
+
+void ElevenLabsTtsDevice::OnConversationItem(const std::string& port_name,
+                                             core::ConversationItem item) {
+  if (port_name != kItemIn) { return; }
+  if (!active_.load()) { return; }
+  if (item.kind != core::ConversationItemKind::kAssistantMessage) { return; }
+
+  std::string text;
+  for (const auto& part : item.parts) {
+    if (const auto* tp = std::get_if<core::TextPart>(&part)) {
+      text += tp->text;
+    }
+  }
+  if (text.empty()) { return; }
+
+  LOG_INFO("ElevenLabsTtsDevice: queued synthesis from ConversationItem text_len={}",
+           text.size());
+  {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    text_queue_.push(std::move(text));
+  }
+  worker_cv_.notify_one();
+}
+
+void ElevenLabsTtsDevice::OnControlSignal(const std::string& port_name,
+                                          core::ControlSignal signal) {
+  (void)port_name;
+  if (std::holds_alternative<core::CancelSignal>(signal) ||
+      std::holds_alternative<core::InterruptSignal>(signal)) {
+    LOG_INFO("ElevenLabsTtsDevice: typed signal_in received cancel-like signal");
+    CancelSynthesis();
+  }
 }
 
 void ElevenLabsTtsDevice::SetOutputCallback(OutputCallback cb) {
@@ -112,6 +142,7 @@ void ElevenLabsTtsDevice::WorkerLoop() {
 }
 
 void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
+  LOG_INFO("ElevenLabsTtsDevice: synthesizing text_len={}", text.size());
   // carry: holds a leftover byte when the HTTP chunk has odd length.
   // s16le PCM requires 2-byte alignment; we buffer the stray byte and
   // prepend it to the next chunk so every emitted payload is even-sized.
@@ -153,6 +184,7 @@ void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
       cb = output_cb_;
     }
     if (cb) { cb(device_id_, kAudioOut, std::move(frame)); }
+    LOG_DEBUG("ElevenLabsTtsDevice: emitted audio chunk bytes={}", emit_bytes);
   };
 
   try {

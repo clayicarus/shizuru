@@ -73,6 +73,13 @@ target_include_directories(voice_agent
   PRIVATE ${CMAKE_SOURCE_DIR}/io
 )
 
+# Multimodal chat: test interleaved text + image_url content parts
+add_executable(multimodal_chat multimodal_chat.cpp)
+target_link_libraries(multimodal_chat
+  PRIVATE nlohmann_json::nlohmann_json
+  PRIVATE CURL::libcurl
+)
+
 # OneBot 11 agent: Reverse WebSocket → CoreDevice → console + private reply
 # SQLite3 for persistence (reuse app/'s find logic).
 find_package(SQLite3 QUIET)

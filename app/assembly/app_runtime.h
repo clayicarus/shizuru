@@ -25,7 +25,7 @@
 #include "app/assembly/app_config.h"
 #include "app/persona/persona.h"
 #include "app/scheduler/scheduler_device.h"
-#include "io/data_frame.h"
+#include "core/conversation_item.h"
 #include "runtime/tool_registry.h"
 #include "runtime/agent_runtime.h"
 #include "runtime/core_device.h"
@@ -38,7 +38,7 @@ class AppRuntime {
   using DiagnosticCallback = std::function<void(const std::string& message)>;
   using ActivityCallback = std::function<void(const core::ActivityEvent& event)>;
   using ConversationItemCallback =
-      std::function<void(const core::conversation::ConversationItem& item, bool is_delta)>;
+      std::function<void(const core::ConversationItem& item, bool is_delta)>;
 
   explicit AppRuntime(AppConfig config);
   ~AppRuntime();
@@ -84,7 +84,7 @@ class AppRuntime {
 
  private:
   void ReplayPersistedConversationHistory(
-      const std::vector<core::conversation::ConversationItem>& items);
+      const std::vector<core::ConversationItem>& items);
   void WireRoutes();
 
   AppConfig config_;

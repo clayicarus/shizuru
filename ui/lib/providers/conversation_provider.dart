@@ -30,6 +30,9 @@ class BubbleSegment {
 
 class ConversationMessage {
   final String role; // 'user' | 'assistant'
+  final String? actorId;
+  final String? actorName;
+  final String? actorKind;
   final DateTime timestamp;
   final String? turnGroupId;
   bool isStreaming;
@@ -38,6 +41,9 @@ class ConversationMessage {
 
   ConversationMessage({
     required this.role,
+    this.actorId,
+    this.actorName,
+    this.actorKind,
     required this.timestamp,
     this.turnGroupId,
     this.isStreaming = false,
@@ -89,6 +95,9 @@ class ConversationProvider extends ChangeNotifier {
     _messages.add(
       ConversationMessage(
         role: 'user',
+        actorId: 'local-user',
+        actorName: 'you',
+        actorKind: 'human',
         timestamp: DateTime.now(),
         segments: [BubbleSegment.text(text)],
       ),
@@ -113,34 +122,40 @@ class ConversationProvider extends ChangeNotifier {
     final kind = item['kind'] as String? ?? '';
     final itemId = item['item_id'] as String? ?? '';
     final turnGroupId = item['turn_group_id'] as String? ?? '';
-    final payload = item['payload'] as Map<String, dynamic>? ?? {};
-
-    // Extract persisted wall-clock timestamp if present (replay path).
-    final timestampMs = payload['timestamp_ms'] as int?;
+    final actor = item['actor'] as Map<String, dynamic>? ?? const {};
+    final parts = item['parts'] as List<dynamic>? ?? const [];
+    final timestampMs = item['timestamp_ms'] as int?;
     final timestamp = timestampMs != null
         ? DateTime.fromMillisecondsSinceEpoch(timestampMs)
         : DateTime.now();
 
     switch (kind) {
       case 'human_message':
-        _handleHumanMessage(payload, timestamp: timestamp);
+        _handleHumanMessage(parts,
+            actor: actor, timestamp: timestamp);
         break;
       case 'assistant_message':
         _handleAssistantMessage(
-          payload,
+          parts,
           isDelta,
           itemId: itemId,
           turnGroupId: turnGroupId,
+          actor: actor,
           timestamp: timestamp,
         );
         break;
       case 'tool_call':
-        _handleToolCall(payload, itemId: itemId, turnGroupId: turnGroupId,
+        _handleToolCall(parts, itemId: itemId, turnGroupId: turnGroupId,
+            actor: actor,
             timestamp: timestamp);
         break;
       case 'tool_result':
-        _handleToolResult(payload, itemId: itemId, turnGroupId: turnGroupId,
+        _handleToolResult(parts, itemId: itemId, turnGroupId: turnGroupId,
+            actor: actor,
             timestamp: timestamp);
+        break;
+      case 'system_event':
+        _handleSystemEvent(parts, actor, timestamp: timestamp);
         break;
       default:
         break;
@@ -154,9 +169,54 @@ class ConversationProvider extends ChangeNotifier {
 
   // ── Streaming delta handling ───────────────────────────────────────────
 
-  void _handleHumanMessage(Map<String, dynamic> payload,
+  void _handleHumanMessage(List<dynamic> parts,
+      {required Map<String, dynamic> actor,
+      DateTime? timestamp}) {
+    final text = _concatText(parts);
+    if (text.isEmpty) {
+      return;
+    }
+    _closeStreamingAssistantBubbles();
+    _messages.add(
+      ConversationMessage(
+        role: 'user',
+        actorId: actor['actor_id'] as String?,
+        actorName: actor['display_name'] as String?,
+        actorKind: actor['kind'] as String?,
+        timestamp: timestamp ?? DateTime.now(),
+        segments: [BubbleSegment.text(text)],
+      ),
+    );
+  }
+
+  void _handleAssistantMessage(
+    List<dynamic> parts,
+    bool isDelta, {
+    required String itemId,
+    required String turnGroupId,
+    required Map<String, dynamic> actor,
+    DateTime? timestamp,
+  }) {
+    final text = _concatText(parts);
+    if (isDelta) {
+      final bubble = _ensureAssistantBubble(
+        turnGroupId: turnGroupId,
+        actor: actor,
+        streaming: true,
+        timestamp: timestamp,
+      );
+      _appendStreamingText(bubble, text, itemId: itemId);
+    } else {
+      _finalizeBubble(text, itemId: itemId, turnGroupId: turnGroupId,
+          actor: actor, timestamp: timestamp);
+    }
+  }
+
+  /// Legacy signature removed.
+  /*
+  void _handleHumanMessage(List<dynamic> parts,
       {DateTime? timestamp}) {
-    final text = payload['text'] as String? ?? '';
+    final text = _concatText(parts);
     if (text.isEmpty) {
       return;
     }
@@ -169,27 +229,7 @@ class ConversationProvider extends ChangeNotifier {
       ),
     );
   }
-
-  void _handleAssistantMessage(
-    Map<String, dynamic> payload,
-    bool isDelta, {
-    required String itemId,
-    required String turnGroupId,
-    DateTime? timestamp,
-  }) {
-    final text = payload['text'] as String? ?? '';
-    if (isDelta) {
-      final bubble = _ensureAssistantBubble(
-        turnGroupId: turnGroupId,
-        streaming: true,
-        timestamp: timestamp,
-      );
-      _appendStreamingText(bubble, text, itemId: itemId);
-    } else {
-      _finalizeBubble(text, itemId: itemId, turnGroupId: turnGroupId,
-          timestamp: timestamp);
-    }
-  }
+  */
 
   /// Append streaming tokens to the current bubble, splitting <think> blocks
   /// into separate segments in real time.
@@ -268,9 +308,11 @@ class ConversationProvider extends ChangeNotifier {
     String finalText, {
     required String itemId,
     required String turnGroupId,
+    required Map<String, dynamic> actor,
     DateTime? timestamp,
   }) {
     final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId,
+        actor: actor,
         timestamp: timestamp);
     bubble.isStreaming = false;
 
@@ -330,23 +372,23 @@ class ConversationProvider extends ChangeNotifier {
   // ── Tool call / result handling ────────────────────────────────────────
 
   void _handleToolCall(
-    Map<String, dynamic> payload, {
+    List<dynamic> parts, {
     required String itemId,
     required String turnGroupId,
+    required Map<String, dynamic> actor,
     DateTime? timestamp,
   }) {
     final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId,
+        actor: actor,
         timestamp: timestamp);
     bubble.isStreaming = false;
-    final toolCalls = payload['tool_calls'] as List<dynamic>? ?? [];
-    for (final tc in toolCalls) {
-      if (tc is Map<String, dynamic>) {
-        final fn = tc['function'] as Map<String, dynamic>? ?? {};
+    for (final part in parts) {
+      if (part is Map<String, dynamic> && part['type'] == 'tool_call') {
         bubble.segments.add(
           BubbleSegment.toolCall({
-            'id': tc['id'] ?? '',
-            'name': fn['name'] ?? 'tool',
-            'arguments': fn['arguments'],
+            'id': part['tool_call_id'] ?? '',
+            'name': part['name'] ?? 'tool',
+            'arguments': part['arguments'],
           }, itemId: itemId),
         );
       }
@@ -354,32 +396,66 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   void _handleToolResult(
-    Map<String, dynamic> payload, {
+    List<dynamic> parts, {
     required String itemId,
     required String turnGroupId,
+    required Map<String, dynamic> actor,
     DateTime? timestamp,
   }) {
     final bubble = _ensureAssistantBubble(turnGroupId: turnGroupId,
+        actor: actor,
         timestamp: timestamp);
-    final content = payload['content'];
-    bool success = false;
-    if (content is Map<String, dynamic>) {
-      success = content['success'] as bool? ?? false;
+    for (final part in parts) {
+      if (part is Map<String, dynamic> && part['type'] == 'tool_result') {
+        final result = part['result'];
+        final success = part['success'] as bool? ?? false;
+        bubble.segments.add(
+          BubbleSegment.toolResult({
+            'tool_name': part['tool_name'] ?? '',
+            'tool_call_id': part['tool_call_id'] ?? '',
+            'success': success,
+            'result': result,
+          }, itemId: itemId),
+        );
+      }
     }
-    bubble.segments.add(
-      BubbleSegment.toolResult({
-        'tool_name': payload['tool_name'] ?? '',
-        'tool_call_id': payload['tool_call_id'] ?? '',
-        'success': success,
-        'result': content,
-      }, itemId: itemId),
+  }
+
+  void _handleSystemEvent(
+    List<dynamic> parts,
+    Map<String, dynamic> actor, {
+    DateTime? timestamp,
+  }) {
+    final text = _concatText(parts);
+    if (text.isEmpty) {
+      return;
+    }
+    final role = actor['kind'] == 'assistant' ? 'assistant' : 'user';
+    _messages.add(
+      ConversationMessage(
+        role: role,
+        timestamp: timestamp ?? DateTime.now(),
+        segments: [BubbleSegment.text(text)],
+      ),
     );
+  }
+
+  String _concatText(List<dynamic> parts) {
+    final buf = StringBuffer();
+    for (final part in parts) {
+      if (part is Map<String, dynamic> && part['type'] == 'text') {
+        final text = part['text'] as String? ?? '';
+        buf.write(text);
+      }
+    }
+    return buf.toString();
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────
 
   ConversationMessage _ensureAssistantBubble({
     required String turnGroupId,
+    required Map<String, dynamic> actor,
     bool streaming = false,
     DateTime? timestamp,
   }) {
@@ -409,6 +485,9 @@ class ConversationProvider extends ChangeNotifier {
     _messages.add(
       ConversationMessage(
         role: 'assistant',
+        actorId: actor['actor_id'] as String?,
+        actorName: actor['display_name'] as String?,
+        actorKind: actor['kind'] as String?,
         timestamp: timestamp ?? DateTime.now(),
         turnGroupId: turnGroupId.isEmpty ? null : turnGroupId,
         isStreaming: streaming,

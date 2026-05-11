@@ -1,3 +1,7 @@
+// app/memory/sqlite_memory_store.cpp — SQLite-backed HistoryStore.
+//
+// Persists ConversationItems as JSON in a SQLite database.
+
 #include "app/memory/sqlite_memory_store.h"
 
 #include <sqlite3.h>
@@ -7,11 +11,12 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace shizuru::app {
 
@@ -19,81 +24,6 @@ namespace {
 
 constexpr size_t kMaxRecentFetch = 512;
 constexpr int kBusyTimeoutMs = 5000;
-
-void CheckSqlite(int rc, sqlite3* db, const char* what);
-int64_t ToStoredMs(const core::MemoryEntry& entry);
-
-void InsertEntry(sqlite3* db,
-                 const std::string& session_key,
-                 const core::MemoryEntry& entry,
-                 std::optional<int64_t> created_at_ms = std::nullopt) {
-  const char* sql = R"SQL(
-    INSERT INTO memory (
-      session_key, type, role, content, source_tag, tool_call_id,
-      tool_calls_json, item_json, created_at_ms, estimated_tokens
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  )SQL";
-  sqlite3_stmt* stmt = nullptr;
-  CheckSqlite(sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr),
-              db, "prepare append");
-  auto finalize = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(
-      stmt, sqlite3_finalize);
-
-  CheckSqlite(sqlite3_bind_text(stmt, 1, session_key.c_str(), -1, SQLITE_TRANSIENT),
-              db, "bind session_key");
-  CheckSqlite(sqlite3_bind_int(stmt, 2, static_cast<int>(entry.type)),
-              db, "bind type");
-  CheckSqlite(sqlite3_bind_text(stmt, 3, entry.role.c_str(), -1, SQLITE_TRANSIENT),
-              db, "bind role");
-  CheckSqlite(sqlite3_bind_text(stmt, 4, entry.content.c_str(), -1, SQLITE_TRANSIENT),
-              db, "bind content");
-  CheckSqlite(sqlite3_bind_text(stmt, 5, entry.source_tag.c_str(), -1, SQLITE_TRANSIENT),
-              db, "bind source_tag");
-  CheckSqlite(sqlite3_bind_text(stmt, 6, entry.tool_call_id.c_str(), -1, SQLITE_TRANSIENT),
-              db, "bind tool_call_id");
-  CheckSqlite(sqlite3_bind_text(stmt, 7, entry.tool_calls_json.c_str(), -1, SQLITE_TRANSIENT),
-              db, "bind tool_calls_json");
-  CheckSqlite(sqlite3_bind_text(stmt, 8, entry.item_json.c_str(), -1, SQLITE_TRANSIENT),
-              db, "bind item_json");
-  CheckSqlite(sqlite3_bind_int64(stmt, 9, created_at_ms.value_or(ToStoredMs(entry))),
-              db, "bind created_at_ms");
-  CheckSqlite(sqlite3_bind_int(stmt, 10, entry.estimated_tokens),
-              db, "bind estimated_tokens");
-
-  CheckSqlite(sqlite3_step(stmt), db, "step append");
-}
-
-int64_t NowUnixMs() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
-int64_t ToStoredMs(const core::MemoryEntry& /*entry*/) {
-  // MemoryEntry timestamps use steady_clock, which is not stable across
-  // process restarts. Persist wall-clock time at append time instead.
-  return NowUnixMs();
-}
-
-core::MemoryEntryType DecodeType(int value) {
-  switch (value) {
-    case 0: return core::MemoryEntryType::kUserMessage;
-    case 1: return core::MemoryEntryType::kAssistantMessage;
-    case 2: return core::MemoryEntryType::kToolCall;
-    case 3: return core::MemoryEntryType::kToolResult;
-    case 4: return core::MemoryEntryType::kSummary;
-    case 5: return core::MemoryEntryType::kExternalContext;
-    default: return core::MemoryEntryType::kUserMessage;
-  }
-}
-
-std::chrono::steady_clock::time_point FromStoredMs(int64_t ms) {
-  const auto now_sys = std::chrono::system_clock::now();
-  const auto now_steady = std::chrono::steady_clock::now();
-  const auto stored_sys = std::chrono::system_clock::time_point(
-      std::chrono::milliseconds(ms));
-  const auto delta = stored_sys - now_sys;
-  return now_steady + std::chrono::duration_cast<std::chrono::steady_clock::duration>(delta);
-}
 
 void CheckSqlite(int rc, sqlite3* db, const char* what) {
   if (rc == SQLITE_OK || rc == SQLITE_ROW || rc == SQLITE_DONE) {
@@ -103,23 +33,116 @@ void CheckSqlite(int rc, sqlite3* db, const char* what) {
   throw std::runtime_error(std::string(what) + ": " + err);
 }
 
+int64_t NowUnixMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 const char* ColumnText(sqlite3_stmt* stmt, int col) {
   const auto* text = sqlite3_column_text(stmt, col);
   return text != nullptr ? reinterpret_cast<const char*>(text) : "";
 }
 
-core::MemoryEntry ReadEntry(sqlite3_stmt* stmt) {
-  core::MemoryEntry entry;
-  entry.type = DecodeType(sqlite3_column_int(stmt, 1));
-  entry.role = ColumnText(stmt, 2);
-  entry.content = ColumnText(stmt, 3);
-  entry.source_tag = ColumnText(stmt, 4);
-  entry.tool_call_id = ColumnText(stmt, 5);
-  entry.tool_calls_json = ColumnText(stmt, 6);
-  entry.item_json = ColumnText(stmt, 7);
-  entry.timestamp = FromStoredMs(sqlite3_column_int64(stmt, 8));
-  entry.estimated_tokens = sqlite3_column_int(stmt, 9);
-  return entry;
+// Serialize a ConversationItem to JSON string.
+std::string SerializeItem(const core::ConversationItem& item) {
+  nlohmann::json j;
+  j["item_id"] = item.item_id;
+  j["conversation_id"] = item.conversation_id;
+  j["kind"] = static_cast<int>(item.kind);
+  j["actor"] = {
+      {"actor_id", item.actor.actor_id},
+      {"display_name", item.actor.display_name},
+      {"kind", static_cast<int>(item.actor.kind)},
+  };
+  j["wall_time_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+      item.wall_time.time_since_epoch()).count();
+  j["mentions"] = item.mentions;
+  if (item.reply_to_item_id.has_value()) {
+    j["reply_to_item_id"] = *item.reply_to_item_id;
+  }
+
+  // Serialize parts.
+  nlohmann::json parts_json = nlohmann::json::array();
+  for (const auto& part : item.parts) {
+    nlohmann::json pj;
+    if (auto* tp = std::get_if<core::TextPart>(&part)) {
+      pj["type"] = "text";
+      pj["text"] = tp->text;
+    } else if (auto* ip = std::get_if<core::ImagePart>(&part)) {
+      pj["type"] = "image";
+      pj["url"] = ip->url;
+    } else if (auto* ap = std::get_if<core::AudioPart>(&part)) {
+      pj["type"] = "audio";
+      pj["format"] = ap->format;
+      // Don't persist raw audio data.
+    } else if (auto* tcp = std::get_if<core::ToolCallPart>(&part)) {
+      pj["type"] = "tool_call";
+      pj["tool_call_id"] = tcp->tool_call_id;
+      pj["name"] = tcp->name;
+      pj["arguments_json"] = tcp->arguments_json;
+    } else if (auto* trp = std::get_if<core::ToolResultPart>(&part)) {
+      pj["type"] = "tool_result";
+      pj["tool_call_id"] = trp->tool_call_id;
+      pj["tool_name"] = trp->tool_name;
+      pj["success"] = trp->success;
+      pj["result_json"] = trp->result_json;
+    }
+    parts_json.push_back(std::move(pj));
+  }
+  j["parts"] = std::move(parts_json);
+
+  return j.dump();
+}
+
+// Deserialize a ConversationItem from JSON string.
+core::ConversationItem DeserializeItem(const std::string& json_str) {
+  auto j = nlohmann::json::parse(json_str);
+  core::ConversationItem item;
+  item.item_id = j.value("item_id", "");
+  item.conversation_id = j.value("conversation_id", "");
+  item.kind = static_cast<core::ConversationItemKind>(j.value("kind", 0));
+
+  if (j.contains("actor")) {
+    const auto& aj = j["actor"];
+    item.actor.actor_id = aj.value("actor_id", "");
+    item.actor.display_name = aj.value("display_name", "");
+    item.actor.kind = static_cast<core::ActorKind>(aj.value("kind", 0));
+  }
+
+  int64_t wall_ms = j.value("wall_time_ms", int64_t{0});
+  item.wall_time = std::chrono::system_clock::time_point(
+      std::chrono::milliseconds(wall_ms));
+
+  item.mentions = j.value("mentions", std::vector<std::string>{});
+  if (j.contains("reply_to_item_id") && !j["reply_to_item_id"].is_null()) {
+    item.reply_to_item_id = j["reply_to_item_id"].get<std::string>();
+  }
+
+  if (j.contains("parts") && j["parts"].is_array()) {
+    for (const auto& pj : j["parts"]) {
+      std::string type = pj.value("type", "");
+      if (type == "text") {
+        item.parts.emplace_back(core::TextPart{pj.value("text", "")});
+      } else if (type == "image") {
+        item.parts.emplace_back(core::ImagePart{pj.value("url", "")});
+      } else if (type == "audio") {
+        item.parts.emplace_back(core::AudioPart{{}, pj.value("format", "")});
+      } else if (type == "tool_call") {
+        item.parts.emplace_back(core::ToolCallPart{
+            pj.value("tool_call_id", ""),
+            pj.value("name", ""),
+            pj.value("arguments_json", "")});
+      } else if (type == "tool_result") {
+        item.parts.emplace_back(core::ToolResultPart{
+            pj.value("tool_call_id", ""),
+            pj.value("tool_name", ""),
+            pj.value("success", true),
+            pj.value("result_json", "")});
+      }
+    }
+  }
+
+  return item;
 }
 
 }  // namespace
@@ -143,31 +166,24 @@ SqliteMemoryStore::SqliteMemoryStore(const std::string& db_path)
   CheckSqlite(sqlite3_busy_timeout(impl_->db, kBusyTimeoutMs),
               impl_->db, "set busy timeout");
 
-  CheckSqlite(sqlite3_exec(impl_->db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr),
+  CheckSqlite(sqlite3_exec(impl_->db, "PRAGMA journal_mode=WAL;",
+                           nullptr, nullptr, nullptr),
               impl_->db, "enable WAL");
-  CheckSqlite(sqlite3_exec(impl_->db, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr),
+  CheckSqlite(sqlite3_exec(impl_->db, "PRAGMA synchronous=NORMAL;",
+                           nullptr, nullptr, nullptr),
               impl_->db, "set synchronous");
-  CheckSqlite(sqlite3_exec(impl_->db, "PRAGMA user_version=1;", nullptr, nullptr, nullptr),
-              impl_->db, "set user_version");
 
   const char* schema = R"SQL(
-    CREATE TABLE IF NOT EXISTS memory (
+    CREATE TABLE IF NOT EXISTS history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_key TEXT NOT NULL,
-      type INTEGER NOT NULL,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL,
-      source_tag TEXT NOT NULL DEFAULT '',
-      tool_call_id TEXT NOT NULL DEFAULT '',
-      tool_calls_json TEXT NOT NULL DEFAULT '',
-      item_json TEXT NOT NULL DEFAULT '',
-      created_at_ms INTEGER NOT NULL,
-      estimated_tokens INTEGER NOT NULL DEFAULT 0
+      session_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      kind INTEGER NOT NULL,
+      item_json TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_memory_session_id_id
-      ON memory(session_key, id);
-    CREATE INDEX IF NOT EXISTS idx_memory_session_id_created_at
-      ON memory(session_key, created_at_ms);
+    CREATE INDEX IF NOT EXISTS idx_history_session_id
+      ON history(session_id, id);
   )SQL";
   CheckSqlite(sqlite3_exec(impl_->db, schema, nullptr, nullptr, nullptr),
               impl_->db, "create schema");
@@ -183,27 +199,75 @@ SqliteMemoryStore::~SqliteMemoryStore() {
   }
 }
 
-void SqliteMemoryStore::Append(const std::string& session_key,
-                               const core::MemoryEntry& entry) {
+void SqliteMemoryStore::Append(const std::string& session_id,
+                               core::ConversationItem item) {
   std::lock_guard<std::mutex> lock(impl_->mu);
-  InsertEntry(impl_->db, session_key, entry);
-}
-
-std::vector<core::MemoryEntry> SqliteMemoryStore::GetRecent(
-    const std::string& session_key, size_t count) {
-  std::lock_guard<std::mutex> lock(impl_->mu);
-  const int limit = static_cast<int>(std::min(count, kMaxRecentFetch));
-  if (limit <= 0) {
-    return {};
-  }
 
   const char* sql = R"SQL(
-    SELECT id, type, role, content, source_tag, tool_call_id,
-           tool_calls_json, item_json, created_at_ms, estimated_tokens
-      FROM memory
-     WHERE session_key = ?
-     ORDER BY id DESC
-     LIMIT ?
+    INSERT INTO history (session_id, item_id, kind, item_json, created_at_ms)
+    VALUES (?, ?, ?, ?, ?)
+  )SQL";
+  sqlite3_stmt* stmt = nullptr;
+  CheckSqlite(sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr),
+              impl_->db, "prepare append");
+  auto finalize = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(
+      stmt, sqlite3_finalize);
+
+  std::string json = SerializeItem(item);
+
+  CheckSqlite(sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT),
+              impl_->db, "bind session_id");
+  CheckSqlite(sqlite3_bind_text(stmt, 2, item.item_id.c_str(), -1, SQLITE_TRANSIENT),
+              impl_->db, "bind item_id");
+  CheckSqlite(sqlite3_bind_int(stmt, 3, static_cast<int>(item.kind)),
+              impl_->db, "bind kind");
+  CheckSqlite(sqlite3_bind_text(stmt, 4, json.c_str(), -1, SQLITE_TRANSIENT),
+              impl_->db, "bind item_json");
+  CheckSqlite(sqlite3_bind_int64(stmt, 5, NowUnixMs()),
+              impl_->db, "bind created_at_ms");
+
+  CheckSqlite(sqlite3_step(stmt), impl_->db, "step append");
+}
+
+std::vector<core::ConversationItem> SqliteMemoryStore::GetWindow(
+    const std::string& session_id, int max_tokens) {
+  // Get all recent items and trim by token budget.
+  auto items = GetRecent(session_id, kMaxRecentFetch);
+
+  // Walk backward, accumulating estimated tokens.
+  int budget = max_tokens;
+  size_t start_idx = items.size();
+  for (size_t i = items.size(); i > 0; --i) {
+    int item_tokens = 0;
+    for (const auto& part : items[i - 1].parts) {
+      if (auto* tp = std::get_if<core::TextPart>(&part)) {
+        item_tokens += static_cast<int>(tp->text.size()) / 4;
+      } else if (auto* tcp = std::get_if<core::ToolCallPart>(&part)) {
+        item_tokens += static_cast<int>(tcp->arguments_json.size()) / 4;
+      } else if (auto* trp = std::get_if<core::ToolResultPart>(&part)) {
+        item_tokens += static_cast<int>(trp->result_json.size()) / 4;
+      }
+    }
+    item_tokens = std::max(item_tokens, 1);
+    if (budget - item_tokens < 0 && start_idx < items.size()) { break; }
+    budget -= item_tokens;
+    start_idx = i - 1;
+  }
+
+  return std::vector<core::ConversationItem>(
+      items.begin() + static_cast<ptrdiff_t>(start_idx), items.end());
+}
+
+std::vector<core::ConversationItem> SqliteMemoryStore::GetRecent(
+    const std::string& session_id, size_t max_count) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  const int limit = static_cast<int>(std::min(max_count, kMaxRecentFetch));
+
+  const char* sql = R"SQL(
+    SELECT item_json FROM history
+    WHERE session_id = ?
+    ORDER BY id DESC
+    LIMIT ?
   )SQL";
   sqlite3_stmt* stmt = nullptr;
   CheckSqlite(sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr),
@@ -211,176 +275,35 @@ std::vector<core::MemoryEntry> SqliteMemoryStore::GetRecent(
   auto finalize = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(
       stmt, sqlite3_finalize);
 
-  CheckSqlite(sqlite3_bind_text(stmt, 1, session_key.c_str(), -1, SQLITE_TRANSIENT),
-              impl_->db, "bind recent session_key");
+  CheckSqlite(sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT),
+              impl_->db, "bind session_id");
   CheckSqlite(sqlite3_bind_int(stmt, 2, limit),
-              impl_->db, "bind recent limit");
+              impl_->db, "bind limit");
 
-  std::vector<core::MemoryEntry> result;
+  std::vector<core::ConversationItem> result;
   while (sqlite3_step(stmt) == SQLITE_ROW) {
-    result.push_back(ReadEntry(stmt));
+    std::string json = ColumnText(stmt, 0);
+    try {
+      result.push_back(DeserializeItem(json));
+    } catch (...) {
+      // Skip malformed entries.
+    }
   }
   std::reverse(result.begin(), result.end());
   return result;
 }
 
-size_t SqliteMemoryStore::Count(const std::string& session_key) {
+void SqliteMemoryStore::Clear(const std::string& session_id) {
   std::lock_guard<std::mutex> lock(impl_->mu);
-  const char* sql = R"SQL(
-    SELECT COUNT(*)
-      FROM memory
-     WHERE session_key = ?
-  )SQL";
-  sqlite3_stmt* stmt = nullptr;
-  CheckSqlite(sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr),
-              impl_->db, "prepare count");
-  auto finalize = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(
-      stmt, sqlite3_finalize);
-
-  CheckSqlite(sqlite3_bind_text(stmt, 1, session_key.c_str(), -1, SQLITE_TRANSIENT),
-              impl_->db, "bind count session_key");
-  CheckSqlite(sqlite3_step(stmt), impl_->db, "step count");
-  return static_cast<size_t>(sqlite3_column_int64(stmt, 0));
-}
-
-std::vector<core::MemoryEntry> SqliteMemoryStore::GetAll(
-    const std::string& session_key) {
-  std::lock_guard<std::mutex> lock(impl_->mu);
-  const char* sql = R"SQL(
-    SELECT id, type, role, content, source_tag, tool_call_id,
-           tool_calls_json, item_json, created_at_ms, estimated_tokens
-      FROM memory
-     WHERE session_key = ?
-     ORDER BY id ASC
-  )SQL";
-  sqlite3_stmt* stmt = nullptr;
-  CheckSqlite(sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr),
-              impl_->db, "prepare get all");
-  auto finalize = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(
-      stmt, sqlite3_finalize);
-
-  CheckSqlite(sqlite3_bind_text(stmt, 1, session_key.c_str(), -1, SQLITE_TRANSIENT),
-              impl_->db, "bind get all session_key");
-
-  std::vector<core::MemoryEntry> result;
-  while (sqlite3_step(stmt) == SQLITE_ROW) {
-    result.push_back(ReadEntry(stmt));
-  }
-  return result;
-}
-
-void SqliteMemoryStore::Summarize(const std::string& session_key,
-                                  size_t start_index, size_t end_index,
-                                  const core::MemoryEntry& summary) {
-  std::lock_guard<std::mutex> lock(impl_->mu);
-  if (start_index >= end_index) {
-    return;
-  }
-
-  const char* select_sql = R"SQL(
-    SELECT id
-      FROM memory
-     WHERE session_key = ?
-     ORDER BY id ASC
-     LIMIT ? OFFSET ?
-  )SQL";
-  sqlite3_stmt* select_stmt = nullptr;
-  CheckSqlite(sqlite3_prepare_v2(impl_->db, select_sql, -1, &select_stmt, nullptr),
-              impl_->db, "prepare summarize select ids");
-  auto finalize_select = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(
-      select_stmt, sqlite3_finalize);
-
-  const int span = static_cast<int>(end_index - start_index);
-  CheckSqlite(sqlite3_bind_text(select_stmt, 1, session_key.c_str(), -1, SQLITE_TRANSIENT),
-              impl_->db, "bind summarize session_key");
-  CheckSqlite(sqlite3_bind_int(select_stmt, 2, span),
-              impl_->db, "bind summarize span");
-  CheckSqlite(sqlite3_bind_int(select_stmt, 3, static_cast<int>(start_index)),
-              impl_->db, "bind summarize offset");
-
-  std::vector<int64_t> ids;
-  while (sqlite3_step(select_stmt) == SQLITE_ROW) {
-    ids.push_back(sqlite3_column_int64(select_stmt, 0));
-  }
-  if (ids.empty()) {
-    return;
-  }
-
-  CheckSqlite(sqlite3_exec(impl_->db, "BEGIN IMMEDIATE TRANSACTION;", nullptr, nullptr, nullptr),
-              impl_->db, "begin summarize");
-  try {
-    const char* update_sql = R"SQL(
-      UPDATE memory
-         SET type = ?,
-             role = ?,
-             content = ?,
-             source_tag = ?,
-             tool_call_id = ?,
-             tool_calls_json = ?,
-             item_json = ?,
-             estimated_tokens = ?
-       WHERE id = ?
-    )SQL";
-    sqlite3_stmt* update_stmt = nullptr;
-    CheckSqlite(sqlite3_prepare_v2(impl_->db, update_sql, -1, &update_stmt, nullptr),
-                impl_->db, "prepare summarize update");
-    auto finalize_update = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(
-        update_stmt, sqlite3_finalize);
-
-    CheckSqlite(sqlite3_bind_int(update_stmt, 1, static_cast<int>(summary.type)),
-                impl_->db, "bind summarize type");
-    CheckSqlite(sqlite3_bind_text(update_stmt, 2, summary.role.c_str(), -1, SQLITE_TRANSIENT),
-                impl_->db, "bind summarize role");
-    CheckSqlite(sqlite3_bind_text(update_stmt, 3, summary.content.c_str(), -1, SQLITE_TRANSIENT),
-                impl_->db, "bind summarize content");
-    CheckSqlite(sqlite3_bind_text(update_stmt, 4, summary.source_tag.c_str(), -1, SQLITE_TRANSIENT),
-                impl_->db, "bind summarize source_tag");
-    CheckSqlite(sqlite3_bind_text(update_stmt, 5, summary.tool_call_id.c_str(), -1, SQLITE_TRANSIENT),
-                impl_->db, "bind summarize tool_call_id");
-    CheckSqlite(sqlite3_bind_text(update_stmt, 6, summary.tool_calls_json.c_str(), -1, SQLITE_TRANSIENT),
-                impl_->db, "bind summarize tool_calls_json");
-    CheckSqlite(sqlite3_bind_text(update_stmt, 7, summary.item_json.c_str(), -1, SQLITE_TRANSIENT),
-                impl_->db, "bind summarize item_json");
-    CheckSqlite(sqlite3_bind_int(update_stmt, 8, summary.estimated_tokens),
-                impl_->db, "bind summarize estimated_tokens");
-    CheckSqlite(sqlite3_bind_int64(update_stmt, 9, ids.front()),
-                impl_->db, "bind summarize target id");
-    CheckSqlite(sqlite3_step(update_stmt), impl_->db, "step summarize update");
-
-    const char* delete_sql = "DELETE FROM memory WHERE id = ?;";
-    sqlite3_stmt* delete_stmt = nullptr;
-    CheckSqlite(sqlite3_prepare_v2(impl_->db, delete_sql, -1, &delete_stmt, nullptr),
-                impl_->db, "prepare summarize delete");
-    auto finalize_delete = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(
-        delete_stmt, sqlite3_finalize);
-
-    for (size_t i = 1; i < ids.size(); ++i) {
-      auto id = ids[i];
-      sqlite3_reset(delete_stmt);
-      sqlite3_clear_bindings(delete_stmt);
-      CheckSqlite(sqlite3_bind_int64(delete_stmt, 1, id),
-                  impl_->db, "bind summarize delete id");
-      CheckSqlite(sqlite3_step(delete_stmt), impl_->db, "step summarize delete");
-    }
-    CheckSqlite(sqlite3_exec(impl_->db, "COMMIT;", nullptr, nullptr, nullptr),
-                impl_->db, "commit summarize");
-  } catch (...) {
-    sqlite3_exec(impl_->db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    throw;
-  }
-}
-
-void SqliteMemoryStore::Clear(const std::string& session_key) {
-  std::lock_guard<std::mutex> lock(impl_->mu);
-  const char* sql = "DELETE FROM memory WHERE session_key = ?;";
+  const char* sql = "DELETE FROM history WHERE session_id = ?;";
   sqlite3_stmt* stmt = nullptr;
   CheckSqlite(sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr),
               impl_->db, "prepare clear");
   auto finalize = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>(
       stmt, sqlite3_finalize);
 
-  CheckSqlite(sqlite3_bind_text(stmt, 1, session_key.c_str(), -1, SQLITE_TRANSIENT),
-              impl_->db, "bind clear session_key");
+  CheckSqlite(sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT),
+              impl_->db, "bind session_id");
   CheckSqlite(sqlite3_step(stmt), impl_->db, "step clear");
 }
 

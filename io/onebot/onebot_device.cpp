@@ -1,11 +1,12 @@
 // io/onebot/onebot_device.cpp — OneBot 11 reverse WebSocket IO device.
 //
 // We are the WebSocket SERVER.  The OneBot implementation connects to us.
+// Incoming messages are parsed into core::ConversationItem and delivered
+// via the on_item_ callback.
 
 #include "io/onebot/onebot_device.h"
 
 #include <chrono>
-#include <ctime>
 #include <utility>
 
 #include <ixwebsocket/IXWebSocket.h>
@@ -13,6 +14,8 @@
 #include <nlohmann/json.hpp>
 
 #include "async_logger.h"
+#include "io/onebot/onebot_tags.h"
+#include "io/onebot/qq_face_table.h"
 
 namespace shizuru::io::onebot {
 
@@ -38,21 +41,14 @@ OneBotDevice::OneBotDevice(OneBotConfig config, std::string device_id)
 OneBotDevice::~OneBotDevice() { Stop(); }
 
 // ---------------------------------------------------------------------------
-// IoDevice interface
+// Public interface
 // ---------------------------------------------------------------------------
 
 std::string OneBotDevice::GetDeviceId() const { return device_id_; }
 
-std::vector<PortDescriptor> OneBotDevice::GetPortDescriptors() const {
-  return {
-      {kTextIn,  PortDirection::kInput,  "text/plain"},
-      {kTextOut, PortDirection::kOutput, "text/plain"},
-  };
-}
-
-void OneBotDevice::SetOutputCallback(OutputCallback cb) {
-  std::lock_guard<std::mutex> lock(output_cb_mutex_);
-  output_cb_ = std::move(cb);
+void OneBotDevice::SetOnItemCallback(OnItemCallback cb) {
+  std::lock_guard<std::mutex> lock(on_item_mutex_);
+  on_item_ = std::move(cb);
 }
 
 void OneBotDevice::Start() {
@@ -61,9 +57,6 @@ void OneBotDevice::Start() {
   server_ = std::make_unique<ix::WebSocketServer>(
       config_.port, config_.host);
 
-  // IXWebSocketServer requires setOnConnectionCallback with a per-connection
-  // setOnMessageCallback inside it.  Do NOT use setOnClientMessageCallback
-  // together with setOnConnectionCallback — they are mutually exclusive.
   server_->setOnConnectionCallback(
       [this](std::weak_ptr<ix::WebSocket> weak_ws,
              std::shared_ptr<ix::ConnectionState> /*state*/) {
@@ -192,62 +185,13 @@ void OneBotDevice::Stop() {
   LOG_INFO("[{}] OneBotDevice stopped", device_id_);
 }
 
-void OneBotDevice::OnInput(const std::string& port_name, DataFrame frame) {
-  if (!active_.load()) { return; }
-  if (port_name != kTextIn) { return; }
-
-  const std::string text(frame.payload.begin(), frame.payload.end());
-  if (text.empty()) { return; }
-
-  // Extract target info from metadata.
-  std::string message_type = "private";
-  int64_t target_id = 0;
-
-  auto it_type = frame.metadata.find("message_type");
-  if (it_type != frame.metadata.end()) {
-    message_type = it_type->second;
-  }
-
-  auto it_target = frame.metadata.find("target_id");
-  if (it_target != frame.metadata.end()) {
-    try {
-      target_id = std::stoll(it_target->second);
-    } catch (...) {
-      LOG_WARN("[{}] Invalid target_id in metadata: {}", device_id_,
-               it_target->second);
-      return;
-    }
-  }
-
-  if (message_type == "group" && target_id == 0) {
-    auto it_group = frame.metadata.find("group_id");
-    if (it_group != frame.metadata.end()) {
-      try {
-        target_id = std::stoll(it_group->second);
-      } catch (...) {}
-    }
-  }
-
-  if (target_id == 0) {
-    LOG_WARN("[{}] No target_id in metadata, cannot send message", device_id_);
-    return;
-  }
-
-  // Outbound group whitelist check.
-  if (message_type == "group" && !IsGroupAllowed(target_id)) {
-    LOG_WARN("[{}] Blocked outbound message to non-whitelisted group {}",
-             device_id_, target_id);
-    return;
-  }
-
-  SendOneBotMessage(message_type, target_id, text);
-}
-
 // ---------------------------------------------------------------------------
 // Event handling
 // ---------------------------------------------------------------------------
 
 void OneBotDevice::HandleEvent(const std::string& json_str) {
+  LOG_DEBUG("[onebot] Raw WS payload: {}", json_str);
+
   json event;
   try {
     event = json::parse(json_str);
@@ -279,10 +223,7 @@ void OneBotDevice::HandleMessageEvent(const json& event) {
   // Skip messages from self.
   if (!self_id_.empty() && user_id_str == self_id_) { return; }
 
-  // Whitelist filtering:
-  //   - Group messages: check group_whitelist only (all group members allowed).
-  //   - Private messages: check user_whitelist only.
-  // Empty whitelist = allow all for that category.
+  // Whitelist filtering.
   if (message_type == "group") {
     const int64_t group_id = event.value("group_id", int64_t{0});
     if (!IsGroupAllowed(group_id)) { return; }
@@ -290,40 +231,25 @@ void OneBotDevice::HandleMessageEvent(const json& event) {
     if (!IsUserAllowed(user_id)) { return; }
   }
 
-  // Extract text and mentions.
+  // Parse message segments into ContentParts + mentions.
   ParsedMessage parsed;
   if (event.contains("message")) {
     parsed = ParseMessage(event["message"], self_id_);
   } else {
-    parsed.text = event.value("raw_message", "");
-  }
-  if (parsed.text.empty()) { return; }
-
-  // Build metadata.
-  std::unordered_map<std::string, std::string> metadata;
-  metadata["actor_id"] = user_id_str;
-  metadata["message_type"] = message_type;
-  metadata["message_id"] =
-      std::to_string(event.value("message_id", int64_t{0}));
-
-  // OneBot event timestamp (Unix seconds) → human-readable for LLM.
-  if (event.contains("time")) {
-    auto t = static_cast<time_t>(event.value("time", int64_t{0}));
-    char buf[20];
-    std::strftime(buf, sizeof(buf), "%H:%M:%S", std::localtime(&t));
-    metadata["timestamp"] = buf;
-  }
-
-  // Pass mentions as comma-separated QQ IDs.
-  if (!parsed.mentions.empty()) {
-    std::string mentions_str;
-    for (size_t i = 0; i < parsed.mentions.size(); ++i) {
-      if (i > 0) { mentions_str += ","; }
-      mentions_str += parsed.mentions[i];
+    // Fallback: use raw_message as plain text.
+    std::string raw = event.value("raw_message", "");
+    if (!raw.empty()) {
+      parsed.parts.emplace_back(core::TextPart{std::move(raw)});
     }
-    metadata["mentions"] = mentions_str;
   }
 
+  // Skip empty messages (no parts at all).
+  if (parsed.parts.empty()) {
+    LOG_DEBUG("[onebot] Skipping empty message (no parts)");
+    return;
+  }
+
+  // Build actor.
   std::string display_name = sender.value("card", "");
   if (display_name.empty()) {
     display_name = sender.value("nickname", "");
@@ -331,19 +257,48 @@ void OneBotDevice::HandleMessageEvent(const json& event) {
   if (display_name.empty()) {
     display_name = user_id_str;
   }
-  metadata["actor_name"] = display_name;
 
+  core::ActorRef actor;
+  actor.actor_id = user_id_str;
+  actor.display_name = std::move(display_name);
+  actor.kind = core::ActorKind::kHuman;
+
+  // Build conversation_id from group_id or user_id.
+  std::string conversation_id;
   if (message_type == "group") {
-    const int64_t group_id = event.value("group_id", int64_t{0});
-    metadata["group_id"] = std::to_string(group_id);
-    metadata["target_id"] = std::to_string(group_id);
+    conversation_id = "group:" + std::to_string(event.value("group_id", int64_t{0}));
   } else {
-    metadata["target_id"] = user_id_str;
+    conversation_id = "private:" + user_id_str;
   }
 
-  LOG_INFO("[{}] {} message from {} ({}): {}", device_id_, message_type,
-           display_name, user_id_str,
-           parsed.text.size() > 80 ? parsed.text.substr(0, 80) + "..." : parsed.text);
+  // Build item_id from message_id.
+  const int64_t message_id = event.value("message_id", int64_t{0});
+  std::string item_id = "onebot:" + std::to_string(message_id);
+
+  // Build wall_time from event timestamp.
+  std::chrono::system_clock::time_point wall_time;
+  if (event.contains("time")) {
+    auto unix_seconds = event.value("time", int64_t{0});
+    wall_time = std::chrono::system_clock::from_time_t(
+        static_cast<std::time_t>(unix_seconds));
+  } else {
+    wall_time = std::chrono::system_clock::now();
+  }
+
+  // Construct the ConversationItem.
+  core::ConversationItem item;
+  item.item_id = std::move(item_id);
+  item.conversation_id = std::move(conversation_id);
+  item.kind = core::ConversationItemKind::kUserMessage;
+  item.actor = std::move(actor);
+  item.parts = std::move(parsed.parts);
+  item.wall_time = wall_time;
+  item.reply_to_item_id = std::move(parsed.reply_to);
+  item.mentions = std::move(parsed.mentions);
+
+  LOG_INFO("[{}] {} message from {} ({}): item_id={}", device_id_,
+           message_type, item.actor.display_name, item.actor.actor_id,
+           item.item_id);
 
   // Update reply context.
   {
@@ -358,7 +313,15 @@ void OneBotDevice::HandleMessageEvent(const json& event) {
     }
   }
 
-  EmitText(parsed.text, std::move(metadata));
+  // Deliver to Core via callback.
+  OnItemCallback cb;
+  {
+    std::lock_guard<std::mutex> lock(on_item_mutex_);
+    cb = on_item_;
+  }
+  if (cb) {
+    cb(std::move(item));
+  }
 }
 
 void OneBotDevice::HandleMetaEvent(const json& event) {
@@ -391,9 +354,18 @@ void OneBotDevice::WsSend(const std::string& json_str) {
   ws->send(json_str);
 }
 
-void OneBotDevice::SendOneBotMessage(const std::string& message_type,
-                                     int64_t target_id,
-                                     const std::string& message) {
+void OneBotDevice::SendMessage(const std::string& message_type,
+                               int64_t target_id,
+                               const std::string& message) {
+  if (!active_.load()) { return; }
+
+  // Outbound group whitelist check.
+  if (message_type == "group" && !IsGroupAllowed(target_id)) {
+    LOG_WARN("[{}] Blocked outbound message to non-whitelisted group {}",
+             device_id_, target_id);
+    return;
+  }
+
   json payload;
   payload["action"] = "send_msg";
 
@@ -414,40 +386,6 @@ void OneBotDevice::SendOneBotMessage(const std::string& message_type,
   LOG_DEBUG("[{}] Sending API call: {}", device_id_,
             json_str.size() > 200 ? json_str.substr(0, 200) + "..." : json_str);
   WsSend(json_str);
-}
-
-// ---------------------------------------------------------------------------
-// Output emission
-// ---------------------------------------------------------------------------
-
-void OneBotDevice::EmitText(
-    const std::string& text,
-    std::unordered_map<std::string, std::string> metadata) {
-  OutputCallback cb;
-  {
-    std::lock_guard<std::mutex> lock(output_cb_mutex_);
-    cb = output_cb_;
-  }
-  if (!cb) { return; }
-
-  DataFrame frame;
-  frame.type = "text/plain";
-  frame.payload.assign(text.begin(), text.end());
-  frame.source_device = device_id_;
-  frame.source_port = kTextOut;
-  frame.timestamp = std::chrono::steady_clock::now();
-  frame.metadata = std::move(metadata);
-
-  cb(device_id_, kTextOut, std::move(frame));
-}
-
-// ---------------------------------------------------------------------------
-// Reply context
-// ---------------------------------------------------------------------------
-
-OneBotDevice::ReplyContext OneBotDevice::GetLastReplyContext() const {
-  std::lock_guard<std::mutex> lock(reply_ctx_mutex_);
-  return last_reply_ctx_;
 }
 
 void OneBotDevice::SendGroupForward(int64_t group_id,
@@ -476,6 +414,15 @@ void OneBotDevice::SendGroupForward(int64_t group_id,
 }
 
 // ---------------------------------------------------------------------------
+// Reply context
+// ---------------------------------------------------------------------------
+
+OneBotDevice::ReplyContext OneBotDevice::GetLastReplyContext() const {
+  std::lock_guard<std::mutex> lock(reply_ctx_mutex_);
+  return last_reply_ctx_;
+}
+
+// ---------------------------------------------------------------------------
 // Whitelist helpers
 // ---------------------------------------------------------------------------
 
@@ -490,7 +437,7 @@ bool OneBotDevice::IsUserAllowed(int64_t user_id) const {
 }
 
 // ---------------------------------------------------------------------------
-// Message parsing
+// Message parsing — produces ContentParts + mentions + reply_to
 // ---------------------------------------------------------------------------
 
 OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
@@ -498,7 +445,7 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
   ParsedMessage result;
 
   if (message.is_string()) {
-    // CQ-coded string.  Extract @mentions and strip CQ codes.
+    // CQ-coded string.  Extract @mentions, images, and text content.
     std::string raw = message.get<std::string>();
     std::string text;
     text.reserve(raw.size());
@@ -508,8 +455,8 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
           raw[i + 2] == 'Q' && raw[i + 3] == ':') {
         auto end = raw.find(']', i);
         if (end != std::string::npos) {
-          // Parse CQ code content: [CQ:at,qq=12345]
           std::string cq = raw.substr(i + 4, end - i - 4);
+
           if (cq.substr(0, 3) == "at,") {
             auto qq_pos = cq.find("qq=");
             if (qq_pos != std::string::npos) {
@@ -518,10 +465,57 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
                   qq_end == std::string::npos ? std::string::npos
                                               : qq_end - qq_pos - 3);
               result.mentions.push_back(qq);
-              if (qq == self_id) {
-                text += "<at id=\"self\"/>";
-              } else {
-                text += "<at id=\"" + qq + "\"/>";
+              using namespace onebot::tags;
+              text += SelfClosingTag(kAt, kAttrId,
+                                     qq == self_id ? kAtSelf : qq);
+            }
+          } else if (cq.substr(0, 6) == "image,") {
+            // Extract URL from CQ image: [CQ:image,...,url=https://...]
+            auto url_pos = cq.find("url=");
+            if (url_pos != std::string::npos) {
+              std::string url = cq.substr(url_pos + 4);
+              // Decode &amp; entities.
+              std::string decoded;
+              decoded.reserve(url.size());
+              for (size_t j = 0; j < url.size(); ++j) {
+                if (url.compare(j, 5, "&amp;") == 0) {
+                  decoded += '&'; j += 4;
+                } else {
+                  decoded += url[j];
+                }
+              }
+              if (!decoded.empty()) {
+                result.parts.emplace_back(core::ImagePart{std::move(decoded)});
+              }
+            }
+          } else if (cq.substr(0, 6) == "reply,") {
+            // Extract reply reference: [CQ:reply,id=12345]
+            auto id_pos = cq.find("id=");
+            if (id_pos != std::string::npos) {
+              auto id_end = cq.find(',', id_pos);
+              std::string reply_id = cq.substr(id_pos + 3,
+                  id_end == std::string::npos ? std::string::npos
+                                              : id_end - id_pos - 3);
+              if (!reply_id.empty()) {
+                result.reply_to = "onebot:" + reply_id;
+              }
+            }
+          } else if (cq.substr(0, 5) == "face,") {
+            auto id_pos = cq.find("id=");
+            if (id_pos != std::string::npos) {
+              auto id_end = cq.find(',', id_pos);
+              std::string id_str = cq.substr(id_pos + 3,
+                  id_end == std::string::npos ? std::string::npos
+                                              : id_end - id_pos - 3);
+              try {
+                int face_id = std::stoi(id_str);
+                const char* desc = QqFaceDesc(face_id);
+                using namespace onebot::tags;
+                text += SelfClosingTag(kFace, kAttrDesc,
+                                       desc != nullptr ? desc : "表情");
+              } catch (...) {
+                using namespace onebot::tags;
+                text += SelfClosingTag(kFace, kAttrDesc, "表情");
               }
             }
           }
@@ -532,11 +526,16 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
       text += raw[i];
       ++i;
     }
-    // Trim.
+
+    // Trim and add as TextPart if non-empty.
     auto start = text.find_first_not_of(" \t\n\r");
-    if (start == std::string::npos) { return result; }
-    auto end = text.find_last_not_of(" \t\n\r");
-    result.text = text.substr(start, end - start + 1);
+    if (start != std::string::npos) {
+      auto end_pos = text.find_last_not_of(" \t\n\r");
+      std::string trimmed = text.substr(start, end_pos - start + 1);
+      if (!trimmed.empty()) {
+        result.parts.emplace_back(core::TextPart{std::move(trimmed)});
+      }
+    }
     return result;
   }
 
@@ -545,6 +544,7 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
     for (const auto& seg : message) {
       if (!seg.is_object()) { continue; }
       const std::string type = seg.value("type", "");
+
       if (type == "text") {
         const auto& data = seg.value("data", json::object());
         const std::string t = data.value("text", "");
@@ -556,20 +556,64 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
         const std::string qq = data.value("qq", "");
         if (!qq.empty()) {
           result.mentions.push_back(qq);
-          if (qq == self_id) {
-            text += "<at id=\"self\"/>";
-          } else {
-            text += "<at id=\"" + qq + "\"/>";
+          using namespace onebot::tags;
+          text += SelfClosingTag(kAt, kAttrId,
+                                 qq == self_id ? kAtSelf : qq);
+        }
+      } else if (type == "face") {
+        const auto& data = seg.value("data", json::object());
+        const std::string id_str = data.value("id", "");
+        if (!id_str.empty()) {
+          using namespace onebot::tags;
+          try {
+            int face_id = std::stoi(id_str);
+            const char* desc = QqFaceDesc(face_id);
+            text += SelfClosingTag(kFace, kAttrDesc,
+                                   desc != nullptr ? desc : "表情");
+          } catch (...) {
+            text += SelfClosingTag(kFace, kAttrDesc, "表情");
           }
         }
+      } else if (type == "image") {
+        const auto& data = seg.value("data", json::object());
+        std::string url = data.value("url", "");
+        if (!url.empty()) {
+          // Flush accumulated text before the image.
+          auto start = text.find_first_not_of(" \t\n\r");
+          if (start != std::string::npos) {
+            auto end_pos = text.find_last_not_of(" \t\n\r");
+            std::string trimmed = text.substr(start, end_pos - start + 1);
+            if (!trimmed.empty()) {
+              result.parts.emplace_back(core::TextPart{std::move(trimmed)});
+            }
+            text.clear();
+          }
+          result.parts.emplace_back(core::ImagePart{std::move(url)});
+        }
+      } else if (type == "reply") {
+        // Reply reference segment.
+        const auto& data = seg.value("data", json::object());
+        const std::string reply_id = data.value("id", "");
+        if (!reply_id.empty()) {
+          result.reply_to = "onebot:" + reply_id;
+        }
+      } else if (!type.empty()) {
+        // Unknown segment — emit stub tag so agent is aware.
+        using namespace onebot::tags;
+        text += SelfClosingTag(kMedia, kAttrType, type);
+        LOG_DEBUG("[onebot] Unhandled segment type: {} data: {}",
+                  type, seg.value("data", json::object()).dump());
       }
-      // Skip other segment types (image, face, etc.)
     }
-    // Trim.
+
+    // Flush remaining text.
     auto start = text.find_first_not_of(" \t\n\r");
     if (start != std::string::npos) {
-      auto end = text.find_last_not_of(" \t\n\r");
-      result.text = text.substr(start, end - start + 1);
+      auto end_pos = text.find_last_not_of(" \t\n\r");
+      std::string trimmed = text.substr(start, end_pos - start + 1);
+      if (!trimmed.empty()) {
+        result.parts.emplace_back(core::TextPart{std::move(trimmed)});
+      }
     }
     return result;
   }

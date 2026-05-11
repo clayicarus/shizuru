@@ -16,14 +16,13 @@
 #include "context/context_strategy.h"
 #include "controller/config.h"
 #include "controller/types.h"
+#include "core/conversation_item.h"
 #include "dialogue/reducer.h"
 #include "dialogue/timer_book.h"
 #include "dialogue/types.h"
 #include "interfaces/llm_client.h"
-#include "io/data_frame.h"
+#include "io/io_device.h"
 #include "policy/policy_layer.h"
-#include "strategies/observation_aggregator.h"
-#include "strategies/observation_filter.h"
 #include "strategies/response_filter.h"
 #include "strategies/tts_segment_strategy.h"
 
@@ -47,14 +46,6 @@ class Controller {
   using EmitFrameCallback = std::function<void(const std::string& port, io::DataFrame)>;
 
   // All dependencies injected via constructor.
-  // session_id must match the key used to initialize ContextStrategy and
-  // PolicyLayer (via InitSession), so all lookups resolve to the same slot.
-  //
-  // Strategy pointers are optional — if null, defaults are used:
-  //   observation_aggregator → PassthroughAggregator (no buffering)
-  //   observation_filter     → AcceptAllFilter (process everything)
-  //   tts_segment            → nullptr (no TTS segmentation)
-  //   response_filter        → PassthroughFilter (no transformation)
   Controller(std::string session_id,
              ControllerConfig config,
              std::unique_ptr<LlmClient> llm,
@@ -62,15 +53,19 @@ class Controller {
              CancelCallback cancel,
              ContextStrategy& context,
              PolicyLayer& policy,
-             std::unique_ptr<ObservationAggregator> observation_aggregator = nullptr,
-             std::unique_ptr<ObservationFilter> observation_filter = nullptr,
              std::unique_ptr<TtsSegmentStrategy> tts_segment = nullptr,
              std::unique_ptr<ResponseFilter> response_filter = nullptr);
 
   ~Controller();
 
-  // Thread-safe: enqueue an observation from any thread.
-  void EnqueueObservation(Observation obs);
+  // Thread-safe: enqueue a conversation item from any thread.
+  void EnqueueItem(ConversationItem item);
+
+  // Thread-safe: enqueue a tool result from any thread.
+  void EnqueueToolResult(ConversationItem item);
+
+  // Thread-safe: enqueue a system event from any thread.
+  void EnqueueSystemEvent(ConversationItem item);
 
   // Start the reasoning loop on its own thread.
   void Start();
@@ -87,11 +82,9 @@ class Controller {
   void OnTransition(TransitionCallback cb);
 
   // Request an interrupt from outside the loop thread (e.g. VAD speech_start).
-  // Thread-safe. No-op if not in an interruptible state.
   void Interrupt();
 
   // Recover from kError state to kIdle. Thread-safe.
-  // No-op if not in kError.
   void Recover();
 
   // Register callback for diagnostic events.
@@ -103,11 +96,8 @@ class Controller {
   void OnActivity(ActivityCallback cb);
 
   // Register callback for conversation items (unified UI data source).
-  // Fires for every item that should appear in the conversation view:
-  // streaming token deltas, tool calls, tool results, final responses.
-  // is_delta=true means this is a partial update to the current item.
   using ConversationItemCallback =
-      std::function<void(const conversation::ConversationItem& item, bool is_delta)>;
+      std::function<void(const ConversationItem& item, bool is_delta)>;
   void OnConversationItem(ConversationItemCallback cb);
 
  private:
@@ -115,25 +105,33 @@ class Controller {
 
   std::string session_id_;
 
-  void RunLoop();                            // Main reasoning loop
-  bool TryTransition(Event event);           // Validate + execute transition
-  void HandleThinking(const Observation& obs); // Build context, call LLM
-  void HandleActing(ActionCandidate ac);     // Emit action frame (non-blocking)
-  void HandleActingResult(const Observation& obs); // Process tool result
-  void HandleResponding(ActionCandidate ac); // Deliver response
-  bool CheckBudget();                        // Enforce guardrails
-  void ResetBudgetWindow();                  // Re-arm counters after Idle
+  // Internal event wrapper for the queue.
+  enum class InternalEventKind {
+    kConversationItem,
+    kToolResult,
+    kSystemEvent,
+    kInterrupt,
+  };
+  struct InternalEvent {
+    InternalEventKind kind;
+    ConversationItem item;
+  };
+
+  void RunLoop();
+  bool TryTransition(Event event);
+  void HandleThinking();
+  void HandleActing(ActionCandidate ac);
+  void HandleActingResult(const ConversationItem& item);
+  void HandleResponding(ActionCandidate ac);
+  bool CheckBudget();
+  void ResetBudgetWindow();
   void ApplyDialogueDecision(const dialogue::DialogueDecision& decision);
-  void EmitDiagnostic(const std::string& message); // Notify diagnostic callbacks
-  void EmitActivity(ActivityKind kind, std::string detail = {}); // Notify activity callbacks
-  void EmitConversationItem(const conversation::ConversationItem& item, bool is_delta);
+  void EmitDiagnostic(const std::string& message);
+  void EmitActivity(ActivityKind kind, std::string detail = {});
+  void EmitConversationItemCb(const ConversationItem& item, bool is_delta);
   std::string NextConversationItemId();
   std::string EnsureAssistantTurnGroupId();
   void ResetAssistantTurnUiState();
-  conversation::ConversationItem StampAssistantTurnItem(
-      conversation::ConversationItem item,
-      std::string item_id = {},
-      std::string reply_to_item_id = {});
 
   // Static transition table
   static const std::unordered_map<std::pair<State, Event>, State, PairHash>
@@ -147,37 +145,33 @@ class Controller {
   PolicyLayer& policy_;
 
   // Pluggable strategies (owned by Controller).
-  std::unique_ptr<ObservationAggregator> observation_aggregator_;
-  std::unique_ptr<ObservationFilter> observation_filter_;
   std::unique_ptr<TtsSegmentStrategy> tts_segment_;
   std::unique_ptr<ResponseFilter> response_filter_;
 
-  // Pending tool call state (set in HandleActing, read in HandleActingResult).
-  // Supports parallel tool calls: pending_tool_calls_ tracks all outstanding
-  // calls, pending_results_ collects results as they arrive.
+  // Pending tool call state.
   ActionCandidate pending_action_;
-  std::chrono::steady_clock::time_point tool_call_start_;         // for timeout
-  bool last_tool_cycle_all_success_ = true;  // Tracks tool result success for audit
+  std::chrono::steady_clock::time_point tool_call_start_;
+  bool last_tool_cycle_all_success_ = true;
 
   // State (accessed from loop thread; read via atomic for external queries)
   std::atomic<State> state_{State::kIdle};
 
-  // Observation queue (cross-thread)
+  // Event queue (cross-thread)
   std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
-  std::deque<Observation> observation_queue_;
+  std::deque<InternalEvent> event_queue_;
 
-  // Session counters (now owned by dialogue_state_ via reducer)
+  // Session counters
   bool first_token_logged_ = false;
-  bool in_thinking_block_ = false;  // Tracks <think>...</think> for TTS filtering
-  std::string thinking_tag_buf_;    // Partial tag accumulator
+  bool in_thinking_block_ = false;
+  std::string thinking_tag_buf_;
   uint64_t next_conversation_item_seq_ = 0;
   uint64_t next_assistant_turn_seq_ = 0;
   std::string active_assistant_turn_group_id_;
   std::string current_stream_item_id_;
   std::unordered_map<std::string, std::string> tool_call_item_ids_;
 
-  // Dialogue reducer (Phase 1+2: all post-aggregation paths).
+  // Dialogue reducer
   std::unique_ptr<dialogue::DialogueReducer> reducer_;
   dialogue::DialogueState dialogue_state_;
   dialogue::TimerBook timer_book_;

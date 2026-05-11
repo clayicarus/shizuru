@@ -6,22 +6,20 @@
 #include <string>
 #include <utility>
 
+#include "core/conversation_item.h"
+#include "core/control_signal.h"
 #include "app/persona/persona.h"
 #include "app/memory/sqlite_memory_store.h"
 #include "app/tools/builtin_tools.h"
 #include "async_logger.h"
-#include "conversation/item.h"
 #include "runtime/tool_dispatch_device.h"
 #include "runtime/core_device.h"
 #include "runtime/route_table.h"
-#include "io/vad/vad_event_device.h"
+#include "io/vad/energy_vad_device.h"
 #include "services/audit/log_audit_sink.h"
 #include "services/llm/openai/openai_client.h"
-#include "services/memory/in_memory_store.h"
 
 // Strategies
-#include "core/strategies/llm_observation_aggregator.h"
-#include "core/strategies/llm_observation_filter.h"
 #include "core/strategies/response_filter.h"
 #include "core/strategies/tts_segment_strategy.h"
 
@@ -37,7 +35,6 @@ AppRuntime::AppRuntime(AppConfig config) : config_(std::move(config)) {
   core::InitLogger(config_.logger);
 
   // Append builtin tool definitions to LLM config.
-  // Tool functions are registered later in Start() when scheduler is available.
   auto defs = BuiltinToolDefinitions();
   for (auto& d : defs) {
     config_.llm.tools.push_back(std::move(d));
@@ -69,10 +66,8 @@ void AppRuntime::OnConversationItem(ConversationItemCallback cb) {
 
 void AppRuntime::Start() {
   // ── Build system prompt with persona ─────────────────────────────────────
-  // TODO: Load user preferences and active followups from persistent memory.
   std::string system_prompt = BuildSystemPrompt({}, {});
 
-  // Append user's custom instruction if provided.
   if (!config_.user_instruction.empty()) {
     system_prompt += "\n\n## Additional instructions from user\n";
     system_prompt += config_.user_instruction;
@@ -81,39 +76,6 @@ void AppRuntime::Start() {
   config_.context.default_system_instruction = system_prompt;
 
   // ── Build strategy instances ─────────────────────────────────────────────
-  // ObservationAggregator: LLM-based endpointing.
-  std::unique_ptr<core::ObservationAggregator> obs_agg;
-  {
-    services::OpenAiConfig agg_cfg = config_.llm;
-    agg_cfg.max_tokens  = 8;
-    agg_cfg.temperature = 0.0;
-    agg_cfg.connect_timeout = std::chrono::seconds(5);
-    agg_cfg.read_timeout    = std::chrono::seconds(10);
-    agg_cfg.tools.clear();  // Aggregator doesn't need tools.
-
-    core::LlmAggregatorConfig agg_params;
-    agg_params.aggregation_timeout = std::chrono::milliseconds(5000);
-    agg_params.llm_timeout         = std::chrono::milliseconds(2000);
-
-    obs_agg = std::make_unique<core::LlmObservationAggregator>(
-        std::make_unique<services::OpenAiClient>(agg_cfg),
-        std::move(agg_params));
-  }
-
-  // ObservationFilter: LLM-based relevance check.
-  std::unique_ptr<core::ObservationFilter> obs_filter;
-  {
-    services::OpenAiConfig filter_cfg = config_.llm;
-    filter_cfg.max_tokens  = 8;
-    filter_cfg.temperature = 0.0;
-    filter_cfg.connect_timeout = std::chrono::seconds(5);
-    filter_cfg.read_timeout    = std::chrono::seconds(10);
-    filter_cfg.tools.clear();
-
-    obs_filter = std::make_unique<core::LlmObservationFilter>(
-        std::make_unique<services::OpenAiClient>(filter_cfg));
-  }
-
   // TtsSegmentStrategy: punctuation-based sentence segmentation.
   auto tts_seg = []() {
     core::PunctuationSegmentStrategy::Config seg_cfg;
@@ -132,45 +94,25 @@ void AppRuntime::Start() {
   const std::string session_id =
       !config_.user_id.empty() ? config_.user_id : generated_session_id;
 
-  std::unique_ptr<core::MemoryStore> memory_store;
+  std::unique_ptr<core::HistoryStore> history_store;
   if (!config_.db_path.empty()) {
-    memory_store = std::make_unique<app::SqliteMemoryStore>(config_.db_path);
+    history_store = std::make_unique<app::SqliteMemoryStore>(config_.db_path);
   } else {
-    memory_store = std::make_unique<services::InMemoryStore>();
+    history_store = std::make_unique<app::SqliteMemoryStore>(":memory:");
   }
 
-  std::vector<core::conversation::ConversationItem> persisted_items;
+  std::vector<core::ConversationItem> persisted_items;
   {
-    // Capture clock offsets once for converting steady_clock → wall-clock ms.
-    const auto now_sys = std::chrono::system_clock::now();
-    const auto now_steady = std::chrono::steady_clock::now();
-
-    for (const auto& entry :
-         memory_store->GetRecent(session_id, kMaxStartupHistoryReplayEntries)) {
-      auto item = core::conversation::TryParseConversationItem(entry.item_json);
-      if (!item.has_value()) {
-        continue;
-      }
-      // Inject the persisted wall-clock timestamp so the UI can display the
-      // original message time instead of the current replay time.
-      auto delta = entry.timestamp - now_steady;
-      auto wall_tp = now_sys + std::chrono::duration_cast<
-          std::chrono::system_clock::duration>(delta);
-      auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-          wall_tp.time_since_epoch()).count();
-      item->payload["timestamp_ms"] = wall_ms;
-      persisted_items.push_back(std::move(*item));
-    }
+    persisted_items =
+        history_store->GetRecent(session_id, kMaxStartupHistoryReplayEntries);
   }
 
   auto core = std::make_unique<runtime::CoreDevice>(
       "core", session_id,
       config_.controller, config_.context, config_.policy,
       std::make_unique<services::OpenAiClient>(config_.llm),
-      std::move(memory_store),
+      std::move(history_store),
       std::make_unique<services::LogAuditSink>(),
-      std::move(obs_agg),
-      std::move(obs_filter),
       std::move(tts_seg),
       std::move(resp_filter));
 
@@ -211,7 +153,7 @@ void AppRuntime::Start() {
       });
 
   core->Session().GetController().OnConversationItem(
-      [this](const core::conversation::ConversationItem& item, bool is_delta) {
+      [this](const core::ConversationItem& item, bool is_delta) {
         ConversationItemCallback cb;
         {
           std::lock_guard<std::mutex> lock(cb_mutex_);
@@ -223,9 +165,23 @@ void AppRuntime::Start() {
   // ── Create ToolDispatchDevice ────────────────────────────────────────────
   auto tool_dispatch = std::make_unique<runtime::ToolDispatchDevice>(tools_);
 
+  // Wire tool dispatch to deliver ToolResultSignal to CoreDevice.
+  tool_dispatch->SetOnResultCallback([this](core::ToolResultSignal signal) {
+    if (core_device_) {
+      core_device_->OnControl(std::move(signal));
+    }
+  });
+
   // ── Create SchedulerDevice ───────────────────────────────────────────────
   auto scheduler = std::make_unique<SchedulerDevice>();
   scheduler_ = scheduler.get();
+
+  // Wire scheduler to deliver items to core.
+  scheduler_->SetOnItemCallback([this](core::ConversationItem item) {
+    if (core_device_) {
+      core_device_->OnConversationItem(std::move(item));
+    }
+  });
 
   // ── Register builtin tool functions (now that scheduler is available) ────
   RegisterBuiltinTools(tools_, scheduler_);
@@ -233,7 +189,7 @@ void AppRuntime::Start() {
   // ── Register core devices on bus ─────────────────────────────────────────
   bus_.RegisterDevice(std::move(core));
   bus_.RegisterDevice(std::move(tool_dispatch));
-  bus_.RegisterDevice(std::move(scheduler));
+  // Note: SchedulerDevice is not an IoDevice — it delivers via callback.
 
   // ── Wire core routes ─────────────────────────────────────────────────────
   WireRoutes();
@@ -243,17 +199,24 @@ void AppRuntime::Start() {
 
   // ── Start all auto_start devices ─────────────────────────────────────────
   bus_.StartAll();
+
+  // Start scheduler timer thread.
+  scheduler_->Start();
 }
 
 void AppRuntime::SendMessage(const std::string& text) {
   if (core_device_ == nullptr) { return; }
-  io::DataFrame frame;
-  frame.type = "text/plain";
-  frame.payload.assign(text.begin(), text.end());
-  frame.source_device = "user";
-  frame.source_port = "text";
-  frame.timestamp = std::chrono::steady_clock::now();
-  core_device_->OnInput("text_in", std::move(frame));
+
+  core::ConversationItem item;
+  item.item_id = "ui:" + std::to_string(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  item.conversation_id = config_.user_id;
+  item.kind = core::ConversationItemKind::kUserMessage;
+  item.actor = core::ActorRef{config_.user_id, "User", core::ActorKind::kHuman};
+  item.parts.emplace_back(core::TextPart{text});
+  item.wall_time = std::chrono::system_clock::now();
+
+  core_device_->OnConversationItem(std::move(item));
 }
 
 core::State AppRuntime::GetState() const {
@@ -262,6 +225,9 @@ core::State AppRuntime::GetState() const {
 }
 
 void AppRuntime::Shutdown() {
+  if (scheduler_) {
+    scheduler_->Stop();
+  }
   core_device_ = nullptr;
   scheduler_ = nullptr;
   bus_.Shutdown();
@@ -272,10 +238,8 @@ void AppRuntime::ClearDatabase() {
   auto& session = core_device_->Session();
   const auto& sid = session.SessionId();
 
-  // Wipe all persisted entries for this session.
-  session.GetMemoryStore().Clear(sid);
+  session.GetHistoryStore().Clear(sid);
 
-  // Reset the context window so the next turn doesn't reference stale data.
   session.GetContext().ReleaseSession(sid);
   session.GetContext().InitSession(
       sid, config_.context.default_system_instruction);
@@ -286,15 +250,13 @@ void AppRuntime::ClearContext() {
   auto& session = core_device_->Session();
   const auto& sid = session.SessionId();
 
-  // Release ephemeral context state (system instruction cache, etc.)
-  // while preserving committed history in the memory store.
   session.GetContext().ReleaseSession(sid);
   session.GetContext().InitSession(
       sid, config_.context.default_system_instruction);
 }
 
 void AppRuntime::ReplayPersistedConversationHistory(
-    const std::vector<core::conversation::ConversationItem>& items) {
+    const std::vector<core::ConversationItem>& items) {
   ConversationItemCallback cb;
   {
     std::lock_guard<std::mutex> lock(cb_mutex_);
@@ -314,30 +276,24 @@ void AppRuntime::WireRoutes() {
   constexpr RouteOptions kDma{.requires_control_plane = false};
   constexpr RouteOptions kCtrl{.requires_control_plane = true};
 
-  // TTS segment route: core streaming chunks → TTS device.
-  bus_.AddRoute({"core", "tts_out"}, {"elevenlabs_tts", "text_in"}, kDma);
+  // TTS route: assistant semantic output → TTS device.
+  bus_.AddRoute({"core", "item_out"}, {"elevenlabs_tts", "item_in"}, kDma);
 
   // Tool call round-trip.
-  bus_.AddRoute({"core", "action_out"},
-                {"tool_dispatch", runtime::ToolDispatchDevice::kActionIn}, kCtrl);
-  bus_.AddRoute({"tool_dispatch", runtime::ToolDispatchDevice::kResultOut},
-                {"core", "tool_result_in"}, kCtrl);
+  // Semantic tool dispatch now flows over the typed control plane:
+  //   core:signal_out -> tool_dispatch:control_in
+  // Tool results already return via ToolResultSignal into CoreDevice::OnControl().
+  bus_.AddRoute({"core", "signal_out"},
+                {"tool_dispatch", "control_in"}, kCtrl);
 
-  // VAD adapter routes: speech_end flushes ASR locally; speech_start becomes
-  // a generic interrupt before entering core.
-  bus_.AddRoute({"vad_event", io::VadEventDevice::kInterruptOut},
-                {"core", "interrupt_in"}, kDma);
-  bus_.AddRoute({"vad_event", io::VadEventDevice::kControlOut},
-                {"baidu_asr", "control_in"}, kCtrl);
+  // VAD route: speech_end drives ASR flush via typed control signal.
+  bus_.AddRoute({"vad", io::EnergyVadDevice::kControlSignalOut},
+                {"baidu_asr", "signal_in"}, kCtrl);
 
-  // Control plane: core → IO devices.
-  bus_.AddRoute({"core", "control_out"}, {"baidu_asr", "control_in"}, kCtrl);
-  bus_.AddRoute({"core", "control_out"}, {"elevenlabs_tts", "control_in"}, kCtrl);
-  bus_.AddRoute({"core", "control_out"}, {"audio_playout", "control_in"}, kCtrl);
-
-  // Scheduler event → core scheduler_in (proactive conversation, bypasses filter).
-  bus_.AddRoute({"scheduler", SchedulerDevice::kEventOut},
-                {"core", "scheduler_in"}, kDma);
+  // Control plane: core → IO devices via typed signals.
+  bus_.AddRoute({"core", "signal_out"}, {"baidu_asr", "signal_in"}, kCtrl);
+  bus_.AddRoute({"core", "signal_out"}, {"elevenlabs_tts", "signal_in"}, kCtrl);
+  bus_.AddRoute({"core", "signal_out"}, {"audio_playout", "signal_in"}, kCtrl);
 }
 
 }  // namespace shizuru::app

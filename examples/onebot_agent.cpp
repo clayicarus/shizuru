@@ -28,10 +28,8 @@
 #include "runtime/core_device.h"
 #include "services/audit/log_audit_sink.h"
 #include "services/llm/openai/openai_client.h"
-#include "services/memory/in_memory_store.h"
 #include "app/memory/sqlite_memory_store.h"
 #include "strategies/response_filter.h"
-#include "strategies/window_aggregator.h"
 
 namespace {
 
@@ -77,7 +75,7 @@ int main(int argc, char* argv[]) {
   std::string base_url = "https://token-plan-cn.xiaomimimo.com";
   std::string api_path = "/v1/chat/completions";
   std::string api_key;
-  std::string model    = "mimo-v2.5-pro";
+  std::string model    = "mimo-v2.5";
   std::string extra_prompt;
   std::string db_path = "onebot.db";
 
@@ -188,22 +186,23 @@ int main(int argc, char* argv[]) {
   }
 
   // ── Create CoreDevice ─────────────────────────────────────────────────────
-  const std::string session_id =
-      "onebot-" + std::to_string(
-          std::chrono::steady_clock::now().time_since_epoch().count());
+  // Session ID: use the first group in whitelist, or "onebot-default".
+  // This ensures history persists across restarts for the same group.
+  std::string session_id;
+  if (!ob_config.group_whitelist.empty()) {
+    session_id = "group-" + std::to_string(ob_config.group_whitelist[0]);
+  } else {
+    session_id = "onebot-default";
+  }
 
-  // WindowAggregator: batch messages within a 3-second window.
-  // Multiple users' messages are collected and sent to LLM as a group.
-  shizuru::core::WindowAggregatorConfig agg_cfg;
-  agg_cfg.window_duration = std::chrono::milliseconds(3000);
+  // WindowAggregator removed in unified pipeline refactoring.
+  // Messages are now delivered directly as ConversationItems.
 
   shizuru::runtime::CoreDevice core(
       "core", session_id, ctrl_cfg, ctx_cfg, pol_cfg,
       std::make_unique<shizuru::services::OpenAiClient>(llm_cfg),
       std::make_unique<shizuru::app::SqliteMemoryStore>(db_path),
       std::make_unique<shizuru::services::LogAuditSink>(),
-      std::make_unique<shizuru::core::WindowAggregator>(agg_cfg),
-      nullptr,   // no observation filter
       nullptr,   // no TTS segmentation
       std::make_unique<shizuru::core::StripThinkingFilter>());
 
@@ -211,19 +210,15 @@ int main(int argc, char* argv[]) {
   const int listen_port = ob_config.port;
   shizuru::io::onebot::OneBotDevice onebot(std::move(ob_config), "onebot");
 
-  // ── Wire: OneBotDevice.text_out → CoreDevice.text_in ──────────────────────
-  onebot.SetOutputCallback(
-      [&core](const std::string& /*device_id*/,
-              const std::string& port_name,
-              shizuru::io::DataFrame frame) {
-        if (port_name == shizuru::io::onebot::OneBotDevice::kTextOut) {
-          core.OnInput("text_in", std::move(frame));
-        }
+  // ── Wire: OneBotDevice → CoreDevice via ConversationItem callback ─────────
+  onebot.SetOnItemCallback(
+      [&core](shizuru::core::ConversationItem item) {
+        core.OnConversationItem(std::move(item));
       });
 
-  // ── Wire: CoreDevice.tts_out → OneBotDevice.text_in (route-based reply) ──
-  // The reply context (message_type, target_id) is injected from the last
-  // incoming message so OneBotDevice knows where to send the reply.
+  // ── Wire: CoreDevice output → OneBotDevice reply ──────────────────────────
+  // TODO(Phase 7): Replace with proper ConversationItem output callback.
+  // For now, use the legacy SetOutputCallback for reply routing.
   core.SetOutputCallback(
       [&onebot](const std::string& /*device_id*/,
                 const std::string& port_name,
@@ -231,19 +226,13 @@ int main(int argc, char* argv[]) {
         // ── error_out: send a canned error message ──────────────────────
         if (port_name == "error_out") {
           std::cout << "[error] LLM failure, sending error reply\n";
-
           auto ctx = onebot.GetLastReplyContext();
           if (ctx.target_id.empty()) { return; }
-
           const std::string error_msg = "抱歉，我暂时出了点问题，请稍后再试～";
-          shizuru::io::DataFrame err_frame;
-          err_frame.type = "text/plain";
-          err_frame.payload.assign(error_msg.begin(), error_msg.end());
-          err_frame.timestamp = std::chrono::steady_clock::now();
-          err_frame.metadata["message_type"] = ctx.message_type;
-          err_frame.metadata["target_id"] = ctx.target_id;
-          onebot.OnInput(shizuru::io::onebot::OneBotDevice::kTextIn,
-                         std::move(err_frame));
+          try {
+            int64_t target = std::stoll(ctx.target_id);
+            onebot.SendMessage(ctx.message_type, target, error_msg);
+          } catch (...) {}
           return;
         }
 
@@ -254,42 +243,42 @@ int main(int argc, char* argv[]) {
         if (text.empty()) { return; }
 
         // Check for <skip/> — LLM says no reply needed.
-        if (text.find("<skip") != std::string::npos) {
+        if (text.find("<skip/>") != std::string::npos) {
           std::cout << "[assistant] (skipped)\n";
           return;
         }
 
         std::cout << "\n[assistant] " << text << "\n";
 
-        // Inject reply routing metadata from the last incoming message.
+        // Inject reply routing from the last incoming message.
         auto ctx = onebot.GetLastReplyContext();
         if (ctx.target_id.empty()) { return; }
 
-        // Long group messages → merged forward to avoid chat flooding.
-        constexpr size_t kForwardThreshold = 450;
-        if (ctx.message_type == "group" && text.size() > kForwardThreshold) {
-          try {
-            int64_t gid = std::stoll(ctx.target_id);
-            onebot.SendGroupForward(gid, "Shizuru", text);
-          } catch (...) {}
-          return;
-        }
+        try {
+          int64_t target = std::stoll(ctx.target_id);
 
-        // Normal reply.
-        frame.metadata["message_type"] = ctx.message_type;
-        frame.metadata["target_id"] = ctx.target_id;
-        onebot.OnInput(shizuru::io::onebot::OneBotDevice::kTextIn,
-                       std::move(frame));
+          // Long group messages → merged forward to avoid chat flooding.
+          constexpr size_t kForwardThreshold = 450;
+          if (ctx.message_type == "group" && text.size() > kForwardThreshold) {
+            onebot.SendGroupForward(target, "Shizuru", text);
+          } else {
+            onebot.SendMessage(ctx.message_type, target, text);
+          }
+        } catch (...) {}
       });
 
   // ── Callbacks for console observability only ──────────────────────────────
   core.Session().GetController().OnConversationItem(
-      [](const shizuru::core::conversation::ConversationItem& item,
+      [](const shizuru::core::ConversationItem& item,
          bool is_delta) {
         if (is_delta) { return; }
-        if (item.kind ==
-            shizuru::core::conversation::ItemKind::kHumanMessage) {
-          const std::string text = item.payload.value("text", "");
+        if (item.kind == shizuru::core::ConversationItemKind::kUserMessage) {
+          std::string text;
+          for (const auto& part : item.parts) {
+            if (auto* tp = std::get_if<shizuru::core::TextPart>(&part)) {
+              text += tp->text;
+            }
+          }
           const std::string name = item.actor.display_name.empty()
               ? item.actor.actor_id : item.actor.display_name;
           std::cout << "\n[" << name << "] " << text << "\n";
@@ -306,8 +295,9 @@ int main(int argc, char* argv[]) {
   onebot.Start();
 
   std::cout << "=== OneBot Agent ===\n"
-            << "Model:  " << model << "\n"
-            << "Listen: 0.0.0.0:" << listen_port << "\n"
+            << "Model:   " << model << "\n"
+            << "Session: " << session_id << "\n"
+            << "Listen:  0.0.0.0:" << listen_port << "\n"
             << "Configure your OneBot implementation to connect to "
             << "ws://<this-host>:" << listen_port << "\n"
             << "Press Ctrl+C to quit.\n\n";

@@ -17,7 +17,6 @@
 #include <thread>
 #include <vector>
 
-#include "io/data_frame.h"
 #include "runtime/tool_dispatch_device.h"
 #include "runtime/tool_registry.h"
 
@@ -348,6 +347,45 @@ TEST(ToolDispatchDeviceTest, StopDrainsQueueBeforeJoining) {
   EXPECT_EQ(executed.load(), kCount);
   std::lock_guard<std::mutex> lock(mu);
   EXPECT_EQ(static_cast<int>(emitted.size()), kCount);
+}
+
+TEST(ToolDispatchDeviceTest, ControlSignalToolCallDispatchesTool) {
+  ToolRegistry registry;
+  registry.Register("echo", [](const nlohmann::json& args) {
+    ToolResult r;
+    r.success = true;
+    r.output = args;
+    return r;
+  });
+
+  ToolDispatchDevice device(registry);
+
+  std::mutex mu;
+  std::vector<core::ToolResultSignal> emitted;
+  device.SetOnResultCallback([&](core::ToolResultSignal sig) {
+    std::lock_guard<std::mutex> lock(mu);
+    emitted.push_back(std::move(sig));
+  });
+
+  device.Start();
+  device.OnControlSignal(
+      "control_in",
+      core::ToolCallStartSignal{
+          "call_ctrl_1", "echo", R"({"value":"hello"})"});
+
+  bool got = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return !emitted.empty();
+  });
+
+  device.Stop();
+
+  ASSERT_TRUE(got);
+  std::lock_guard<std::mutex> lock(mu);
+  ASSERT_EQ(emitted.size(), 1u);
+  EXPECT_EQ(emitted[0].tool_call_id, "call_ctrl_1");
+  EXPECT_TRUE(emitted[0].success);
+  EXPECT_NE(emitted[0].content.find("hello"), std::string::npos);
 }
 
 }  // namespace

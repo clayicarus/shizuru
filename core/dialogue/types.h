@@ -2,14 +2,13 @@
 
 #include <chrono>
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
 #include <vector>
 
-#include "context/types.h"      // MemoryEntryType
-#include "controller/types.h"   // Observation, ActionCandidate, Event, ActivityKind
+#include "controller/types.h"       // ActionCandidate, Event, ActivityKind
+#include "core/conversation_item.h" // ConversationItem
 
 namespace shizuru::core::dialogue {
 
@@ -50,11 +49,6 @@ struct DebounceCooldownExpired {
   std::chrono::steady_clock::time_point now;
 };
 
-struct UserMessageReceived {
-  Observation observation;
-  std::chrono::steady_clock::time_point now;
-};
-
 struct ShutdownRequested {};
 
 // Phase 1 stubs — now populated with real payloads (Phase 2):
@@ -71,11 +65,6 @@ struct LlmFailed {
   std::chrono::steady_clock::time_point now;
 };
 
-struct ToolResultReceived {
-  Observation observation;
-  std::chrono::steady_clock::time_point now;
-};
-
 struct ToolCallTimeout {
   std::vector<std::string> missing_tool_call_ids;
   std::chrono::steady_clock::time_point now;
@@ -83,11 +72,6 @@ struct ToolCallTimeout {
 
 struct ContinuationRequested {
   std::string source;
-  std::chrono::steady_clock::time_point now;
-};
-
-struct SystemEventReceived {
-  Observation observation;
   std::chrono::steady_clock::time_point now;
 };
 
@@ -105,39 +89,36 @@ struct TurnTriggerClassified {
   std::chrono::steady_clock::time_point now;
 };
 
-// Phase 3 new events:
+// Phase 4 events — ConversationItem-based (replacing old Observation events):
 
-struct UserFragmentReceived {
-  Observation observation;
+struct ConversationItemReceived {
+  ConversationItem item;
   std::chrono::steady_clock::time_point now;
 };
 
-struct AggregationComplete {
-  Observation observation;
+struct ToolResultReceived {
+  ConversationItem item;  // kind = kToolResult
   std::chrono::steady_clock::time_point now;
 };
 
-struct AggregationTimeout {
-  Observation observation;
+struct SystemEventReceived {
+  ConversationItem item;  // kind = kSystemEvent
   std::chrono::steady_clock::time_point now;
 };
 
 using DialogueEvent = std::variant<
     InterruptRequested,
     DebounceCooldownExpired,
-    UserMessageReceived,
     ShutdownRequested,
     LlmCompleted,
     LlmFailed,
-    ToolResultReceived,
     ToolCallTimeout,
     ContinuationRequested,
-    SystemEventReceived,
     TimerExpired,
     TurnTriggerClassified,
-    UserFragmentReceived,
-    AggregationComplete,
-    AggregationTimeout>;
+    ConversationItemReceived,
+    ToolResultReceived,
+    SystemEventReceived>;
 
 // ---------------------------------------------------------------------------
 // CooldownPhase
@@ -149,33 +130,7 @@ enum class CooldownPhase {
 };
 
 // ---------------------------------------------------------------------------
-// Workspace Types — Phase 3
-// ---------------------------------------------------------------------------
-
-// A single entry in the provisional turn workspace.
-struct WorkspaceEntry {
-  std::string content;
-  std::string source;
-  MemoryEntryType entry_type = MemoryEntryType::kUserMessage;
-  std::chrono::steady_clock::time_point timestamp;
-};
-
-// Provisional turn workspace — holds data that has not yet been committed
-// to ContextStrategy.  Entries are promoted via CommitWorkspace effect.
-struct TurnWorkspace {
-  // Buffered user input fragments (accumulated during debounce or
-  // aggregation).  Merged into a single MemoryEntry on CommitWorkspace
-  // when merge_fragments is true.
-  std::vector<WorkspaceEntry> user_fragments;
-
-  // In-progress assistant output.  Set when the reducer knows an assistant
-  // response is being prepared but not yet committed.  Cleared on commit
-  // or discard.
-  std::optional<WorkspaceEntry> assistant_partial;
-};
-
-// ---------------------------------------------------------------------------
-// DialogueState — Phase 1 + Phase 2 + Phase 3
+// DialogueState — Phase 1 + Phase 2
 // ---------------------------------------------------------------------------
 
 struct DialogueState {
@@ -214,9 +169,6 @@ struct DialogueState {
 
   // Collected tool results (id → result JSON).
   std::unordered_map<std::string, std::string> pending_tool_results;
-
-  // --- Phase 3 addition ---
-  TurnWorkspace workspace;
 };
 
 // ---------------------------------------------------------------------------
@@ -224,10 +176,6 @@ struct DialogueState {
 // ---------------------------------------------------------------------------
 
 // Phase 1 effects:
-
-struct RecordMemory {
-  Observation observation;
-};
 
 struct CancelLlm {};
 
@@ -246,16 +194,8 @@ struct NoOp {};
 
 // Phase 2 new effects:
 
-struct StartLlm {
-  Observation trigger;
-};
-
 struct EmitToolCallFrames {
   ActionCandidate action;
-};
-
-struct RecordToolResult {
-  Observation observation;
 };
 
 struct RecordToolCallDecision {
@@ -282,11 +222,6 @@ struct CancelTimer {
   std::string timer_id;
 };
 
-struct StartTurnTriggerClassification {
-  uint64_t obs_id;
-  Observation observation;
-};
-
 struct CancelTurnTriggerClassification {
   uint64_t obs_id;
 };
@@ -301,43 +236,40 @@ struct RecordTimeoutResults {
   std::vector<std::string> missing_tool_call_ids;
 };
 
-// Phase 3 new effects:
+// Phase 4 effects — ConversationItem-based (replacing old Observation effects):
 
-struct BufferToWorkspace {
-  WorkspaceEntry entry;
-  bool is_fragment;  // true = user fragment, will be merged on commit
+struct RecordConversationItem {
+  ConversationItem item;
 };
 
-struct CommitWorkspace {
-  bool merge_fragments;  // true = merge user_fragments into single entry
+struct StartLlmWithBatch {
+  std::vector<ConversationItem> items;
 };
 
-struct DiscardWorkspace {};
+struct RecordToolResultItem {
+  ConversationItem item;  // kind = kToolResult
+};
 
 using DialogueEffect = std::variant<
-    RecordMemory,
     CancelLlm,
     StartLlmContinuation,
     EmitActivityEffect,
     SignalBudgetExhausted,
     NoOp,
-    StartLlm,
     EmitToolCallFrames,
-    RecordToolResult,
     RecordToolCallDecision,
     DeliverResponse,
     ResetBudgetWindow,
     EmitDiagnosticEffect,
     ScheduleTimer,
     CancelTimer,
-    StartTurnTriggerClassification,
     CancelTurnTriggerClassification,
     TransitionState,
     RecordInterruptMemory,
     RecordTimeoutResults,
-    BufferToWorkspace,
-    CommitWorkspace,
-    DiscardWorkspace>;
+    RecordConversationItem,
+    StartLlmWithBatch,
+    RecordToolResultItem>;
 
 // ---------------------------------------------------------------------------
 // DialogueDecision

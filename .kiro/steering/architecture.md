@@ -137,49 +137,71 @@ for Dart NativeCallable.  No business logic.
 
 ## Core Internal Architecture
 
-The current `core/` architecture is a hybrid:
+The `core/` architecture implements a unified semantic pipeline:
 
-1. **Execution state machine in `controller/`** — the existing `State`,
-   `Event`, and `kTransitionTable` still drive the main lifecycle
-   (`Listening`, `Thinking`, `Acting`, `Responding`, etc.).
-2. **Dialogue reducer in `dialogue/`** — Phase 1 reducer handles
-   barge-in/debounce decisions and emits explicit effects.
-3. **Effect execution in `controller/`** — Controller applies reducer effects
-   inline without delegating interrupt semantics back to the old
-   `HandleInterrupt()` path.
-4. **Normal message path in `controller/` + `strategies/`** — regular user
-   input still goes through aggregator/filter before thinking.
+### Data Model
 
-The longer-term direction for `core/` is a fuller dialogue kernel layered as:
+```
+Perception Layer          Interpretation Layer       Semantic Layer
+─────────────────         ────────────────────       ──────────────
+AudioFrame (raw)    →     ASR Interpreter      →     ConversationItem
+OneBot JSON (raw)   →     OneBot Parser        →     ConversationItem
+UI text (raw)       →     Flutter Adapter      →     ConversationItem
+Timer event (raw)   →     Scheduler Adapter    →     ConversationItem
+```
 
-1. **Dialogue events** — external observations, timer expirations, LLM
-   callbacks, tool results, playback lifecycle updates.
-2. **Dialogue state** — explicit turn workspace, committed history view,
-   deliberation state, output state, pending tools, agenda.
-3. **Reducer / turn policy** — pure semantic decision layer that maps
-   `(state, event)` to `(next_state, effects)`.
-4. **Effect execution** — impure operations such as recording memory,
-   scheduling timers, starting/cancelling LLM calls, emitting tool frames,
-   and pushing UI conversation items.
+### Core Types
 
-Phase 1 already establishes the reducer/effect shell, but only for the
-barge-in/debounce branch.  The detailed proposal and future phases live in
-`.kiro/steering/dialogue-kernel.md`.
+- **`ConversationItem`** (`core/conversation_item.h`): Source-final semantic unit.
+  Contains: item_id, conversation_id, kind, actor, parts (ContentParts),
+  wall_time, reply_to_item_id, mentions.
+- **`ContentPart`** (`core/content_part.h`): Variant of TextPart, ImagePart,
+  AudioPart, ToolCallPart, ToolResultPart.
+- **`InvokeBatch`** (`core/invoke_batch.h`): One LLM call's input unit.
+  Groups multiple ConversationItems with a TriggerReason.
+- **`ControlSignal`** (`core/control_signal.h`): Control plane variant
+  (Flush, Cancel, Interrupt, ThinkStart, ToolCallStart, FinalAnswerStart,
+  TurnComplete, ToolResult).
 
-### Why This Split Exists
+### Input Path
 
-- **Dialogue state is multi-dimensional**.  Listening / thinking / acting is
-  not enough once the agent must reason about barge-in, debounce windows,
-  pending tool work, and streaming playback simultaneously.
-- **Strategies are signal providers, not workflow owners**.  Aggregators and
-  filters may classify or reshape input, but they should not encode the whole
-  conversation policy by themselves.
-- **Effects must be explicit**.  Starting an LLM request, writing memory,
-  or cancelling playback are asynchronous side effects that should be visible
-  in the architecture rather than hidden inside controller branches.
-- **Migration is incremental**.  During Phase 1, Controller still owns the
-  normal message path and the execution state machine, while dialogue reducer
-  logic is introduced only on the barge-in/debounce branch.
+1. Interpreters deliver `ConversationItem` to `CoreDevice::OnConversationItem()`
+2. Core's `Batcher` accumulates items in a pending queue
+3. Turn policy decides when to flush → constructs `InvokeBatch`
+4. `provider_render` projects InvokeBatch + history → OpenAI messages JSON
+5. `LlmClient::SubmitStreaming()` sends to LLM
+
+### Output Path
+
+1. LLM raw output → `OutputInterpreter`
+2. OutputInterpreter produces:
+   - `ConversationItem(kAssistantMessage)` → history
+   - `ConversationItem(kToolCall)` → history + tool dispatch
+   - `ControlSignal` (ThinkStart, TurnComplete, etc.)
+
+### Tool Result Path
+
+1. `ToolDispatchDevice` executes tool → emits `ToolResultSignal`
+2. `CoreDevice::OnControl()` receives signal
+3. Core constructs `ConversationItem(kToolResult)` → writes to history
+4. Triggers tool continuation (re-invokes LLM)
+
+### History
+
+- `HistoryStore` interface (`core/history.h`): Append, GetWindow, GetRecent, Clear
+- `InMemoryHistory` (`services/memory/in_memory_history.h`): Development/testing
+- `SqliteMemoryStore` (`app/memory/`): Persistent storage, JSON serialization
+
+### Dialogue Kernel
+
+The dialogue kernel (`core/dialogue/`) owns turn-taking semantics:
+- **DialogueEvent**: ConversationItemReceived, ToolResultReceived,
+  SystemEventReceived, InterruptRequested, LlmCompleted, etc.
+- **DialogueEffect**: RecordConversationItem, StartLlmWithBatch,
+  RecordToolResultItem, CancelLlm, ScheduleTimer, etc.
+- **DialogueReducer**: Pure `(state, event) → (next_state, effects)`
+
+The Controller remains the event loop shell and effect executor.
 
 ## OS-Inspired Design Analogy
 

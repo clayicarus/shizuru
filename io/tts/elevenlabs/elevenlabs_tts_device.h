@@ -10,6 +10,8 @@
 #include <thread>
 #include <vector>
 
+#include "core/conversation_item.h"
+#include "core/control_signal.h"
 #include "io/tts/tts_device.h"
 #include "tts/elevenlabs/elevenlabs_client.h"
 #include "tts/tts_client.h"
@@ -18,9 +20,10 @@
 namespace shizuru::io {
 
 // ElevenLabs implementation of TtsDevice.
-// Wraps ElevenLabsClient: accepts text/plain DataFrames on "text_in",
+// Wraps ElevenLabsClient: accepts assistant ConversationItems on "item_in",
 // emits audio/pcm DataFrames on "audio_out".
-// OnInput() is non-blocking: synthesis is posted to an internal worker thread.
+// OnConversationItem() is non-blocking: synthesis is posted to an internal
+// worker thread.
 class ElevenLabsTtsDevice : public TtsDevice {
  public:
   // Production constructor: creates ElevenLabsClient from config.
@@ -37,6 +40,10 @@ class ElevenLabsTtsDevice : public TtsDevice {
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
   void OnInput(const std::string& port_name, DataFrame frame) override;
+  void OnConversationItem(const std::string& port_name,
+                          core::ConversationItem item) override;
+  void OnControlSignal(const std::string& port_name,
+                       core::ControlSignal signal) override;
   void SetOutputCallback(OutputCallback cb) override;
   void Start() override;
   void Stop() override;
@@ -49,8 +56,9 @@ class ElevenLabsTtsDevice : public TtsDevice {
   void Synthesize(const std::string& text);
 
   static constexpr char kTextIn[]    = "text_in";
+  static constexpr char kItemIn[]    = "item_in";
   static constexpr char kAudioOut[]  = "audio_out";
-  static constexpr char kControlIn[] = "control_in";
+  static constexpr char kSignalIn[]  = "signal_in";
 
   std::string device_id_;
   std::unique_ptr<services::TtsClient> client_;

@@ -1,6 +1,7 @@
 add_library(shizuru_llm_openai STATIC
   openai_client.cpp
   json_parser.cpp
+  provider_render.cpp
 )
 
 target_include_directories(shizuru_llm_openai

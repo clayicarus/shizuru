@@ -39,10 +39,8 @@
 #include "io/asr/baidu/baidu_asr_device.h"
 #include "io/tts/elevenlabs/elevenlabs_tts_device.h"
 #include "io/vad/energy_vad_device.h"
-#include "io/vad/vad_event_device.h"
 #include "io/probe/pcm_dump_device.h"
 #include "io/io_device.h"
-#include "io/data_frame.h"
 
 // Audio backends
 #ifdef __ANDROID__
@@ -59,8 +57,9 @@
 #include "services/utils/baidu/baidu_token_manager.h"
 
 // Core types
+#include "core/content_part.h"
+#include "core/conversation_item.h"
 #include "core/controller/types.h"
-#include "core/conversation/item.h"
 #include "core/policy/types.h"
 #include "runtime/route_table.h"
 
@@ -71,6 +70,143 @@ using namespace shizuru;
 // ---------------------------------------------------------------------------
 
 namespace {
+
+std::string ItemKindToString(core::ConversationItemKind kind) {
+  switch (kind) {
+    case core::ConversationItemKind::kUserMessage:
+      return "human_message";
+    case core::ConversationItemKind::kAssistantMessage:
+      return "assistant_message";
+    case core::ConversationItemKind::kSystemEvent:
+      return "system_event";
+    case core::ConversationItemKind::kToolCall:
+      return "tool_call";
+    case core::ConversationItemKind::kToolResult:
+      return "tool_result";
+  }
+  return "unknown";
+}
+
+std::string ActorKindToString(core::ActorKind kind) {
+  switch (kind) {
+    case core::ActorKind::kHuman:
+      return "human";
+    case core::ActorKind::kAssistant:
+      return "assistant";
+    case core::ActorKind::kSystem:
+      return "system";
+    case core::ActorKind::kTool:
+      return "tool";
+  }
+  return "unknown";
+}
+
+std::string SerializeConversationItemForUi(const core::ConversationItem& item) {
+  using json = nlohmann::json;
+
+  json j;
+  j["item_id"] = item.item_id;
+  j["conversation_id"] = item.conversation_id;
+  j["kind"] = ItemKindToString(item.kind);
+  j["actor"] = {
+      {"actor_id", item.actor.actor_id},
+      {"display_name", item.actor.display_name},
+      {"kind", ActorKindToString(item.actor.kind)},
+  };
+  j["timestamp_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+      item.wall_time.time_since_epoch()).count();
+  if (item.reply_to_item_id.has_value()) {
+    j["reply_to_item_id"] = *item.reply_to_item_id;
+  }
+  j["mentions"] = item.mentions;
+
+  json parts = json::array();
+  for (const auto& part : item.parts) {
+    json pj;
+    if (const auto* tp = std::get_if<core::TextPart>(&part)) {
+      pj["type"] = "text";
+      pj["text"] = tp->text;
+    } else if (const auto* ip = std::get_if<core::ImagePart>(&part)) {
+      pj["type"] = "image";
+      pj["url"] = ip->url;
+    } else if (const auto* ap = std::get_if<core::AudioPart>(&part)) {
+      pj["type"] = "audio";
+      pj["format"] = ap->format;
+    } else if (const auto* tcp = std::get_if<core::ToolCallPart>(&part)) {
+      pj["type"] = "tool_call";
+      pj["tool_call_id"] = tcp->tool_call_id;
+      pj["name"] = tcp->name;
+      auto args = json::parse(tcp->arguments_json, nullptr, false);
+      pj["arguments"] = args.is_discarded() ? json(tcp->arguments_json) : args;
+    } else if (const auto* trp = std::get_if<core::ToolResultPart>(&part)) {
+      pj["type"] = "tool_result";
+      pj["tool_call_id"] = trp->tool_call_id;
+      pj["tool_name"] = trp->tool_name;
+      pj["success"] = trp->success;
+      auto result = json::parse(trp->result_json, nullptr, false);
+      pj["result"] = result.is_discarded() ? json(trp->result_json) : result;
+    }
+    parts.push_back(std::move(pj));
+  }
+  j["parts"] = parts;
+
+  // Backward-compatible payload for current Flutter provider.
+  json payload = json::object();
+  payload["timestamp_ms"] = j["timestamp_ms"];
+  switch (item.kind) {
+    case core::ConversationItemKind::kUserMessage:
+    case core::ConversationItemKind::kAssistantMessage:
+    case core::ConversationItemKind::kSystemEvent: {
+      std::string text;
+      for (const auto& part : item.parts) {
+        if (const auto* tp = std::get_if<core::TextPart>(&part)) {
+          text += tp->text;
+        }
+      }
+      payload["text"] = text;
+      break;
+    }
+    case core::ConversationItemKind::kToolCall: {
+      json tool_calls = json::array();
+      for (const auto& part : item.parts) {
+        if (const auto* tcp = std::get_if<core::ToolCallPart>(&part)) {
+          auto args = json::parse(tcp->arguments_json, nullptr, false);
+          tool_calls.push_back({
+              {"id", tcp->tool_call_id},
+              {"type", "function"},
+              {"function", {
+                  {"name", tcp->name},
+                  {"arguments", args.is_discarded() ? json(tcp->arguments_json) : args},
+              }},
+          });
+        }
+      }
+      payload["tool_calls"] = std::move(tool_calls);
+      break;
+    }
+    case core::ConversationItemKind::kToolResult: {
+      if (!item.parts.empty()) {
+        if (const auto* trp = std::get_if<core::ToolResultPart>(&item.parts.front())) {
+          payload["tool_name"] = trp->tool_name;
+          payload["tool_call_id"] = trp->tool_call_id;
+          auto result = json::parse(trp->result_json, nullptr, false);
+          if (result.is_discarded()) {
+            payload["content"] = {
+                {"success", trp->success},
+                {"output", trp->result_json},
+            };
+          } else {
+            payload["content"] = result;
+          }
+        }
+      }
+      break;
+    }
+  }
+  j["payload"] = std::move(payload);
+
+  return j.dump();
+}
 
 class AudioLevelProbe : public io::IoDevice {
  public:
@@ -84,12 +220,13 @@ class AudioLevelProbe : public io::IoDevice {
 
   std::string GetDeviceId() const override { return device_id_; }
   std::vector<io::PortDescriptor> GetPortDescriptors() const override {
-    return {{"audio_in", io::PortDirection::kInput, "audio/pcm"}};
+    return {{"audio_in", io::PortDirection::kInput, "audio/pcm",
+             runtime::PortPayloadKind::kAudioFrame}};
   }
-  void OnInput(const std::string&, io::DataFrame frame) override {
-    if (frame.payload.empty()) { return; }
-    const auto* s = reinterpret_cast<const int16_t*>(frame.payload.data());
-    const size_t n = frame.payload.size() / sizeof(int16_t);
+  void OnInput(const std::string&, io::DataFrame) override {}
+  void OnAudioFrame(const std::string&, io::AudioFrame frame) override {
+    const auto* s = frame.data;
+    const size_t n = frame.NumSamples();
     if (n == 0) { return; }
     double sum = 0;
     for (size_t i = 0; i < n; ++i) { double v = s[i]; sum += v * v; }
@@ -121,14 +258,21 @@ class TranscriptProbe : public io::IoDevice {
 
   std::string GetDeviceId() const override { return device_id_; }
   std::vector<io::PortDescriptor> GetPortDescriptors() const override {
-    return {{"text_in", io::PortDirection::kInput, "text/plain"}};
+    return {{"item_in", io::PortDirection::kInput, "",
+             runtime::PortPayloadKind::kConversationItem}};
   }
-  void OnInput(const std::string&, io::DataFrame frame) override {
-    if (frame.payload.empty()) { return; }
+  void OnInput(const std::string&, io::DataFrame) override {}
+  void OnConversationItem(const std::string&, core::ConversationItem item) override {
     ShizuruTranscriptCallback cb; void* ud;
     { std::lock_guard<std::mutex> lock(mu_); cb = cb_; ud = ud_; }
     if (cb) {
-      std::string text(frame.payload.begin(), frame.payload.end());
+      std::string text;
+      for (const auto& part : item.parts) {
+        if (const auto* tp = std::get_if<core::TextPart>(&part)) {
+          text += tp->text;
+        }
+      }
+      if (text.empty()) { return; }
       auto* heap = static_cast<char*>(std::malloc(text.size() + 1));
       std::memcpy(heap, text.c_str(), text.size() + 1);
       cb(heap, ud);
@@ -324,7 +468,6 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
       return std::make_unique<io::EnergyVadDevice>(v);
     }();
     auto vad_dump = std::make_unique<io::PcmDumpDevice>("vad_dump");
-    auto asr_flush = std::make_unique<io::VadEventDevice>();
     auto asr_dev = std::make_unique<io::BaiduAsrDevice>(baidu_cfg, token_mgr);
     auto tts_dev = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
     auto playout_dump = std::make_unique<io::PcmDumpDevice>("playout_dump");
@@ -341,7 +484,6 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
     bus.RegisterDevice(std::move(capture_dump));
     bus.RegisterDevice(std::move(vad_dev));
     bus.RegisterDevice(std::move(vad_dump));
-    bus.RegisterDevice(std::move(asr_flush));
     bus.RegisterDevice(std::move(asr_dev));
     bus.RegisterDevice(std::move(tts_dev));
     bus.RegisterDevice(std::move(playout_dump));
@@ -356,14 +498,13 @@ ShizuruHandle shizuru_create(const char* config_json, char* error_buf,
     bus.AddRoute({"capture", io::PcmDumpDevice::kPassOut}, {"vad", io::EnergyVadDevice::kAudioIn}, kDma);
     bus.AddRoute({"vad", io::EnergyVadDevice::kAudioOut}, {"vad_dump", io::PcmDumpDevice::kPassIn}, kDma);
     bus.AddRoute({"vad_dump", io::PcmDumpDevice::kPassOut}, {"baidu_asr", "audio_in"}, kDma);
-    bus.AddRoute({"vad", io::EnergyVadDevice::kVadOut}, {"vad_event", io::VadEventDevice::kVadIn}, kDma);
-    bus.AddRoute({"vad_event", io::VadEventDevice::kControlOut}, {"baidu_asr", "control_in"}, kCtrl);
-    bus.AddRoute({"vad_event", io::VadEventDevice::kInterruptOut}, {"core", "interrupt_in"}, kDma);
-    bus.AddRoute({"baidu_asr", "text_out"}, {"core", "text_in"}, kDma);
+    bus.AddRoute({"vad", io::EnergyVadDevice::kControlSignalOut}, {"baidu_asr", "signal_in"}, kCtrl);
+    bus.AddRoute({"vad", io::EnergyVadDevice::kInterruptSignalOut}, {"core", "control_in"}, kCtrl);
+    bus.AddRoute({"baidu_asr", "item_out"}, {"core", "item_in"}, kDma);
     bus.AddRoute({"elevenlabs_tts", "audio_out"}, {"playout_dump", io::PcmDumpDevice::kPassIn}, kDma);
     bus.AddRoute({"playout_dump", io::PcmDumpDevice::kPassOut}, {"audio_playout", "audio_in"}, kDma);
     bus.AddRoute({"audio_capture", "audio_out"}, {"audio_level_probe", "audio_in"}, kDma);
-    bus.AddRoute({"baidu_asr", "text_out"}, {"transcript_probe", "text_in"}, kDma);
+    bus.AddRoute({"baidu_asr", "item_out"}, {"transcript_probe", "item_in"}, kDma);
 
     // Disable voice input pathway by default (capture → VAD chain).
     // The route was just added above, so this takes effect immediately.
@@ -388,18 +529,17 @@ int32_t shizuru_start(ShizuruHandle handle) {
   ShizuruContext* raw = ctx;
 
   // Wire ConversationItem callback → C output callback.
-  // Serializes ConversationItem to JSON at the bridge boundary.
   ctx->app->OnConversationItem(
-      [raw](const core::conversation::ConversationItem& item, bool is_delta) {
+      [raw](const core::ConversationItem& item, bool is_delta) {
     ShizuruOutputCallback cb; void* ud;
     {
       std::lock_guard<std::mutex> lock(raw->cb_mutex);
       cb = raw->output_cb; ud = raw->output_ud;
     }
     if (!cb) { return; }
-    std::string json = core::conversation::SerializeConversationItem(item);
-    auto* heap = static_cast<char*>(std::malloc(json.size() + 1));
-    std::memcpy(heap, json.c_str(), json.size() + 1);
+    const std::string item_json = SerializeConversationItemForUi(item);
+    auto* heap = static_cast<char*>(std::malloc(item_json.size() + 1));
+    std::memcpy(heap, item_json.c_str(), item_json.size() + 1);
     cb(heap, is_delta ? 1 : 0, ud);
   });
 
@@ -447,7 +587,7 @@ int32_t shizuru_start(ShizuruHandle handle) {
     // (The voice input pathway is disabled in shizuru_create where the
     // capture→vad route is added by the bridge itself.)
     raw->app->Bus().SetRouteEnabled(
-        {"core", "tts_out"}, {"elevenlabs_tts", "text_in"}, false);
+        {"core", "item_out"}, {"elevenlabs_tts", "item_in"}, false);
 
     // State polling loop.
     core::State last = core::State::kTerminated;
@@ -613,7 +753,7 @@ int32_t shizuru_set_voice_output(ShizuruHandle handle, int32_t enable) {
   if (!handle) { return -1; }
   auto* ctx = static_cast<ShizuruContext*>(handle);
   ctx->app->Bus().SetRouteEnabled(
-      {"core", "tts_out"}, {"elevenlabs_tts", "text_in"}, enable != 0);
+      {"core", "item_out"}, {"elevenlabs_tts", "item_in"}, enable != 0);
   return 0;
 }
 

@@ -9,8 +9,11 @@
 #include <vector>
 
 #include "async_logger.h"
+#include "core/control_signal.h"
+#include "core/conversation_item.h"
+#include "io/audio/audio_device/audio_frame.h"
 #include "io/io_device.h"
-#include "io/data_frame.h"
+#include "runtime/port_payload_kind.h"
 #include "runtime/route_table.h"
 
 namespace shizuru::runtime {
@@ -80,10 +83,34 @@ class AgentRuntime {
   using FrameSinkCallback = std::function<void(io::DataFrame frame)>;
   void OnFrameSink(FrameSinkCallback cb);
 
+  using AudioFrameSinkCallback = std::function<void(io::AudioFrame frame)>;
+  using ConversationItemSinkCallback =
+      std::function<void(core::ConversationItem item)>;
+  using ControlSignalSinkCallback =
+      std::function<void(core::ControlSignal signal)>;
+  void OnAudioFrameSink(AudioFrameSinkCallback cb);
+  void OnConversationItemSink(ConversationItemSinkCallback cb);
+  void OnControlSignalSink(ControlSignalSinkCallback cb);
+
  private:
+  static constexpr char kAppOutputDeviceId[] = "app_output";
+  static constexpr char kAppOutputFrameInPort[] = "frame_in";
+  static constexpr char kAppOutputAudioInPort[] = "audio_in";
+  static constexpr char kAppOutputItemInPort[] = "item_in";
+  static constexpr char kAppOutputControlInPort[] = "control_in";
+
   void DispatchFrame(const std::string& device_id,
                      const std::string& port_name,
                      io::DataFrame frame);
+  void DispatchAudioFrame(const std::string& device_id,
+                          const std::string& port_name,
+                          io::AudioFrame frame);
+  void DispatchConversationItem(const std::string& device_id,
+                                const std::string& port_name,
+                                core::ConversationItem item);
+  void DispatchControlSignal(const std::string& device_id,
+                             const std::string& port_name,
+                             core::ControlSignal signal);
 
   static constexpr char MODULE_NAME[] = "Runtime";
 
@@ -100,6 +127,9 @@ class AgentRuntime {
 
   std::mutex sink_cb_mutex_;
   FrameSinkCallback sink_cb_;
+  AudioFrameSinkCallback audio_sink_cb_;
+  ConversationItemSinkCallback item_sink_cb_;
+  ControlSignalSinkCallback control_sink_cb_;
 };
 
 }  // namespace shizuru::runtime

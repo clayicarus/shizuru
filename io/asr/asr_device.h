@@ -5,11 +5,14 @@
 namespace shizuru::io {
 
 // Vendor-agnostic ASR device interface.
-// Accepts audio DataFrames on "audio_in", emits text DataFrames on "text_out".
+// Accepts audio on "audio_in". Implementations may expose both:
+// - legacy text/plain DataFrame output on "text_out" for transcript probes
+// - typed ConversationItem output on "item_out" for semantic delivery to Core
 //
 // Port contract:
 //   Input  "audio_in" — accepts DataFrames with type "audio/pcm"
-//   Output "text_out" — emits DataFrames with type "text/plain"
+//   Output "text_out" — optional legacy DataFrame transcript output
+//   Output "item_out" — optional typed ConversationItem final result
 class AsrDevice : public IoDevice {
  public:
   // Cancels any in-progress transcription immediately.

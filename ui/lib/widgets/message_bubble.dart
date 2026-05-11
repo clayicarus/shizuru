@@ -59,6 +59,13 @@ class _MessageBubbleState extends State<MessageBubble>
         : Theme.of(context).colorScheme.secondaryContainer;
 
     final timeStr = _formatTime(widget.message.timestamp);
+    final speaker = isUser
+        ? (widget.message.actorName?.isNotEmpty == true
+              ? widget.message.actorName!
+              : 'you')
+        : (widget.message.actorName?.isNotEmpty == true
+              ? widget.message.actorName!
+              : 'assistant');
 
     return GestureDetector(
       onLongPress: () => _copyToClipboard(context),
@@ -80,7 +87,7 @@ class _MessageBubbleState extends State<MessageBubble>
                 : CrossAxisAlignment.start,
             children: [
               Text(
-                '${isUser ? 'you' : 'assistant'}  $timeStr',
+                '$speaker  $timeStr',
                 style: Theme.of(context).textTheme.labelSmall,
               ),
               const SizedBox(height: 4),

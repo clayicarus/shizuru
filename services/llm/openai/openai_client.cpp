@@ -24,11 +24,11 @@ std::string OpenAiClient::SchemeHost() const {
   return config_.base_url;
 }
 
-core::LlmResult OpenAiClient::Submit(const core::ContextWindow& context) {
+core::LlmResult OpenAiClient::Submit(const nlohmann::json& messages) {
   std::lock_guard<std::mutex> lock(request_mutex_);
   cancel_requested_.store(false);
 
-  std::string body = SerializeRequest(context, config_);
+  std::string body = SerializeRequest(messages, config_);
   std::string url = SchemeHost() + config_.api_path;
 
   LOG_DEBUG("[{}] Submit to {}", MODULE_NAME, url);
@@ -54,13 +54,13 @@ core::LlmResult OpenAiClient::Submit(const core::ContextWindow& context) {
 }
 
 core::LlmResult OpenAiClient::SubmitStreaming(
-    const core::ContextWindow& context, core::StreamCallback on_token) {
+    const nlohmann::json& messages, core::StreamCallback on_token) {
   std::lock_guard<std::mutex> lock(request_mutex_);
   cancel_requested_.store(false);
 
   // Build streaming request body.
   nlohmann::json body_json = nlohmann::json::parse(
-      SerializeRequest(context, config_));
+      SerializeRequest(messages, config_));
   body_json["stream"] = true;
   body_json["stream_options"] = {{"include_usage", true}};
   std::string body = body_json.dump();

@@ -1,11 +1,7 @@
 #pragma once
 
-#include <chrono>
-#include <optional>
 #include <string>
 #include <vector>
-
-#include "conversation/item.h"
 
 namespace shizuru::core {
 
@@ -42,29 +38,6 @@ enum class ActionType {
   kToolCall,
   kResponse,
   kContinue,
-};
-
-enum class ObservationType {
-  kUserMessage,
-  kToolResult,
-  kSystemEvent,
-  kInterruption,
-  kContinuation,  // Signals next thinking step; no message appended to context.
-};
-
-// An input event from the external environment.
-struct Observation {
-  ObservationType type;
-  std::string content;   // Serialized payload
-  std::string source;    // Origin identifier (e.g., "user", "tool:web_search")
-  std::chrono::steady_clock::time_point timestamp;
-  std::optional<conversation::ConversationItem> item;
-
-  // Multiple conversation items — used when an aggregator batches messages
-  // from different actors within a time window.  When non-empty, each item
-  // is recorded to context individually.  `item` above is ignored if `items`
-  // is populated.
-  std::vector<conversation::ConversationItem> items;
 };
 
 // A single tool call proposed by the LLM.

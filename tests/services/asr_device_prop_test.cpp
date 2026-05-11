@@ -18,7 +18,6 @@
 #include <vector>
 
 #include "io/asr/asr_device.h"
-#include "io/data_frame.h"
 
 namespace shizuru::io {
 namespace {

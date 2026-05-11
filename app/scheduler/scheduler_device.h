@@ -1,10 +1,10 @@
 #pragma once
 
-// app/scheduler/scheduler_device.h — Timer-based IoDevice for reminders and followups.
+// app/scheduler/scheduler_device.h — Timer-based device for reminders and followups.
 //
 // Runs a background timer thread.  When a scheduled item's trigger time
-// arrives, emits a DataFrame on "event_out" that gets routed to CoreDevice,
-// causing the Controller to initiate a proactive conversation turn.
+// arrives, constructs a ConversationItem(kSystemEvent) and delivers it via
+// the on_item_ callback.
 //
 // Supports:
 //   - One-shot reminders (fire once at a specific time)
@@ -22,21 +22,27 @@
 #include <thread>
 #include <vector>
 
-#include "io/io_device.h"
+#include "core/conversation_item.h"
 
 namespace shizuru::app {
 
 struct ScheduledItem {
   std::string id;
-  std::string payload;  // Opaque string passed in the DataFrame (e.g., reminder JSON).
+  std::string payload;  // Opaque string (e.g., reminder text or JSON).
   std::chrono::system_clock::time_point trigger_time;
   bool fired = false;
 };
 
-class SchedulerDevice : public io::IoDevice {
+// Callback type for delivering scheduler events as ConversationItems.
+using SchedulerItemCallback = std::function<void(core::ConversationItem)>;
+
+class SchedulerDevice {
  public:
   explicit SchedulerDevice(std::string device_id = "scheduler");
-  ~SchedulerDevice() override;
+  ~SchedulerDevice();
+
+  SchedulerDevice(const SchedulerDevice&) = delete;
+  SchedulerDevice& operator=(const SchedulerDevice&) = delete;
 
   // Schedule a one-shot event.
   void Schedule(ScheduledItem item);
@@ -44,13 +50,14 @@ class SchedulerDevice : public io::IoDevice {
   // Cancel a scheduled item by ID.  Returns true if found and cancelled.
   bool Cancel(const std::string& id);
 
-  // IoDevice interface.
-  std::string GetDeviceId() const override;
-  std::vector<io::PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, io::DataFrame frame) override;
-  void SetOutputCallback(io::OutputCallback cb) override;
-  void Start() override;
-  void Stop() override;
+  // Register the callback that delivers ConversationItems to Core.
+  void SetOnItemCallback(SchedulerItemCallback cb);
+
+  // Lifecycle.
+  void Start();
+  void Stop();
+
+  std::string GetDeviceId() const;
 
   static constexpr char kEventOut[] = "event_out";
 
@@ -58,8 +65,9 @@ class SchedulerDevice : public io::IoDevice {
   void TimerLoop();
 
   std::string device_id_;
-  io::OutputCallback output_cb_;
-  std::mutex output_cb_mutex_;
+
+  std::mutex on_item_mutex_;
+  SchedulerItemCallback on_item_;
 
   std::mutex items_mutex_;
   std::condition_variable items_cv_;
