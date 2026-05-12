@@ -120,7 +120,7 @@ core::LlmResult OpenAiClient::SubmitStreaming(
     return true;
   };
 
-  long status = CurlPostStreaming(
+  CurlStreamingResponse response = CurlPostStreaming(
       url,
       {"Authorization: " + AuthHeader(),
        "Content-Type: application/json"},
@@ -135,10 +135,12 @@ core::LlmResult OpenAiClient::SubmitStreaming(
     throw std::runtime_error("Request cancelled");
   }
 
-  if (status != 200) {
-    LOG_WARN("[{}] SubmitStreaming status {}", MODULE_NAME, status);
+  if (response.status_code != 200) {
+    LOG_WARN("[{}] SubmitStreaming status {} body: {}",
+             MODULE_NAME, response.status_code, response.body);
     throw std::runtime_error("LLM API returned status " +
-                             std::to_string(status));
+                             std::to_string(response.status_code) +
+                             (response.body.empty() ? "" : ": " + response.body));
   }
 
   // If stream didn't produce a [DONE] marker, build result from accumulated.

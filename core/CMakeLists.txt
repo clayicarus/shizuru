@@ -18,7 +18,6 @@ add_library(shizuru_core STATIC
   dialogue/timer_book.cpp
   batching.cpp
   output_interpreter.cpp
-  provider_render.cpp
 
   # Header-only semantic pipeline types (listed for IDE visibility)
   content_part.h

@@ -119,7 +119,6 @@ std::string SerializeConversationItemForUi(const core::ConversationItem& item) {
   if (item.reply_to_item_id.has_value()) {
     j["reply_to_item_id"] = *item.reply_to_item_id;
   }
-  j["mentions"] = item.mentions;
 
   json parts = json::array();
   for (const auto& part : item.parts) {
@@ -262,14 +261,6 @@ std::optional<core::ConversationItem> ParseConversationItemFromUiJson(
   if (parsed.contains("reply_to_item_id") &&
       parsed["reply_to_item_id"].is_string()) {
     item.reply_to_item_id = parsed["reply_to_item_id"].get<std::string>();
-  }
-
-  if (parsed.contains("mentions") && parsed["mentions"].is_array()) {
-    for (const auto& mention : parsed["mentions"]) {
-      if (mention.is_string()) {
-        item.mentions.push_back(mention.get<std::string>());
-      }
-    }
   }
 
   const auto parts = parsed.value("parts", json::array());

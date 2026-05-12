@@ -76,6 +76,8 @@ TEST(ProviderRender, ParallelToolCallsInFullRender) {
   ASSERT_GE(messages.size(), 3);  // system + user + tool_call
   EXPECT_EQ(messages[0]["role"], "system");
   EXPECT_EQ(messages[1]["role"], "user");
+  EXPECT_EQ(messages[1]["content"],
+            "<message id=\"user1\" name=\"User\">search for cats and dogs</message>");
   EXPECT_EQ(messages[2]["role"], "assistant");
   EXPECT_EQ(messages[2]["tool_calls"].size(), 2);
 }
@@ -122,6 +124,101 @@ TEST(ProviderRender, SingleToolResultRendersCorrectly) {
   EXPECT_EQ(msg["role"], "tool");
   EXPECT_EQ(msg["tool_call_id"], "call_1");
   EXPECT_EQ(msg["content"], R"({"ok":true})");
+}
+
+TEST(ProviderRender, UserImageOnlyMessageRendersContentArray) {
+  core::ConversationItem user_msg;
+  user_msg.item_id = "u1";
+  user_msg.kind = core::ConversationItemKind::kUserMessage;
+  user_msg.actor = {"user1", "User", core::ActorKind::kHuman};
+  user_msg.parts.emplace_back(
+      core::ImagePart{"https://example.com/cat.png"});
+
+  json msg = RenderItem(user_msg, false);
+
+  EXPECT_EQ(msg["role"], "user");
+  ASSERT_TRUE(msg["content"].is_array());
+  ASSERT_EQ(msg["content"].size(), 1);
+  EXPECT_EQ(msg["content"][0]["type"], "image_url");
+  EXPECT_EQ(msg["content"][0]["image_url"]["url"],
+            "https://example.com/cat.png");
+}
+
+TEST(ProviderRender, UserMixedTextAndImageMessageRendersBothParts) {
+  core::ConversationItem user_msg;
+  user_msg.item_id = "u1";
+  user_msg.kind = core::ConversationItemKind::kUserMessage;
+  user_msg.actor = {"user1", "Alice", core::ActorKind::kHuman};
+  user_msg.parts.emplace_back(core::TextPart{"look at this"});
+  user_msg.parts.emplace_back(
+      core::ImagePart{"https://example.com/cat.png"});
+
+  json msg = RenderItem(user_msg, true);
+
+  EXPECT_EQ(msg["role"], "user");
+  ASSERT_TRUE(msg["content"].is_array());
+  ASSERT_EQ(msg["content"].size(), 2);
+  EXPECT_EQ(msg["content"][0]["type"], "text");
+  EXPECT_EQ(msg["content"][0]["text"],
+            "<message id=\"user1\" name=\"Alice\">look at this</message>");
+  EXPECT_EQ(msg["content"][1]["type"], "image_url");
+  EXPECT_EQ(msg["content"][1]["image_url"]["url"],
+            "https://example.com/cat.png");
+}
+
+TEST(ProviderRender, HistoryImagesAreFilteredButBatchImagesRemain) {
+  core::ConversationItem historical_image;
+  historical_image.item_id = "history-image";
+  historical_image.kind = core::ConversationItemKind::kUserMessage;
+  historical_image.actor = {"user1", "Alice", core::ActorKind::kHuman};
+  historical_image.parts.emplace_back(
+      core::ImagePart{"https://example.com/old.png"});
+
+  core::ConversationItem historical_text;
+  historical_text.item_id = "history-text";
+  historical_text.kind = core::ConversationItemKind::kUserMessage;
+  historical_text.actor = {"user1", "Alice", core::ActorKind::kHuman};
+  historical_text.parts.emplace_back(core::TextPart{"earlier text"});
+
+  core::ConversationItem batch_image;
+  batch_image.item_id = "batch-image";
+  batch_image.kind = core::ConversationItemKind::kUserMessage;
+  batch_image.actor = {"user1", "Alice", core::ActorKind::kHuman};
+  batch_image.parts.emplace_back(
+      core::ImagePart{"https://example.com/current.png"});
+
+  core::InvokeBatch batch;
+  batch.conversation_id = "conv1";
+  batch.items.push_back(batch_image);
+
+  json messages = RenderMessages(
+      {historical_image, historical_text}, batch, "You are helpful.");
+
+  ASSERT_EQ(messages.size(), 3);
+  EXPECT_EQ(messages[0]["role"], "system");
+  EXPECT_EQ(messages[1]["role"], "user");
+  EXPECT_EQ(messages[1]["content"],
+            "<message id=\"user1\" name=\"Alice\">earlier text</message>");
+  EXPECT_EQ(messages[2]["role"], "user");
+  ASSERT_TRUE(messages[2]["content"].is_array());
+  ASSERT_EQ(messages[2]["content"].size(), 1);
+  EXPECT_EQ(messages[2]["content"][0]["type"], "image_url");
+  EXPECT_EQ(messages[2]["content"][0]["image_url"]["url"],
+            "https://example.com/current.png");
+}
+
+TEST(ProviderRender, SingleActorUserMessageStillIncludesActorEnvelope) {
+  core::ConversationItem user_msg;
+  user_msg.item_id = "u1";
+  user_msg.kind = core::ConversationItemKind::kUserMessage;
+  user_msg.actor = {"user1", "icarus", core::ActorKind::kHuman};
+  user_msg.parts.emplace_back(core::TextPart{"你知道我是谁吗"});
+
+  json msg = RenderItem(user_msg, false);
+
+  EXPECT_EQ(msg["role"], "user");
+  EXPECT_EQ(msg["content"],
+            "<message id=\"user1\" name=\"icarus\">你知道我是谁吗</message>");
 }
 
 }  // namespace

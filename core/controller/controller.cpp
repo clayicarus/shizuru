@@ -9,7 +9,7 @@
 
 #include "async_logger.h"
 #include "core/invoke_batch.h"
-#include "core/provider_render.h"
+#include "services/llm/openai/provider_render.h"
 #include "dialogue/default_reducer.h"
 
 namespace shizuru::core {
@@ -344,7 +344,7 @@ void Controller::RunLoop() {
 }
 
 // Build context and submit to LLM.
-void Controller::HandleThinking() {
+void Controller::HandleThinking(std::vector<ConversationItem> batch_items) {
   if (CheckBudget()) {
     ResetAssistantTurnUiState();
     TryTransition(Event::kStopConditionMet);
@@ -362,11 +362,28 @@ void Controller::HandleThinking() {
   auto history = store.GetWindow(session_id_, context_.GetConfig().max_context_tokens);
   std::string system_instruction = context_.GetSystemInstruction(session_id_);
 
-  // Use provider_render to project history into OpenAI messages JSON.
-  core::InvokeBatch empty_batch;
-  empty_batch.conversation_id = session_id_;
+  if (!batch_items.empty()) {
+    std::unordered_set<std::string> current_batch_ids;
+    current_batch_ids.reserve(batch_items.size());
+    for (const auto& item : batch_items) {
+      current_batch_ids.insert(item.item_id);
+    }
+
+    std::vector<ConversationItem> filtered_history;
+    filtered_history.reserve(history.size());
+    for (auto& item : history) {
+      if (current_batch_ids.count(item.item_id) == 0) {
+        filtered_history.push_back(std::move(item));
+      }
+    }
+    history = std::move(filtered_history);
+  }
+
+  core::InvokeBatch batch;
+  batch.conversation_id = session_id_;
+  batch.items = std::move(batch_items);
   nlohmann::json messages = services::RenderMessages(
-      history, empty_batch, system_instruction);
+      history, batch, system_instruction);
 
   first_token_logged_ = false;
   in_thinking_block_ = false;
@@ -694,7 +711,7 @@ void Controller::ApplyDialogueDecision(
           TryTransition(Event::kUserObservation);
         }
         try {
-          HandleThinking();
+          HandleThinking(e.items);
         } catch (...) {
           TryTransition(Event::kLlmFailure);
         }

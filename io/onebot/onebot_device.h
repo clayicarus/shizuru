@@ -83,6 +83,14 @@ class OneBotDevice {
   };
   ReplyContext GetLastReplyContext() const;
 
+  // Test helper for validating message-chain parsing without a live socket.
+  struct ParsedMessageForTest {
+    core::ContentParts parts;
+    std::optional<std::string> reply_to;
+  };
+  static ParsedMessageForTest ParseMessageForTest(
+      const nlohmann::json& message, const std::string& self_id);
+
  private:
   // Event handling.
   void HandleEvent(const std::string& json_str);
@@ -96,10 +104,9 @@ class OneBotDevice {
   bool IsGroupAllowed(int64_t group_id) const;
   bool IsUserAllowed(int64_t user_id) const;
 
-  // Parse OneBot message segments into ContentParts + mentions + reply info.
+  // Parse OneBot message segments into ordered ContentParts + reply info.
   struct ParsedMessage {
-    core::ContentParts parts;             // TextPart and ImagePart entries
-    std::vector<std::string> mentions;    // QQ IDs that were @'d
+    core::ContentParts parts;
     std::optional<std::string> reply_to;  // message_id of replied message
   };
   static ParsedMessage ParseMessage(const nlohmann::json& message,

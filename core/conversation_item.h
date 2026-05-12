@@ -38,7 +38,6 @@ struct ConversationItem {
   ContentParts parts;
   std::chrono::system_clock::time_point wall_time;
   std::optional<std::string> reply_to_item_id;
-  std::vector<std::string> mentions;
 };
 
 }  // namespace shizuru::core

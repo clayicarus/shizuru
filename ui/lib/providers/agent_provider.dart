@@ -155,7 +155,6 @@ class AgentProvider extends ChangeNotifier {
           'text': text,
         }
       ],
-      'mentions': const <String>[],
     });
     bridge.sendConversationItemJson(itemJson);
   }

@@ -32,3 +32,15 @@ target_include_directories(vad_event_device_typed_test
   PRIVATE ${CMAKE_SOURCE_DIR}
 )
 add_test(NAME vad_event_device_typed_test COMMAND vad_event_device_typed_test)
+
+add_executable(onebot_message_parse_test
+  onebot_message_parse_test.cpp
+)
+target_link_libraries(onebot_message_parse_test
+  PRIVATE shizuru_io_onebot
+  PRIVATE GTest::gtest_main
+)
+target_include_directories(onebot_message_parse_test
+  PRIVATE ${CMAKE_SOURCE_DIR}
+)
+add_test(NAME onebot_message_parse_test COMMAND onebot_message_parse_test)

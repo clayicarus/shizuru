@@ -231,7 +231,7 @@ void OneBotDevice::HandleMessageEvent(const json& event) {
     if (!IsUserAllowed(user_id)) { return; }
   }
 
-  // Parse message segments into ContentParts + mentions.
+  // Parse message segments into ordered ContentParts.
   ParsedMessage parsed;
   if (event.contains("message")) {
     parsed = ParseMessage(event["message"], self_id_);
@@ -294,7 +294,6 @@ void OneBotDevice::HandleMessageEvent(const json& event) {
   item.parts = std::move(parsed.parts);
   item.wall_time = wall_time;
   item.reply_to_item_id = std::move(parsed.reply_to);
-  item.mentions = std::move(parsed.mentions);
 
   LOG_INFO("[{}] {} message from {} ({}): item_id={}", device_id_,
            message_type, item.actor.display_name, item.actor.actor_id,
@@ -422,6 +421,12 @@ OneBotDevice::ReplyContext OneBotDevice::GetLastReplyContext() const {
   return last_reply_ctx_;
 }
 
+OneBotDevice::ParsedMessageForTest OneBotDevice::ParseMessageForTest(
+    const json& message, const std::string& self_id) {
+  ParsedMessage parsed = ParseMessage(message, self_id);
+  return ParsedMessageForTest{std::move(parsed.parts), std::move(parsed.reply_to)};
+}
+
 // ---------------------------------------------------------------------------
 // Whitelist helpers
 // ---------------------------------------------------------------------------
@@ -437,15 +442,21 @@ bool OneBotDevice::IsUserAllowed(int64_t user_id) const {
 }
 
 // ---------------------------------------------------------------------------
-// Message parsing — produces ContentParts + mentions + reply_to
+// Message parsing — produces ordered ContentParts + reply_to
 // ---------------------------------------------------------------------------
 
 OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
     const json& message, const std::string& self_id) {
   ParsedMessage result;
 
+  auto flush_text = [&result](std::string& text) {
+    if (text.empty()) { return; }
+    result.parts.emplace_back(core::TextPart{std::move(text)});
+    text.clear();
+  };
+
   if (message.is_string()) {
-    // CQ-coded string.  Extract @mentions, images, and text content.
+    // CQ-coded string. Preserve segment order while mapping into ContentParts.
     std::string raw = message.get<std::string>();
     std::string text;
     text.reserve(raw.size());
@@ -464,10 +475,11 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
               std::string qq = cq.substr(qq_pos + 3,
                   qq_end == std::string::npos ? std::string::npos
                                               : qq_end - qq_pos - 3);
-              result.mentions.push_back(qq);
-              using namespace onebot::tags;
-              text += SelfClosingTag(kAt, kAttrId,
-                                     qq == self_id ? kAtSelf : qq);
+              if (!qq.empty()) {
+                using namespace onebot::tags;
+                text += SelfClosingTag(kAt, kAttrId,
+                                       qq == self_id ? kAtSelf : qq);
+              }
             }
           } else if (cq.substr(0, 6) == "image,") {
             // Extract URL from CQ image: [CQ:image,...,url=https://...]
@@ -485,6 +497,7 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
                 }
               }
               if (!decoded.empty()) {
+                flush_text(text);
                 result.parts.emplace_back(core::ImagePart{std::move(decoded)});
               }
             }
@@ -527,15 +540,7 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
       ++i;
     }
 
-    // Trim and add as TextPart if non-empty.
-    auto start = text.find_first_not_of(" \t\n\r");
-    if (start != std::string::npos) {
-      auto end_pos = text.find_last_not_of(" \t\n\r");
-      std::string trimmed = text.substr(start, end_pos - start + 1);
-      if (!trimmed.empty()) {
-        result.parts.emplace_back(core::TextPart{std::move(trimmed)});
-      }
-    }
+    flush_text(text);
     return result;
   }
 
@@ -555,7 +560,6 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
         const auto& data = seg.value("data", json::object());
         const std::string qq = data.value("qq", "");
         if (!qq.empty()) {
-          result.mentions.push_back(qq);
           using namespace onebot::tags;
           text += SelfClosingTag(kAt, kAttrId,
                                  qq == self_id ? kAtSelf : qq);
@@ -578,16 +582,7 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
         const auto& data = seg.value("data", json::object());
         std::string url = data.value("url", "");
         if (!url.empty()) {
-          // Flush accumulated text before the image.
-          auto start = text.find_first_not_of(" \t\n\r");
-          if (start != std::string::npos) {
-            auto end_pos = text.find_last_not_of(" \t\n\r");
-            std::string trimmed = text.substr(start, end_pos - start + 1);
-            if (!trimmed.empty()) {
-              result.parts.emplace_back(core::TextPart{std::move(trimmed)});
-            }
-            text.clear();
-          }
+          flush_text(text);
           result.parts.emplace_back(core::ImagePart{std::move(url)});
         }
       } else if (type == "reply") {
@@ -606,15 +601,7 @@ OneBotDevice::ParsedMessage OneBotDevice::ParseMessage(
       }
     }
 
-    // Flush remaining text.
-    auto start = text.find_first_not_of(" \t\n\r");
-    if (start != std::string::npos) {
-      auto end_pos = text.find_last_not_of(" \t\n\r");
-      std::string trimmed = text.substr(start, end_pos - start + 1);
-      if (!trimmed.empty()) {
-        result.parts.emplace_back(core::TextPart{std::move(trimmed)});
-      }
-    }
+    flush_text(text);
     return result;
   }
 

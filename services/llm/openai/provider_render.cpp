@@ -8,40 +8,57 @@ namespace shizuru::services {
 
 using json = nlohmann::json;
 
-nlohmann::json RenderItem(const core::ConversationItem& item,
-                          bool multi_actor) {
+namespace {
+
+json RenderUserContentPart(const core::ContentPart& part,
+                           const core::ActorRef& actor,
+                           bool include_images) {
+  if (auto* tp = std::get_if<core::TextPart>(&part)) {
+    std::string text = tp->text;
+    if (!actor.actor_id.empty() || !actor.display_name.empty()) {
+      text = "<message";
+      if (!actor.actor_id.empty()) {
+        text += " id=\"" + actor.actor_id + "\"";
+      }
+      if (!actor.display_name.empty()) {
+        text += " name=\"" + actor.display_name + "\"";
+      }
+      text += ">" + tp->text + "</message>";
+    }
+    return {{"type", "text"}, {"text", std::move(text)}};
+  }
+  if (include_images) {
+    if (auto* ip = std::get_if<core::ImagePart>(&part)) {
+      return {
+          {"type", "image_url"},
+          {"image_url", {{"url", ip->url}}}};
+    }
+  }
+  return nullptr;
+}
+
+json RenderItemImpl(const core::ConversationItem& item, bool include_images) {
   json msg;
 
   switch (item.kind) {
     case core::ConversationItemKind::kUserMessage: {
       msg["role"] = "user";
+      json content = json::array();
+      for (const auto& part : item.parts) {
+        json rendered = RenderUserContentPart(part, item.actor, include_images);
+        if (!rendered.is_null()) {
+          content.push_back(std::move(rendered));
+        }
+      }
 
-      // Build content — may be a string or array depending on parts.
-      if (item.parts.size() == 1) {
-        if (auto* tp = std::get_if<core::TextPart>(&item.parts[0])) {
-          std::string text = tp->text;
-          if (multi_actor && !item.actor.display_name.empty()) {
-            text = "<message from=\"" + item.actor.display_name + "\">" +
-                   text + "</message>";
-          }
-          msg["content"] = text;
+      if (content.empty()) {
+        if (!include_images) {
+          return nullptr;
         }
+        msg["content"] = "[unsupported message]";
+      } else if (content.size() == 1 && content[0].value("type", "") == "text") {
+        msg["content"] = content[0]["text"];
       } else {
-        json content = json::array();
-        for (const auto& part : item.parts) {
-          if (auto* tp = std::get_if<core::TextPart>(&part)) {
-            std::string text = tp->text;
-            if (multi_actor && !item.actor.display_name.empty()) {
-              text = "<message from=\"" + item.actor.display_name + "\">" +
-                     text + "</message>";
-            }
-            content.push_back({{"type", "text"}, {"text", text}});
-          } else if (auto* ip = std::get_if<core::ImagePart>(&part)) {
-            content.push_back({
-                {"type", "image_url"},
-                {"image_url", {{"url", ip->url}}}});
-          }
-        }
         msg["content"] = std::move(content);
       }
       break;
@@ -92,9 +109,6 @@ nlohmann::json RenderItem(const core::ConversationItem& item,
     }
 
     case core::ConversationItemKind::kToolResult: {
-      // Each ToolResultPart becomes a separate tool message.
-      // For simplicity, render the first one here.
-      // Multiple results should be rendered as multiple messages by the caller.
       for (const auto& part : item.parts) {
         if (auto* trp = std::get_if<core::ToolResultPart>(&part)) {
           msg["role"] = "tool";
@@ -110,48 +124,24 @@ nlohmann::json RenderItem(const core::ConversationItem& item,
   return msg;
 }
 
+}  // namespace
+
+nlohmann::json RenderItem(const core::ConversationItem& item,
+                          bool /*multi_actor*/) {
+  return RenderItemImpl(item, true);
+}
+
 nlohmann::json RenderMessages(
     const std::vector<core::ConversationItem>& history,
     const core::InvokeBatch& batch,
     const std::string& system_instruction) {
   json messages = json::array();
 
-  // System instruction first.
   if (!system_instruction.empty()) {
     messages.push_back({{"role", "system"}, {"content", system_instruction}});
   }
 
-  // Detect multi-actor scenario (more than one unique actor_id in the batch).
-  bool multi_actor = false;
-  {
-    std::string first_actor;
-    for (const auto& item : history) {
-      if (item.kind == core::ConversationItemKind::kUserMessage) {
-        if (first_actor.empty()) {
-          first_actor = item.actor.actor_id;
-        } else if (item.actor.actor_id != first_actor) {
-          multi_actor = true;
-          break;
-        }
-      }
-    }
-    if (!multi_actor) {
-      for (const auto& item : batch.items) {
-        if (item.kind == core::ConversationItemKind::kUserMessage) {
-          if (first_actor.empty()) {
-            first_actor = item.actor.actor_id;
-          } else if (item.actor.actor_id != first_actor) {
-            multi_actor = true;
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  // Render history items.
   for (const auto& item : history) {
-    // For kToolResult with multiple parts, render each as a separate message.
     if (item.kind == core::ConversationItemKind::kToolResult &&
         item.parts.size() > 1) {
       for (const auto& part : item.parts) {
@@ -163,12 +153,14 @@ nlohmann::json RenderMessages(
           messages.push_back(std::move(msg));
         }
       }
-    } else {
-      messages.push_back(RenderItem(item, multi_actor));
+      continue;
+    }
+    json rendered = RenderItemImpl(item, false);
+    if (!rendered.is_null()) {
+      messages.push_back(std::move(rendered));
     }
   }
 
-  // Render batch items.
   for (const auto& item : batch.items) {
     if (item.kind == core::ConversationItemKind::kToolResult &&
         item.parts.size() > 1) {
@@ -181,9 +173,9 @@ nlohmann::json RenderMessages(
           messages.push_back(std::move(msg));
         }
       }
-    } else {
-      messages.push_back(RenderItem(item, multi_actor));
+      continue;
     }
+    messages.push_back(RenderItemImpl(item, true));
   }
 
   return messages;

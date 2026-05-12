@@ -84,7 +84,7 @@ void ElevenLabsClient::Synthesize(const TtsRequest& request,
     return true;
   };
 
-  long status = CurlPostStreaming(
+  CurlStreamingResponse response = CurlPostStreaming(
       url,
       {"xi-api-key: " + config_.api_key,
        "Content-Type: application/json",
@@ -99,8 +99,10 @@ void ElevenLabsClient::Synthesize(const TtsRequest& request,
     LOG_WARN("[TTS] Synthesize cancelled (voice={})", voice_id);
     throw std::runtime_error("TTS request cancelled");
   }
-  if (status != 200) {
-    ThrowApiError(static_cast<int>(status), "streaming request failed");
+  if (response.status_code != 200) {
+    ThrowApiError(static_cast<int>(response.status_code),
+                  response.body.empty() ? "streaming request failed"
+                                        : response.body);
   }
 
   LOG_INFO("[TTS] Synthesize complete: {} bytes (voice={})",

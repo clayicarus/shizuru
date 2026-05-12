@@ -133,6 +133,7 @@ inline size_t HeaderCallback(char* buffer, size_t size, size_t nitems,
 struct StreamCtx {
   const StreamWriteCallback* callback;
   const std::atomic<bool>* cancel;
+  std::string* response_body;
 };
 
 inline size_t StreamWriteFn(char* ptr, size_t size, size_t nmemb,
@@ -140,6 +141,9 @@ inline size_t StreamWriteFn(char* ptr, size_t size, size_t nmemb,
   auto* ctx = static_cast<StreamCtx*>(userdata);
   if (ctx->cancel->load()) { return 0; }
   size_t bytes = size * nmemb;
+  if (ctx->response_body != nullptr) {
+    ctx->response_body->append(ptr, bytes);
+  }
   if (!(*ctx->callback)(ptr, bytes)) { return 0; }
   return bytes;
 }
@@ -217,9 +221,15 @@ inline CurlResponse CurlPost(const std::string& url,
   return response;
 }
 
+// Result of a streaming HTTP request.
+struct CurlStreamingResponse {
+  long status_code = 0;
+  std::string body;
+};
+
 // Streaming POST: calls on_data for each chunk received.
-// Returns the HTTP status code.  Throws on network error.
-inline long CurlPostStreaming(
+// Returns the HTTP status and the received body. Throws on network error.
+inline CurlStreamingResponse CurlPostStreaming(
     const std::string& url,
     const std::vector<std::string>& headers,
     const std::string& body,
@@ -232,7 +242,8 @@ inline long CurlPostStreaming(
   CurlHeaders hdr;
   for (const auto& h : headers) { hdr.Append(h); }
 
-  detail::StreamCtx ctx{&on_data, &cancel_flag};
+  CurlStreamingResponse response;
+  detail::StreamCtx ctx{&on_data, &cancel_flag, &response.body};
 
   curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
@@ -252,7 +263,8 @@ inline long CurlPostStreaming(
   CURLcode res = curl_easy_perform(curl.get());
 
   if (cancel_flag.load()) {
-    return 0;  // Cancelled.
+    response.status_code = 0;
+    return response;  // Cancelled.
   }
 
   if (res != CURLE_OK && res != CURLE_WRITE_ERROR) {
@@ -260,9 +272,8 @@ inline long CurlPostStreaming(
                              curl_easy_strerror(res));
   }
 
-  long status_code = 0;
-  curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status_code);
-  return status_code;
+  curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &response.status_code);
+  return response;
 }
 
 // URL-encode a string using curl.

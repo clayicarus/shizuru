@@ -114,7 +114,7 @@ class Controller {
 
   void RunLoop();
   bool TryTransition(Event event);
-  void HandleThinking();
+  void HandleThinking(std::vector<ConversationItem> batch_items = {});
   void HandleActing(ActionCandidate ac);
   void HandleActingResult(const ConversationItem& item);
   void HandleResponding(ActionCandidate ac);

@@ -245,12 +245,14 @@ TEST(SmokeTest, MultimodalProviderRender) {
   multimodal_msg.parts.emplace_back(core::ImagePart{"https://example.com/cat.jpg"});
   multimodal_msg.wall_time = std::chrono::system_clock::now();
 
-  // Render via provider_render.
-  std::vector<core::ConversationItem> history = {multimodal_msg};
-  core::InvokeBatch empty_batch;
-  empty_batch.conversation_id = "session";
+  // Render via provider_render. History images are filtered; current batch
+  // images remain available to the provider.
+  std::vector<core::ConversationItem> history;
+  core::InvokeBatch batch;
+  batch.conversation_id = "session";
+  batch.items.push_back(multimodal_msg);
 
-  json messages = services::RenderMessages(history, empty_batch, "You are helpful.");
+  json messages = services::RenderMessages(history, batch, "You are helpful.");
 
   // Verify structure.
   ASSERT_GE(messages.size(), 2);  // system + user
@@ -265,7 +267,8 @@ TEST(SmokeTest, MultimodalProviderRender) {
 
   // First part: text.
   EXPECT_EQ(messages[1]["content"][0]["type"], "text");
-  EXPECT_EQ(messages[1]["content"][0]["text"], "What's in this image?");
+  EXPECT_EQ(messages[1]["content"][0]["text"],
+            "<message id=\"user1\" name=\"User\">What's in this image?</message>");
 
   // Second part: image_url.
   EXPECT_EQ(messages[1]["content"][1]["type"], "image_url");

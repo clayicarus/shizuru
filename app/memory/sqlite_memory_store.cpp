@@ -56,7 +56,6 @@ std::string SerializeItem(const core::ConversationItem& item) {
   };
   j["wall_time_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
       item.wall_time.time_since_epoch()).count();
-  j["mentions"] = item.mentions;
   if (item.reply_to_item_id.has_value()) {
     j["reply_to_item_id"] = *item.reply_to_item_id;
   }
@@ -113,7 +112,6 @@ core::ConversationItem DeserializeItem(const std::string& json_str) {
   item.wall_time = std::chrono::system_clock::time_point(
       std::chrono::milliseconds(wall_ms));
 
-  item.mentions = j.value("mentions", std::vector<std::string>{});
   if (j.contains("reply_to_item_id") && !j["reply_to_item_id"].is_null()) {
     item.reply_to_item_id = j["reply_to_item_id"].get<std::string>();
   }
