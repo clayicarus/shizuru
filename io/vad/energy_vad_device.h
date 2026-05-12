@@ -45,10 +45,10 @@ struct EnergyVadConfig {
 // so that the onset frames are not lost due to the onset confirmation delay.
 //
 // Port contract:
-//   Input  "audio_in"  — audio/pcm (s16le)
-//   Output "audio_out" — audio/pcm (speech frames only, with pre-roll)
-//   Output "vad_out"   — vad/event (event name payload, optional — connect
-//                        for observability or signal adaptation)
+//   Input  "audio_in"              — typed audio frames (s16le)
+//   Output "audio_out"             — speech frames only, with pre-roll
+//   Output "interrupt_signal_out"  — InterruptSignal on speech_start
+//   Output "control_signal_out"    — FlushSignal on speech_end
 class EnergyVadDevice : public VadDevice {
  public:
   explicit EnergyVadDevice(EnergyVadConfig config = {},
@@ -56,17 +56,14 @@ class EnergyVadDevice : public VadDevice {
 
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, DataFrame frame) override;
   void OnAudioFrame(const std::string& port_name, AudioFrame frame) override;
   void SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) override;
   void SetControlSignalOutputCallback(ControlSignalOutputCallback cb) override;
-  void SetOutputCallback(OutputCallback cb) override;
   void Start() override;
   void Stop() override;
 
   static constexpr char kAudioIn[]  = "audio_in";
   static constexpr char kAudioOut[] = "audio_out";
-  static constexpr char kVadOut[]   = "vad_out";
   static constexpr char kInterruptSignalOut[] = "interrupt_signal_out";
   static constexpr char kControlSignalOut[] = "control_signal_out";
 
@@ -74,7 +71,6 @@ class EnergyVadDevice : public VadDevice {
   static float ComputeRms(const AudioFrame& frame);
 
   void EmitAudio(AudioFrame frame);
-  void EmitEvent(const std::string& event);
   void EmitInterruptSignal();
   void EmitFlushSignal();
   void FlushPreRollTyped();
@@ -96,7 +92,6 @@ class EnergyVadDevice : public VadDevice {
   std::deque<AudioFrame> pre_roll_audio_buf_;
 
   mutable std::mutex output_cb_mutex_;
-  OutputCallback output_cb_;
   AudioFrameOutputCallback audio_output_cb_;
   ControlSignalOutputCallback signal_output_cb_;
 };

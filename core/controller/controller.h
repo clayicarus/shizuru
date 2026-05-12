@@ -21,7 +21,6 @@
 #include "dialogue/timer_book.h"
 #include "dialogue/types.h"
 #include "interfaces/llm_client.h"
-#include "io/io_device.h"
 #include "policy/policy_layer.h"
 #include "strategies/response_filter.h"
 #include "strategies/tts_segment_strategy.h"
@@ -42,14 +41,10 @@ class Controller {
   // Injected by CoreDevice; called when Controller needs to cancel in-progress IO.
   using CancelCallback = std::function<void()>;
 
-  // Injected by CoreDevice; called when Controller wants to emit a DataFrame.
-  using EmitFrameCallback = std::function<void(const std::string& port, io::DataFrame)>;
-
   // All dependencies injected via constructor.
   Controller(std::string session_id,
              ControllerConfig config,
              std::unique_ptr<LlmClient> llm,
-             EmitFrameCallback emit_frame,
              CancelCallback cancel,
              ContextStrategy& context,
              PolicyLayer& policy,
@@ -139,7 +134,6 @@ class Controller {
 
   ControllerConfig config_;
   std::unique_ptr<LlmClient> llm_;
-  EmitFrameCallback emit_frame_;
   CancelCallback cancel_;
   ContextStrategy& context_;
   PolicyLayer& policy_;

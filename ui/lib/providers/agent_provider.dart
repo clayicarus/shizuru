@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -134,7 +135,29 @@ class AgentProvider extends ChangeNotifier {
   }
 
   void sendMessage(String text) {
-    _bridge?.sendMessage(text);
+    final bridge = _bridge;
+    if (bridge == null) return;
+
+    final now = DateTime.now();
+    final itemJson = jsonEncode({
+      'item_id': 'ui:${now.microsecondsSinceEpoch}',
+      'conversation_id': '',
+      'kind': 'human_message',
+      'actor': {
+        'actor_id': 'local-user',
+        'display_name': 'You',
+        'kind': 'human',
+      },
+      'timestamp_ms': now.millisecondsSinceEpoch,
+      'parts': [
+        {
+          'type': 'text',
+          'text': text,
+        }
+      ],
+      'mentions': const <String>[],
+    });
+    bridge.sendConversationItemJson(itemJson);
   }
 
   void clearDatabase() {

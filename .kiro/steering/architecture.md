@@ -65,7 +65,7 @@ follow these conventions.
 ### core/ — Agent Framework
 Platform-independent agent logic.  Dialogue kernel, controller shell,
 context strategy, policy layer, and pluggable strategies.  No knowledge of
-IoDevice, DataFrame, or any specific vendor.
+IoDevice transport details, legacy bus envelopes, or any specific vendor.
 
 `core/` is internally split into:
 - **dialogue/**: Dialogue kernel for turn-taking, reducer/effect semantics,
@@ -106,10 +106,11 @@ convert data formats.
 
 ### runtime/ — Device Bus + Bridging
 - **AgentRuntime**: Pure device bus.  Registers devices, manages routes,
-  dispatches frames, controls lifecycle.  Zero business logic.
-- **CoreDevice**: Bridge between core/ and io/.  Translates DataFrame ↔
-  observation/tool-result/interrupt semantics.  The only component that knows
-  both the bus contract and the core dialogue contract.
+  dispatches typed payloads, controls lifecycle.  Zero business logic.
+- **CoreDevice**: Bridge between core/ and io/.  Translates between typed
+  runtime payloads (`ConversationItem`, `ControlSignal`) and core dialogue
+  semantics.  The only component that knows both the bus contract and the
+  core dialogue contract.
 - **ToolDispatchDevice + ToolRegistry**: DMA controller analogy.  Receives
   tool call frames from CoreDevice, dispatches to registered tool functions,
   returns results.  Lives in runtime/ because it bridges the agent's
@@ -240,14 +241,14 @@ The architecture draws from operating system concepts:
    RouteTable.  They are usually emitted by CoreDevice, but signal adapters
    may also emit device-local control commands (for example speech_end →
    ASR flush).
-2. **Data plane signals** (audio frames, text) flow between IO devices
+2. **Data plane signals** (audio frames) flow between IO devices
    via DMA routes (requires_control_plane = false).
 3. **Event plane signals** (interrupts, scheduler triggers) enter core via
    dedicated semantic input ports rather than device-specific protocols.
-4. **Tool call requests** flow from CoreDevice:action_out to
-   ToolDispatchDevice:action_in via control plane route.
-5. **Tool results** flow from ToolDispatchDevice:result_out back to
-   CoreDevice:tool_result_in via control plane route.
+4. **Tool call requests** flow from CoreDevice:signal_out to
+   ToolDispatchDevice:control_in via control plane route.
+5. **Tool results** flow from ToolDispatchDevice:signal_out back to
+   CoreDevice:control_in via control plane route.
 6. **Tool side effects** (scheduler writes, DB writes) are executed
    directly by tool functions — they do NOT flow through the bus.
    The Controller authorizes these indirectly via the tool call mechanism.

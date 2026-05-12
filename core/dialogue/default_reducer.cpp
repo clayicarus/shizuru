@@ -210,8 +210,8 @@ DialogueDecision DefaultDialogueReducer::HandleLlmCompleted(
       for (const auto& tc : event.candidate.tool_calls) {
         next.pending_tool_call_ids.push_back(tc.id);
       }
-      effects.push_back(RecordToolCallDecision{event.candidate});
       effects.push_back(EmitToolCallFrames{event.candidate});
+      effects.push_back(RecordToolCallDecision{event.candidate});
       effects.push_back(ScheduleTimer{
           TimerKind::kToolCallTimeout,
           "tool_call_timeout",

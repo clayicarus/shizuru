@@ -17,6 +17,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #ifdef _WIN32
@@ -208,6 +209,119 @@ std::string SerializeConversationItemForUi(const core::ConversationItem& item) {
   return j.dump();
 }
 
+std::optional<core::ActorKind> ParseActorKind(const std::string& kind) {
+  if (kind == "human") { return core::ActorKind::kHuman; }
+  if (kind == "assistant") { return core::ActorKind::kAssistant; }
+  if (kind == "system") { return core::ActorKind::kSystem; }
+  if (kind == "tool") { return core::ActorKind::kTool; }
+  return std::nullopt;
+}
+
+std::optional<core::ConversationItemKind> ParseItemKind(const std::string& kind) {
+  if (kind == "human_message") { return core::ConversationItemKind::kUserMessage; }
+  if (kind == "assistant_message") {
+    return core::ConversationItemKind::kAssistantMessage;
+  }
+  if (kind == "system_event") { return core::ConversationItemKind::kSystemEvent; }
+  if (kind == "tool_call") { return core::ConversationItemKind::kToolCall; }
+  if (kind == "tool_result") { return core::ConversationItemKind::kToolResult; }
+  return std::nullopt;
+}
+
+std::optional<core::ConversationItem> ParseConversationItemFromUiJson(
+    const std::string& item_json) {
+  using json = nlohmann::json;
+
+  auto parsed = json::parse(item_json, nullptr, false);
+  if (parsed.is_discarded() || !parsed.is_object()) {
+    return std::nullopt;
+  }
+
+  core::ConversationItem item;
+  item.item_id = parsed.value(
+      "item_id",
+      "ui:" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count()));
+  item.conversation_id = parsed.value("conversation_id", "");
+
+  const auto item_kind = ParseItemKind(parsed.value("kind", "human_message"));
+  if (!item_kind.has_value()) { return std::nullopt; }
+  item.kind = *item_kind;
+
+  const auto actor_json =
+      parsed.value("actor", json::object());
+  const auto actor_kind =
+      ParseActorKind(actor_json.value("kind", "human"));
+  if (!actor_kind.has_value()) { return std::nullopt; }
+  item.actor = core::ActorRef{
+      actor_json.value("actor_id", "local-user"),
+      actor_json.value("display_name", "User"),
+      *actor_kind,
+  };
+
+  if (parsed.contains("reply_to_item_id") &&
+      parsed["reply_to_item_id"].is_string()) {
+    item.reply_to_item_id = parsed["reply_to_item_id"].get<std::string>();
+  }
+
+  if (parsed.contains("mentions") && parsed["mentions"].is_array()) {
+    for (const auto& mention : parsed["mentions"]) {
+      if (mention.is_string()) {
+        item.mentions.push_back(mention.get<std::string>());
+      }
+    }
+  }
+
+  const auto parts = parsed.value("parts", json::array());
+  if (!parts.is_array()) { return std::nullopt; }
+  for (const auto& part : parts) {
+    const auto type = part.value("type", "");
+    if (type == "text") {
+      item.parts.emplace_back(core::TextPart{part.value("text", "")});
+      continue;
+    }
+    if (type == "image") {
+      item.parts.emplace_back(core::ImagePart{part.value("url", "")});
+      continue;
+    }
+    if (type == "audio") {
+      core::AudioPart audio_part;
+      audio_part.format = part.value("format", "");
+      item.parts.emplace_back(std::move(audio_part));
+      continue;
+    }
+    if (type == "tool_call") {
+      item.parts.emplace_back(core::ToolCallPart{
+          part.value("tool_call_id", ""),
+          part.value("name", ""),
+          part.contains("arguments") ? part["arguments"].dump() : std::string("{}"),
+      });
+      continue;
+    }
+    if (type == "tool_result") {
+      item.parts.emplace_back(core::ToolResultPart{
+          part.value("tool_call_id", ""),
+          part.value("tool_name", ""),
+          part.value("success", true),
+          part.contains("result") ? part["result"].dump() : std::string("{}"),
+      });
+      continue;
+    }
+    return std::nullopt;
+  }
+
+  if (item.parts.empty()) { return std::nullopt; }
+
+  if (parsed.contains("timestamp_ms") && parsed["timestamp_ms"].is_number_integer()) {
+    item.wall_time = std::chrono::system_clock::time_point{
+        std::chrono::milliseconds(parsed["timestamp_ms"].get<int64_t>())};
+  } else {
+    item.wall_time = std::chrono::system_clock::now();
+  }
+
+  return item;
+}
+
 class AudioLevelProbe : public io::IoDevice {
  public:
   explicit AudioLevelProbe(std::string device_id = "audio_level_probe")
@@ -223,7 +337,6 @@ class AudioLevelProbe : public io::IoDevice {
     return {{"audio_in", io::PortDirection::kInput, "audio/pcm",
              runtime::PortPayloadKind::kAudioFrame}};
   }
-  void OnInput(const std::string&, io::DataFrame) override {}
   void OnAudioFrame(const std::string&, io::AudioFrame frame) override {
     const auto* s = frame.data;
     const size_t n = frame.NumSamples();
@@ -235,7 +348,6 @@ class AudioLevelProbe : public io::IoDevice {
     { std::lock_guard<std::mutex> lock(mu_); cb = cb_; ud = ud_; }
     if (cb) { cb(rms, ud); }
   }
-  void SetOutputCallback(io::OutputCallback) override {}
   void Start() override {}
   void Stop() override {}
 
@@ -261,7 +373,6 @@ class TranscriptProbe : public io::IoDevice {
     return {{"item_in", io::PortDirection::kInput, "",
              runtime::PortPayloadKind::kConversationItem}};
   }
-  void OnInput(const std::string&, io::DataFrame) override {}
   void OnConversationItem(const std::string&, core::ConversationItem item) override {
     ShizuruTranscriptCallback cb; void* ud;
     { std::lock_guard<std::mutex> lock(mu_); cb = cb_; ud = ud_; }
@@ -278,7 +389,6 @@ class TranscriptProbe : public io::IoDevice {
       cb(heap, ud);
     }
   }
-  void SetOutputCallback(io::OutputCallback) override {}
   void Start() override {}
   void Stop() override {}
 
@@ -649,10 +759,17 @@ void shizuru_destroy(ShizuruHandle handle) {
 // Messaging and state
 // ---------------------------------------------------------------------------
 
-int32_t shizuru_send_message(ShizuruHandle handle, const char* text) {
-  if (!handle || !text) { return -1; }
+int32_t shizuru_send_conversation_item_json(ShizuruHandle handle,
+                                            const char* item_json) {
+  if (!handle || !item_json) { return -1; }
   auto* ctx = static_cast<ShizuruContext*>(handle);
-  try { ctx->app->SendMessage(text); } catch (...) { return -2; }
+  const auto item = ParseConversationItemFromUiJson(item_json);
+  if (!item.has_value()) { return -2; }
+  try {
+    ctx->app->SendConversationItem(*item);
+  } catch (...) {
+    return -3;
+  }
   return 0;
 }
 

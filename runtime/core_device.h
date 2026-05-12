@@ -43,12 +43,10 @@ class CoreDevice : public io::IoDevice {
   // IoDevice interface
   std::string GetDeviceId() const override;
   std::vector<io::PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, io::DataFrame frame) override;
   void OnConversationItem(const std::string& port_name,
                           core::ConversationItem item) override;
   void OnControlSignal(const std::string& port_name,
                        core::ControlSignal signal) override;
-  void SetOutputCallback(io::OutputCallback cb) override;
   void SetConversationItemOutputCallback(
       io::ConversationItemOutputCallback cb) override;
   void SetControlSignalOutputCallback(
@@ -67,30 +65,18 @@ class CoreDevice : public io::IoDevice {
   core::State GetState() const;
 
  private:
-  static constexpr char kTextIn[] = "text_in";
-  static constexpr char kToolResultIn[] = "tool_result_in";
-  static constexpr char kInterruptIn[] = "interrupt_in";
-  static constexpr char kSchedulerIn[] = "scheduler_in";
-  static constexpr char kTextOut[] = "text_out";
-  static constexpr char kTtsOut[] = "tts_out";
-  static constexpr char kActionOut[] = "action_out";
-  static constexpr char kControlOut[] = "control_out";
   static constexpr char kSignalOut[] = "signal_out";
-  static constexpr char kErrorOut[] = "error_out";
+  static constexpr char kItemIn[] = "item_in";
+  static constexpr char kControlIn[] = "control_in";
   static constexpr char kItemOut[] = "item_out";
 
-  void EmitFrame(const std::string& port_name, io::DataFrame frame);
   void EmitConversationItem(const std::string& port_name,
                             core::ConversationItem item);
   void EmitControlSignal(const std::string& port_name,
                          core::ControlSignal signal);
 
-  // Helper to build a control command frame.
-  static io::DataFrame MakeControlFrame(const std::string& command);
-
   std::string device_id_;
   std::unique_ptr<core::AgentSession> session_;
-  io::OutputCallback output_cb_;
   io::ConversationItemOutputCallback item_output_cb_;
   io::ControlSignalOutputCallback signal_output_cb_;
   mutable std::mutex output_cb_mutex_;

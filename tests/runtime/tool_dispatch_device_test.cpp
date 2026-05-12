@@ -1,8 +1,6 @@
 // Unit and property-based tests for ToolDispatchDevice
 // Uses Google Test + RapidCheck
 
-// Feature: core-decoupling, Property 4: ToolDispatchDevice tool call round-trip
-
 #include <gtest/gtest.h>
 #include <rapidcheck.h>
 #include <rapidcheck/gtest.h>
@@ -17,32 +15,12 @@
 #include <thread>
 #include <vector>
 
+#include "core/control_signal.h"
 #include "runtime/tool_dispatch_device.h"
 #include "runtime/tool_registry.h"
 
 namespace shizuru::runtime {
 namespace {
-
-using io::DataFrame;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// Build an action/tool_call DataFrame with structured JSON payload.
-DataFrame MakeToolCallFrame(const std::string& name,
-                            const std::string& args) {
-  nlohmann::json payload_json = {
-      {"tool_name", name},
-      {"arguments", args},
-  };
-  const std::string payload = payload_json.dump();
-  DataFrame frame;
-  frame.type = "action/tool_call";
-  frame.payload = std::vector<uint8_t>(payload.begin(), payload.end());
-  frame.timestamp = std::chrono::steady_clock::now();
-  return frame;
-}
 
 // Wait up to timeout_ms for predicate to become true, polling every 5ms.
 bool WaitFor(std::function<bool()> predicate, int timeout_ms = 500) {
@@ -55,18 +33,31 @@ bool WaitFor(std::function<bool()> predicate, int timeout_ms = 500) {
   return predicate();
 }
 
+core::ToolCallStartSignal MakeToolCallSignal(const std::string& id,
+                                             const std::string& name,
+                                             const std::string& args) {
+  return core::ToolCallStartSignal{id, name, args};
+}
+
+void DeliverToolCall(ToolDispatchDevice& device,
+                     const std::string& id,
+                     const std::string& name,
+                     const std::string& args) {
+  device.OnControlSignal("control_in", MakeToolCallSignal(id, name, args));
+}
+
 // ---------------------------------------------------------------------------
-// Property 4: ToolDispatchDevice tool call round-trip
-// **Validates: Requirements 3.3**
+// Property: typed tool call round-trip
 // ---------------------------------------------------------------------------
 RC_GTEST_PROP(ToolDispatchDevicePropTest, prop_tool_call_round_trip, ()) {
   const std::string name = *rc::gen::nonEmpty(
       rc::gen::container<std::string>(
           rc::gen::inRange('a', static_cast<char>('z' + 1))));
-  const std::string args = *rc::gen::container<std::string>(
-      rc::gen::inRange('a', static_cast<char>('z' + 1)));
   const std::string return_value = *rc::gen::container<std::string>(
       rc::gen::inRange('a', static_cast<char>('z' + 1)));
+  const std::string tool_call_id = *rc::gen::nonEmpty(
+      rc::gen::container<std::string>(
+          rc::gen::inRange('0', static_cast<char>('9' + 1))));
 
   ToolRegistry registry;
   registry.Register(name, [return_value](const nlohmann::json&) {
@@ -79,15 +70,17 @@ RC_GTEST_PROP(ToolDispatchDevicePropTest, prop_tool_call_round_trip, ()) {
   ToolDispatchDevice device(registry);
 
   std::mutex mu;
-  std::vector<DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                               DataFrame f) {
-    std::lock_guard<std::mutex> lock(mu);
-    emitted.push_back(std::move(f));
-  });
+  std::vector<core::ToolResultSignal> emitted;
+  device.SetControlSignalOutputCallback(
+      [&](const std::string&, const std::string&, core::ControlSignal sig) {
+        if (auto* result = std::get_if<core::ToolResultSignal>(&sig)) {
+          std::lock_guard<std::mutex> lock(mu);
+          emitted.push_back(*result);
+        }
+      });
 
   device.Start();
-  device.OnInput("action_in", MakeToolCallFrame(name, args));
+  DeliverToolCall(device, tool_call_id, name, "{}");
 
   bool got_result = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
@@ -99,41 +92,37 @@ RC_GTEST_PROP(ToolDispatchDevicePropTest, prop_tool_call_round_trip, ()) {
   RC_ASSERT(got_result);
 
   std::lock_guard<std::mutex> lock(mu);
-  RC_ASSERT(!emitted.empty());
-  const auto& f = emitted.front();
-  RC_ASSERT(f.type == "action/tool_result");
-
-  const std::string payload(f.payload.begin(), f.payload.end());
-  RC_ASSERT(payload.find(R"("success":true)") != std::string::npos);
+  RC_ASSERT(emitted.size() == 1);
+  RC_ASSERT(emitted[0].tool_call_id == tool_call_id);
+  RC_ASSERT(emitted[0].success);
   if (!return_value.empty()) {
-    RC_ASSERT(payload.find(return_value) != std::string::npos);
+    RC_ASSERT(emitted[0].content.find(return_value) != std::string::npos);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Unit Test: Successful dispatch
-// ---------------------------------------------------------------------------
 TEST(ToolDispatchDeviceTest, SuccessfulDispatch) {
   ToolRegistry registry;
   registry.Register("echo", [](const nlohmann::json& args) {
     ToolResult r;
     r.success = true;
-    r.output = args.is_string() ? args.get<std::string>() : args.dump();
+    r.output = args;
     return r;
   });
 
   ToolDispatchDevice device(registry);
 
   std::mutex mu;
-  std::vector<DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                               DataFrame f) {
-    std::lock_guard<std::mutex> lock(mu);
-    emitted.push_back(std::move(f));
-  });
+  std::vector<core::ToolResultSignal> emitted;
+  device.SetControlSignalOutputCallback(
+      [&](const std::string&, const std::string&, core::ControlSignal sig) {
+        if (auto* result = std::get_if<core::ToolResultSignal>(&sig)) {
+          std::lock_guard<std::mutex> lock(mu);
+          emitted.push_back(*result);
+        }
+      });
 
   device.Start();
-  device.OnInput("action_in", MakeToolCallFrame("echo", "hello"));
+  DeliverToolCall(device, "call_1", "echo", R"({"value":"hello"})");
 
   bool got = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
@@ -145,10 +134,9 @@ TEST(ToolDispatchDeviceTest, SuccessfulDispatch) {
   ASSERT_TRUE(got);
   std::lock_guard<std::mutex> lock(mu);
   ASSERT_EQ(emitted.size(), 1u);
-  const std::string payload(emitted[0].payload.begin(), emitted[0].payload.end());
-  EXPECT_EQ(emitted[0].type, "action/tool_result");
-  EXPECT_NE(payload.find(R"("success":true)"), std::string::npos);
-  EXPECT_NE(payload.find("hello"), std::string::npos);
+  EXPECT_EQ(emitted[0].tool_call_id, "call_1");
+  EXPECT_TRUE(emitted[0].success);
+  EXPECT_NE(emitted[0].content.find("hello"), std::string::npos);
 }
 
 TEST(ToolDispatchDeviceTest, RoundTripPreservesToolCallId) {
@@ -163,17 +151,17 @@ TEST(ToolDispatchDeviceTest, RoundTripPreservesToolCallId) {
   ToolDispatchDevice device(registry);
 
   std::mutex mu;
-  std::vector<DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                               DataFrame f) {
-    std::lock_guard<std::mutex> lock(mu);
-    emitted.push_back(std::move(f));
-  });
+  std::vector<core::ToolResultSignal> emitted;
+  device.SetControlSignalOutputCallback(
+      [&](const std::string&, const std::string&, core::ControlSignal sig) {
+        if (auto* result = std::get_if<core::ToolResultSignal>(&sig)) {
+          std::lock_guard<std::mutex> lock(mu);
+          emitted.push_back(*result);
+        }
+      });
 
   device.Start();
-  auto frame = MakeToolCallFrame("echo", "{}");
-  frame.metadata["tool_call_id"] = "call_test_1";
-  device.OnInput("action_in", std::move(frame));
+  DeliverToolCall(device, "call_test_1", "echo", "{}");
 
   bool got = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
@@ -185,65 +173,25 @@ TEST(ToolDispatchDeviceTest, RoundTripPreservesToolCallId) {
   ASSERT_TRUE(got);
   std::lock_guard<std::mutex> lock(mu);
   ASSERT_EQ(emitted.size(), 1u);
-  const std::string payload(emitted[0].payload.begin(), emitted[0].payload.end());
-  const auto json = nlohmann::json::parse(payload);
-  EXPECT_EQ(json.value("tool_call_id", ""), "call_test_1");
+  EXPECT_EQ(emitted[0].tool_call_id, "call_test_1");
 }
 
-// ---------------------------------------------------------------------------
-// Unit Test: Unknown tool name → failure result frame
-// ---------------------------------------------------------------------------
-TEST(ToolDispatchDeviceTest, UnknownToolEmitsFailureFrame) {
-  ToolRegistry registry;
-
-  ToolDispatchDevice device(registry);
-
-  std::mutex mu;
-  std::vector<DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                               DataFrame f) {
-    std::lock_guard<std::mutex> lock(mu);
-    emitted.push_back(std::move(f));
-  });
-
-  device.Start();
-  device.OnInput("action_in", MakeToolCallFrame("no_such_tool", "{}"));
-
-  bool got = WaitFor([&] {
-    std::lock_guard<std::mutex> lock(mu);
-    return !emitted.empty();
-  });
-
-  device.Stop();
-
-  ASSERT_TRUE(got);
-  std::lock_guard<std::mutex> lock(mu);
-  ASSERT_EQ(emitted.size(), 1u);
-  const std::string payload(emitted[0].payload.begin(), emitted[0].payload.end());
-  EXPECT_EQ(emitted[0].type, "action/tool_result");
-  EXPECT_NE(payload.find(R"("success":false)"), std::string::npos);
-  EXPECT_NE(payload.find("Unknown tool: no_such_tool"), std::string::npos);
-}
-
-TEST(ToolDispatchDeviceTest, MalformedPayloadEmitsFailureFrame) {
+TEST(ToolDispatchDeviceTest, UnknownToolEmitsFailureSignal) {
   ToolRegistry registry;
   ToolDispatchDevice device(registry);
 
   std::mutex mu;
-  std::vector<DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                               DataFrame f) {
-    std::lock_guard<std::mutex> lock(mu);
-    emitted.push_back(std::move(f));
-  });
+  std::vector<core::ToolResultSignal> emitted;
+  device.SetControlSignalOutputCallback(
+      [&](const std::string&, const std::string&, core::ControlSignal sig) {
+        if (auto* result = std::get_if<core::ToolResultSignal>(&sig)) {
+          std::lock_guard<std::mutex> lock(mu);
+          emitted.push_back(*result);
+        }
+      });
 
   device.Start();
-  DataFrame frame;
-  frame.type = "action/tool_call";
-  const std::string payload = "{not json";
-  frame.payload = std::vector<uint8_t>(payload.begin(), payload.end());
-  frame.timestamp = std::chrono::steady_clock::now();
-  device.OnInput("action_in", std::move(frame));
+  DeliverToolCall(device, "call_unknown", "no_such_tool", "{}");
 
   bool got = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
@@ -255,14 +203,43 @@ TEST(ToolDispatchDeviceTest, MalformedPayloadEmitsFailureFrame) {
   ASSERT_TRUE(got);
   std::lock_guard<std::mutex> lock(mu);
   ASSERT_EQ(emitted.size(), 1u);
-  const std::string result(emitted[0].payload.begin(), emitted[0].payload.end());
-  EXPECT_NE(result.find(R"("success":false)"), std::string::npos);
-  EXPECT_NE(result.find("Malformed tool call payload"), std::string::npos);
+  EXPECT_FALSE(emitted[0].success);
+  EXPECT_NE(emitted[0].content.find("Unknown tool: no_such_tool"),
+            std::string::npos);
 }
 
-// ---------------------------------------------------------------------------
-// Unit Test: Tool throws exception → failure frame, device continues
-// ---------------------------------------------------------------------------
+TEST(ToolDispatchDeviceTest, MalformedArgumentsEmitFailureSignal) {
+  ToolRegistry registry;
+  ToolDispatchDevice device(registry);
+
+  std::mutex mu;
+  std::vector<core::ToolResultSignal> emitted;
+  device.SetControlSignalOutputCallback(
+      [&](const std::string&, const std::string&, core::ControlSignal sig) {
+        if (auto* result = std::get_if<core::ToolResultSignal>(&sig)) {
+          std::lock_guard<std::mutex> lock(mu);
+          emitted.push_back(*result);
+        }
+      });
+
+  device.Start();
+  DeliverToolCall(device, "call_bad_json", "echo", "{not json");
+
+  bool got = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return !emitted.empty();
+  });
+
+  device.Stop();
+
+  ASSERT_TRUE(got);
+  std::lock_guard<std::mutex> lock(mu);
+  ASSERT_EQ(emitted.size(), 1u);
+  EXPECT_FALSE(emitted[0].success);
+  EXPECT_NE(emitted[0].content.find("Malformed tool call arguments JSON"),
+            std::string::npos);
+}
+
 TEST(ToolDispatchDeviceTest, ThrowingToolEmitsFailureAndDeviceContinues) {
   ToolRegistry registry;
   registry.Register("boom", [](const nlohmann::json&) -> ToolResult {
@@ -278,16 +255,18 @@ TEST(ToolDispatchDeviceTest, ThrowingToolEmitsFailureAndDeviceContinues) {
   ToolDispatchDevice device(registry);
 
   std::mutex mu;
-  std::vector<DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                               DataFrame f) {
-    std::lock_guard<std::mutex> lock(mu);
-    emitted.push_back(std::move(f));
-  });
+  std::vector<core::ToolResultSignal> emitted;
+  device.SetControlSignalOutputCallback(
+      [&](const std::string&, const std::string&, core::ControlSignal sig) {
+        if (auto* result = std::get_if<core::ToolResultSignal>(&sig)) {
+          std::lock_guard<std::mutex> lock(mu);
+          emitted.push_back(*result);
+        }
+      });
 
   device.Start();
-  device.OnInput("action_in", MakeToolCallFrame("boom", "{}"));
-  device.OnInput("action_in", MakeToolCallFrame("ok", "{}"));
+  DeliverToolCall(device, "call_boom", "boom", "{}");
+  DeliverToolCall(device, "call_ok", "ok", "{}");
 
   bool got_two = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
@@ -296,22 +275,15 @@ TEST(ToolDispatchDeviceTest, ThrowingToolEmitsFailureAndDeviceContinues) {
 
   device.Stop();
 
-  ASSERT_TRUE(got_two) << "Expected 2 result frames, got "
-                       << emitted.size();
-
+  ASSERT_TRUE(got_two);
   std::lock_guard<std::mutex> lock(mu);
-  const std::string p0(emitted[0].payload.begin(), emitted[0].payload.end());
-  EXPECT_NE(p0.find(R"("success":false)"), std::string::npos);
-  EXPECT_NE(p0.find("intentional error"), std::string::npos);
-
-  const std::string p1(emitted[1].payload.begin(), emitted[1].payload.end());
-  EXPECT_NE(p1.find(R"("success":true)"), std::string::npos);
-  EXPECT_NE(p1.find("survived"), std::string::npos);
+  ASSERT_EQ(emitted.size(), 2u);
+  EXPECT_FALSE(emitted[0].success);
+  EXPECT_NE(emitted[0].content.find("intentional error"), std::string::npos);
+  EXPECT_TRUE(emitted[1].success);
+  EXPECT_NE(emitted[1].content.find("survived"), std::string::npos);
 }
 
-// ---------------------------------------------------------------------------
-// Unit Test: Stop() drains queue before joining
-// ---------------------------------------------------------------------------
 TEST(ToolDispatchDeviceTest, StopDrainsQueueBeforeJoining) {
   ToolRegistry registry;
 
@@ -328,18 +300,20 @@ TEST(ToolDispatchDeviceTest, StopDrainsQueueBeforeJoining) {
   ToolDispatchDevice device(registry);
 
   std::mutex mu;
-  std::vector<DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                               DataFrame f) {
-    std::lock_guard<std::mutex> lock(mu);
-    emitted.push_back(std::move(f));
-  });
+  std::vector<core::ToolResultSignal> emitted;
+  device.SetControlSignalOutputCallback(
+      [&](const std::string&, const std::string&, core::ControlSignal sig) {
+        if (auto* result = std::get_if<core::ToolResultSignal>(&sig)) {
+          std::lock_guard<std::mutex> lock(mu);
+          emitted.push_back(*result);
+        }
+      });
 
   device.Start();
 
   constexpr int kCount = 3;
   for (int i = 0; i < kCount; ++i) {
-    device.OnInput("action_in", MakeToolCallFrame("slow", "{}"));
+    DeliverToolCall(device, "slow_" + std::to_string(i), "slow", "{}");
   }
 
   device.Stop();
@@ -349,43 +323,31 @@ TEST(ToolDispatchDeviceTest, StopDrainsQueueBeforeJoining) {
   EXPECT_EQ(static_cast<int>(emitted.size()), kCount);
 }
 
-TEST(ToolDispatchDeviceTest, ControlSignalToolCallDispatchesTool) {
+TEST(ToolDispatchDeviceTest, NonToolControlSignalsDoNotEmitResults) {
   ToolRegistry registry;
-  registry.Register("echo", [](const nlohmann::json& args) {
-    ToolResult r;
-    r.success = true;
-    r.output = args;
-    return r;
-  });
-
   ToolDispatchDevice device(registry);
 
   std::mutex mu;
   std::vector<core::ToolResultSignal> emitted;
-  device.SetOnResultCallback([&](core::ToolResultSignal sig) {
-    std::lock_guard<std::mutex> lock(mu);
-    emitted.push_back(std::move(sig));
-  });
+  device.SetControlSignalOutputCallback(
+      [&](const std::string&, const std::string&, core::ControlSignal sig) {
+        if (auto* result = std::get_if<core::ToolResultSignal>(&sig)) {
+          std::lock_guard<std::mutex> lock(mu);
+          emitted.push_back(*result);
+        }
+      });
 
   device.Start();
-  device.OnControlSignal(
-      "control_in",
-      core::ToolCallStartSignal{
-          "call_ctrl_1", "echo", R"({"value":"hello"})"});
+  device.OnControlSignal("control_in", core::FlushSignal{});
 
   bool got = WaitFor([&] {
     std::lock_guard<std::mutex> lock(mu);
     return !emitted.empty();
-  });
+  }, 50);
 
   device.Stop();
 
-  ASSERT_TRUE(got);
-  std::lock_guard<std::mutex> lock(mu);
-  ASSERT_EQ(emitted.size(), 1u);
-  EXPECT_EQ(emitted[0].tool_call_id, "call_ctrl_1");
-  EXPECT_TRUE(emitted[0].success);
-  EXPECT_NE(emitted[0].content.find("hello"), std::string::npos);
+  EXPECT_FALSE(got);
 }
 
 }  // namespace

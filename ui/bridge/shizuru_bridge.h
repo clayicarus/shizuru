@@ -66,8 +66,10 @@ void shizuru_destroy(ShizuruHandle handle);
 // Messaging and state
 // ---------------------------------------------------------------------------
 
-// Call AgentRuntime::SendMessage(text). Returns 0 on success.
-int32_t shizuru_send_message(ShizuruHandle handle, const char* text);
+// Submit a UI-authored ConversationItem encoded as JSON.
+// Returns 0 on success.
+int32_t shizuru_send_conversation_item_json(ShizuruHandle handle,
+                                            const char* item_json);
 
 // Return current core::State as int32_t. Safe to call from any thread.
 int32_t shizuru_get_state(ShizuruHandle handle);

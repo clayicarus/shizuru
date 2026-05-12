@@ -19,7 +19,7 @@
 //   [core]                  signal_out ► [ElevenLabsTtsDevice] signal_in
 //   [core]                  signal_out ► [AudioPlayoutDevice]  signal_in
 //   [core]                  signal_out  ► [ToolDispatchDevice] control_in
-//   [ToolDispatchDevice]    ToolResultSignal callback         ► [core]
+//   [ToolDispatchDevice]    signal_out   ► [core]              control_in
 //
 // The TTS device is driven by the route core:item_out → elevenlabs_tts:item_in.
 // This callback only handles console display of streaming tokens and final text.
@@ -378,11 +378,6 @@ int main(int argc, char* argv[]) {
 
   // ── Create ToolDispatchDevice ─────────────────────────────────────────────
   auto tool_dispatch = std::make_unique<runtime::ToolDispatchDevice>(tools);
-  tool_dispatch->SetOnResultCallback([core_ptr](core::ToolResultSignal signal) {
-    if (core_ptr) {
-      core_ptr->OnControl(std::move(signal));
-    }
-  });
 
   // ── AgentRuntime (pure device bus) ────────────────────────────────────────
   runtime::AgentRuntime runtime;
@@ -439,6 +434,8 @@ int main(int argc, char* argv[]) {
   // Tool call round-trip (typed control plane)
   runtime.AddRoute({"core", "signal_out"},
                    {"tool_dispatch", "control_in"}, kCtrl);
+  runtime.AddRoute({"tool_dispatch", "signal_out"},
+                   {"core", "control_in"}, kCtrl);
 
   // VAD → ASR/core (typed control plane)
   runtime.AddRoute({"vad", io::EnergyVadDevice::kControlSignalOut},

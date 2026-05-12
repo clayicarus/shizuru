@@ -1,11 +1,11 @@
 // examples/onebot_agent.cpp — Pure-chat agent over OneBot 11 reverse WebSocket.
 //
 // Minimal pipeline assembled by hand — no AgentRuntime, no AppRuntime.
-// Just OneBotDevice + CoreDevice wired directly via callbacks.
+// Just OneBotDevice + CoreDevice wired directly via semantic/control callbacks.
 //
 // Pipeline:
-//   [OneBotDevice] text_out ──► [CoreDevice] text_in
-//   [CoreDevice]   conversation item callback ──► console + private reply
+//   [OneBotDevice] ConversationItem ──► [CoreDevice]
+//   [CoreDevice]   ConversationItem callback ──► console + private reply
 //
 // Usage:
 //   source _env.sh   # or export OPENAI_API_KEY=...
@@ -216,60 +216,8 @@ int main(int argc, char* argv[]) {
         core.OnConversationItem(std::move(item));
       });
 
-  // ── Wire: CoreDevice output → OneBotDevice reply ──────────────────────────
-  // TODO(Phase 7): Replace with proper ConversationItem output callback.
-  // For now, use the legacy SetOutputCallback for reply routing.
-  core.SetOutputCallback(
-      [&onebot](const std::string& /*device_id*/,
-                const std::string& port_name,
-                shizuru::io::DataFrame frame) {
-        // ── error_out: send a canned error message ──────────────────────
-        if (port_name == "error_out") {
-          std::cout << "[error] LLM failure, sending error reply\n";
-          auto ctx = onebot.GetLastReplyContext();
-          if (ctx.target_id.empty()) { return; }
-          const std::string error_msg = "抱歉，我暂时出了点问题，请稍后再试～";
-          try {
-            int64_t target = std::stoll(ctx.target_id);
-            onebot.SendMessage(ctx.message_type, target, error_msg);
-          } catch (...) {}
-          return;
-        }
-
-        // ── tts_out: normal reply ───────────────────────────────────────
-        if (port_name != "tts_out") { return; }
-
-        const std::string text(frame.payload.begin(), frame.payload.end());
-        if (text.empty()) { return; }
-
-        // Check for <skip/> — LLM says no reply needed.
-        if (text.find("<skip/>") != std::string::npos) {
-          std::cout << "[assistant] (skipped)\n";
-          return;
-        }
-
-        std::cout << "\n[assistant] " << text << "\n";
-
-        // Inject reply routing from the last incoming message.
-        auto ctx = onebot.GetLastReplyContext();
-        if (ctx.target_id.empty()) { return; }
-
-        try {
-          int64_t target = std::stoll(ctx.target_id);
-
-          // Long group messages → merged forward to avoid chat flooding.
-          constexpr size_t kForwardThreshold = 450;
-          if (ctx.message_type == "group" && text.size() > kForwardThreshold) {
-            onebot.SendGroupForward(target, "Shizuru", text);
-          } else {
-            onebot.SendMessage(ctx.message_type, target, text);
-          }
-        } catch (...) {}
-      });
-
-  // ── Callbacks for console observability only ──────────────────────────────
   core.Session().GetController().OnConversationItem(
-      [](const shizuru::core::ConversationItem& item,
+      [&onebot](const shizuru::core::ConversationItem& item,
          bool is_delta) {
         if (is_delta) { return; }
         if (item.kind == shizuru::core::ConversationItemKind::kUserMessage) {
@@ -282,6 +230,33 @@ int main(int argc, char* argv[]) {
           const std::string name = item.actor.display_name.empty()
               ? item.actor.actor_id : item.actor.display_name;
           std::cout << "\n[" << name << "] " << text << "\n";
+          return;
+        }
+        if (item.kind == shizuru::core::ConversationItemKind::kAssistantMessage) {
+          std::string text;
+          for (const auto& part : item.parts) {
+            if (auto* tp = std::get_if<shizuru::core::TextPart>(&part)) {
+              text += tp->text;
+            }
+          }
+          if (text.empty()) { return; }
+          if (text.find("<skip/>") != std::string::npos) {
+            std::cout << "[assistant] (skipped)\n";
+            return;
+          }
+
+          std::cout << "\n[assistant] " << text << "\n";
+          auto ctx = onebot.GetLastReplyContext();
+          if (ctx.target_id.empty()) { return; }
+          try {
+            int64_t target = std::stoll(ctx.target_id);
+            constexpr size_t kForwardThreshold = 450;
+            if (ctx.message_type == "group" && text.size() > kForwardThreshold) {
+              onebot.SendGroupForward(target, "Shizuru", text);
+            } else {
+              onebot.SendMessage(ctx.message_type, target, text);
+            }
+          } catch (...) {}
         }
       });
 

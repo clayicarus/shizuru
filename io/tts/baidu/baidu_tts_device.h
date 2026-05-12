@@ -8,6 +8,10 @@
 #include <thread>
 #include <vector>
 
+#include "core/content_part.h"
+#include "core/conversation_item.h"
+#include "core/control_signal.h"
+#include "io/audio/audio_device/audio_frame.h"
 #include "io/tts/tts_device.h"
 #include "tts/baidu/baidu_tts_client.h"
 #include "utils/baidu/baidu_config.h"
@@ -16,7 +20,8 @@
 namespace shizuru::io {
 
 // Baidu implementation of TtsDevice.
-// Accepts text/plain DataFrames on "text_in", emits audio/pcm on "audio_out".
+// Accepts assistant ConversationItems on "item_in", emits typed AudioFrames
+// on "audio_out".
 class BaiduTtsDevice : public TtsDevice {
  public:
   // Creates its own BaiduTokenManager internally.
@@ -31,8 +36,11 @@ class BaiduTtsDevice : public TtsDevice {
   // IoDevice interface
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, DataFrame frame) override;
-  void SetOutputCallback(OutputCallback cb) override;
+  void OnConversationItem(const std::string& port_name,
+                          core::ConversationItem item) override;
+  void OnControlSignal(const std::string& port_name,
+                       core::ControlSignal signal) override;
+  void SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) override;
   void Start() override;
   void Stop() override;
 
@@ -45,7 +53,8 @@ class BaiduTtsDevice : public TtsDevice {
  private:
   void Synthesize(const std::string& text);
 
-  static constexpr char kTextIn[]   = "text_in";
+  static constexpr char kItemIn[]   = "item_in";
+  static constexpr char kSignalIn[] = "signal_in";
   static constexpr char kAudioOut[] = "audio_out";
 
   std::string device_id_;
@@ -54,7 +63,7 @@ class BaiduTtsDevice : public TtsDevice {
   std::atomic<bool> active_{false};
 
   mutable std::mutex output_cb_mutex_;
-  OutputCallback output_cb_;
+  AudioFrameOutputCallback audio_output_cb_;
 
   std::mutex synth_mutex_;
   std::thread synth_thread_;

@@ -35,13 +35,13 @@ ctest --test-dir build
 **Text agent with tool calling** (no audio hardware needed):
 ```bash
 # Built-in mock LLM — no API key required
-./build/examples/tool_call_example
+./build/examples/voice_agent
 
 # Local Ollama
-./build/examples/tool_call_example http://localhost:11434 "" qwen3:8b /api/chat
+./build/examples/voice_agent --base-url http://localhost:11434 --model qwen3:8b
 
 # OpenAI
-./build/examples/tool_call_example https://api.openai.com sk-your-key gpt-4o
+./build/examples/voice_agent --base-url https://api.openai.com --model gpt-4o
 ```
 
 **Full voice agent** — microphone → VAD → ASR → LLM → TTS → speaker:
@@ -68,7 +68,7 @@ tests/        Unit, property-based, and integration tests
 
 ## Architecture
 
-The runtime is a device bus. Every component — including the agent session — is an `IoDevice`. Data flows as typed `DataFrame` packets routed by a `RouteTable`.
+The runtime is a device bus. Every component — including the agent session — is an `IoDevice`. Data flows as typed payloads routed by a `RouteTable`: `AudioFrame` for audio, `ConversationItem` for semantics, and `ControlSignal` for control plane events.
 
 ```
 Microphone → VAD → ASR → CoreDevice (LLM reasoning) → TTS → Speaker
@@ -85,7 +85,7 @@ Current core architecture status:
 - `controller/` still owns the main execution state machine and normal user input path
 - `dialogue/DefaultDialogueReducer` is already introduced for Phase 1 and owns the text/message-layer `barge-in + debounce` branch
 - normal user input still follows aggregator → filter → thinking
-- VAD `speech_start` interruption still uses the legacy interruption path and has not yet been unified under the reducer
+- VAD interruption and ASR flush now travel on typed `ControlSignal` routes through the runtime bus
 
 See `.kiro/steering/architecture.md` for the full architecture guide.
 

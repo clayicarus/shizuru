@@ -12,8 +12,7 @@
 namespace shizuru::io {
 
 // IoDevice wrapper around AudioPlayer.
-// Accepts audio/pcm DataFrames on "audio_in" and writes them to the player.
-// Payload must be raw s16le PCM bytes.
+// Accepts typed AudioFrames on "audio_in" and writes them to the player.
 class AudioPlayoutDevice : public IoDevice {
  public:
   AudioPlayoutDevice(std::unique_ptr<AudioPlayer> player,
@@ -21,11 +20,9 @@ class AudioPlayoutDevice : public IoDevice {
 
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, DataFrame frame) override;
   void OnAudioFrame(const std::string& port_name, AudioFrame frame) override;
   void OnControlSignal(const std::string& port_name,
                        core::ControlSignal signal) override;
-  void SetOutputCallback(OutputCallback cb) override;
   void Start() override;
   void Stop() override;
 

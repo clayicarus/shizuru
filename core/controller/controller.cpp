@@ -56,7 +56,6 @@ const std::unordered_map<std::pair<State, Event>, State, PairHash>
 Controller::Controller(std::string session_id,
                        ControllerConfig config,
                        std::unique_ptr<LlmClient> llm,
-                       EmitFrameCallback emit_frame,
                        CancelCallback cancel,
                        ContextStrategy& context,
                        PolicyLayer& policy,
@@ -65,7 +64,6 @@ Controller::Controller(std::string session_id,
     : session_id_(std::move(session_id)),
       config_(std::move(config)),
       llm_(std::move(llm)),
-      emit_frame_(std::move(emit_frame)),
       cancel_(std::move(cancel)),
       context_(context),
       policy_(policy),
@@ -431,7 +429,8 @@ void Controller::HandleThinking() {
   ApplyDialogueDecision(decision);
 }
 
-// Emit tool call frames.
+// Tool dispatch is now driven by ConversationItem(kToolCall) mirrored through
+// CoreDevice.signal_out, not by legacy action/tool_call frames.
 void Controller::HandleActing(ActionCandidate ac) {
   pending_action_ = ac;
   tool_call_start_ = std::chrono::steady_clock::now();
@@ -440,23 +439,6 @@ void Controller::HandleActing(ActionCandidate ac) {
     dialogue_state_.turn_action_count++;
     LOG_INFO("[{}] Acting: tool=\"{}\" id=\"{}\"", MODULE_NAME, tc.name, tc.id);
     EmitActivity(ActivityKind::kToolDispatched, tc.name);
-
-    nlohmann::json request = {
-        {"tool_call_id", tc.id},
-        {"tool_name", tc.name},
-        {"arguments", nlohmann::json::parse(tc.arguments, nullptr, false)},
-    };
-    io::DataFrame frame;
-    frame.type = "action/tool_call";
-    const auto payload_str = request.dump();
-    frame.payload = std::vector<uint8_t>(payload_str.begin(), payload_str.end());
-    frame.metadata["tool_call_id"] = tc.id;
-    frame.metadata["tool_name"] = tc.name;
-    frame.timestamp = std::chrono::steady_clock::now();
-
-    if (emit_frame_) {
-      emit_frame_("action_out", std::move(frame));
-    }
   }
 }
 
@@ -488,17 +470,6 @@ void Controller::HandleResponding(ActionCandidate ac) {
 
   LOG_INFO("[{}] Responding: \"{}\"", MODULE_NAME, ac.response_text);
   EmitActivity(ActivityKind::kSpeaking);
-
-  // Emit response frame.
-  if (emit_frame_) {
-    io::DataFrame frame;
-    frame.type = "text/plain";
-    frame.payload = std::vector<uint8_t>(
-        ac.response_text.begin(), ac.response_text.end());
-    frame.metadata["tts_final"] = "1";
-    frame.timestamp = std::chrono::steady_clock::now();
-    emit_frame_("tts_out", std::move(frame));
-  }
 
   // Record response in history.
   ConversationItem resp_item;

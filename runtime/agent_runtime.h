@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -40,8 +41,7 @@ class AgentRuntime {
 
   // ── Device management ──────────────────────────────────────────────────
 
-  // Register a device.  The output callback is wired to DispatchFrame
-  // automatically.  Throws if a device with the same ID is already registered.
+  // Register a device. Throws if a device with the same ID is already registered.
   void RegisterDevice(std::unique_ptr<io::IoDevice> device,
                       DeviceOptions options = {});
 
@@ -75,14 +75,11 @@ class AgentRuntime {
   void StartDevice(const std::string& device_id);
   void StopDevice(const std::string& device_id);
 
-  // ── Frame sink ─────────────────────────────────────────────────────────
+  // ── App Output Sink ────────────────────────────────────────────────────
 
-  // Register a callback for frames routed to the virtual "app_output" sink.
-  // This is the only "special" device ID — it exists so that the bus can
-  // deliver frames to the application layer without a real IoDevice.
-  using FrameSinkCallback = std::function<void(io::DataFrame frame)>;
-  void OnFrameSink(FrameSinkCallback cb);
-
+  // Register callbacks for typed payloads routed to the virtual "app_output"
+  // sink. This is the only special device ID — it exists so the bus can
+  // deliver typed outputs to the application layer without a real IoDevice.
   using AudioFrameSinkCallback = std::function<void(io::AudioFrame frame)>;
   using ConversationItemSinkCallback =
       std::function<void(core::ConversationItem item)>;
@@ -94,14 +91,13 @@ class AgentRuntime {
 
  private:
   static constexpr char kAppOutputDeviceId[] = "app_output";
-  static constexpr char kAppOutputFrameInPort[] = "frame_in";
   static constexpr char kAppOutputAudioInPort[] = "audio_in";
   static constexpr char kAppOutputItemInPort[] = "item_in";
   static constexpr char kAppOutputControlInPort[] = "control_in";
 
-  void DispatchFrame(const std::string& device_id,
-                     const std::string& port_name,
-                     io::DataFrame frame);
+  std::optional<io::PortDescriptor> FindPortDescriptor(
+      const std::string& device_id,
+      const std::string& port_name) const;
   void DispatchAudioFrame(const std::string& device_id,
                           const std::string& port_name,
                           io::AudioFrame frame);
@@ -126,7 +122,6 @@ class AgentRuntime {
   mutable std::shared_mutex devices_mutex_;
 
   std::mutex sink_cb_mutex_;
-  FrameSinkCallback sink_cb_;
   AudioFrameSinkCallback audio_sink_cb_;
   ConversationItemSinkCallback item_sink_cb_;
   ControlSignalSinkCallback control_sink_cb_;

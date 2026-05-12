@@ -16,16 +16,6 @@ std::vector<PortDescriptor> AudioCaptureDevice::GetPortDescriptors() const {
            runtime::PortPayloadKind::kAudioFrame}};
 }
 
-void AudioCaptureDevice::OnInput(const std::string& /*port_name*/,
-                                  DataFrame /*frame*/) {
-  // Capture device has no inputs.
-}
-
-void AudioCaptureDevice::SetOutputCallback(OutputCallback cb) {
-  std::lock_guard<std::mutex> lock(output_cb_mutex_);
-  output_cb_ = std::move(cb);
-}
-
 void AudioCaptureDevice::SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) {
   std::lock_guard<std::mutex> lock(output_cb_mutex_);
   audio_output_cb_ = std::move(cb);

@@ -9,14 +9,6 @@
 
 namespace shizuru::runtime {
 
-io::DataFrame CoreDevice::MakeControlFrame(const std::string& command) {
-  io::DataFrame frame;
-  frame.type = "control/command";
-  frame.payload = std::vector<uint8_t>(command.begin(), command.end());
-  frame.timestamp = std::chrono::steady_clock::now();
-  return frame;
-}
-
 CoreDevice::CoreDevice(std::string device_id,
                        std::string session_id,
                        core::ControllerConfig ctrl_config,
@@ -28,14 +20,8 @@ CoreDevice::CoreDevice(std::string device_id,
                        std::unique_ptr<core::TtsSegmentStrategy> tts_segment,
                        std::unique_ptr<core::ResponseFilter> response_filter)
     : device_id_(std::move(device_id)) {
-  // EmitFrameCallback: called by Controller to emit action/tool_call frames.
-  auto emit_frame = [this](const std::string& port, io::DataFrame frame) {
-    EmitFrame(port, std::move(frame));
-  };
-
   // CancelCallback: called by Controller on interrupt.
   auto cancel = [this]() {
-    EmitFrame(kControlOut, MakeControlFrame("cancel"));
     EmitControlSignal(kSignalOut, core::CancelSignal{});
   };
 
@@ -45,30 +31,19 @@ CoreDevice::CoreDevice(std::string device_id,
       std::move(ctx_config),
       std::move(pol_config),
       std::move(llm),
-      std::move(emit_frame),
       std::move(cancel),
       std::move(history),
       std::move(audit),
       std::move(tts_segment),
       std::move(response_filter));
 
-  // OnTransition: emit cancel on control_out when transitioning to kListening
-  // via kInterrupt.
   session_->GetController().OnTransition(
       [this](core::State /*from*/, core::State to, core::Event event) {
         if (to == core::State::kListening &&
             event == core::Event::kInterrupt) {
-          EmitFrame(kControlOut, MakeControlFrame("cancel"));
           EmitControlSignal(kSignalOut, core::CancelSignal{});
         }
         if (to == core::State::kError) {
-          io::DataFrame frame;
-          frame.type = "text/plain";
-          frame.payload = {'E', 'r', 'r', 'o', 'r'};
-          frame.metadata["error"] = "llm_failure";
-          frame.timestamp = std::chrono::steady_clock::now();
-          EmitFrame(kErrorOut, std::move(frame));
-
           session_->GetController().Recover();
         }
       });
@@ -100,29 +75,15 @@ std::string CoreDevice::GetDeviceId() const {
 
 std::vector<io::PortDescriptor> CoreDevice::GetPortDescriptors() const {
   return {
-      {kTextIn,        io::PortDirection::kInput,  "text/plain"},
-      {kToolResultIn,  io::PortDirection::kInput,  "action/tool_result"},
-      {kInterruptIn,   io::PortDirection::kInput,  "control/interrupt"},
-      {kSchedulerIn,   io::PortDirection::kInput,  "scheduler/event"},
-      {"item_in",      io::PortDirection::kInput,  "",
+      {kItemIn,        io::PortDirection::kInput,  "",
                        runtime::PortPayloadKind::kConversationItem},
-      {"control_in",   io::PortDirection::kInput,  "",
+      {kControlIn,     io::PortDirection::kInput,  "",
                        runtime::PortPayloadKind::kControlSignal},
-      {kTtsOut,        io::PortDirection::kOutput, "text/plain"},
-      {kActionOut,     io::PortDirection::kOutput, "action/tool_call"},
-      {kControlOut,    io::PortDirection::kOutput, "control/command"},
       {kSignalOut,     io::PortDirection::kOutput, "",
                        runtime::PortPayloadKind::kControlSignal},
-      {kErrorOut,      io::PortDirection::kOutput, "text/plain"},
       {kItemOut,       io::PortDirection::kOutput, "",
                        runtime::PortPayloadKind::kConversationItem},
   };
-}
-
-void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
-  // Legacy input interface — stubbed.
-  (void)port_name;
-  (void)frame;
 }
 
 void CoreDevice::OnConversationItem(const std::string& port_name,
@@ -163,11 +124,6 @@ void CoreDevice::OnControl(core::ControlSignal signal) {
   }
 }
 
-void CoreDevice::SetOutputCallback(io::OutputCallback cb) {
-  std::lock_guard<std::mutex> lock(output_cb_mutex_);
-  output_cb_ = std::move(cb);
-}
-
 void CoreDevice::SetConversationItemOutputCallback(
     io::ConversationItemOutputCallback cb) {
   std::lock_guard<std::mutex> lock(output_cb_mutex_);
@@ -196,17 +152,6 @@ core::AgentSession& CoreDevice::Session() {
 
 core::State CoreDevice::GetState() const {
   return session_->GetState();
-}
-
-void CoreDevice::EmitFrame(const std::string& port_name, io::DataFrame frame) {
-  io::OutputCallback cb;
-  {
-    std::lock_guard<std::mutex> lock(output_cb_mutex_);
-    cb = output_cb_;
-  }
-  if (cb) {
-    cb(device_id_, port_name, std::move(frame));
-  }
 }
 
 void CoreDevice::EmitConversationItem(const std::string& port_name,

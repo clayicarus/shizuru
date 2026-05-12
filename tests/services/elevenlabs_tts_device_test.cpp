@@ -89,9 +89,10 @@ RC_GTEST_PROP(ElevenLabsTtsDevicePropTest,
   ElevenLabsTtsDevice device(std::move(mock), "tts_test");
 
   std::mutex mu;
-  std::vector<io::DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                                io::DataFrame f) {
+  std::vector<io::AudioFrame> emitted;
+  device.SetAudioFrameOutputCallback([&](const std::string&,
+                                         const std::string&,
+                                         io::AudioFrame f) {
     std::lock_guard<std::mutex> lock(mu);
     emitted.push_back(std::move(f));
   });
@@ -110,26 +111,23 @@ RC_GTEST_PROP(ElevenLabsTtsDevicePropTest,
 
   std::lock_guard<std::mutex> lock(mu);
   RC_ASSERT(!emitted.empty());
-  // All emitted frames must be audio/pcm on audio_out.
   for (const auto& f : emitted) {
-    RC_ASSERT(f.type == "audio/pcm");
-    RC_ASSERT(!f.payload.empty());
+    RC_ASSERT(f.sample_rate == 16000);
+    RC_ASSERT(f.channel_count == 1);
+    RC_ASSERT(f.sample_count > 0);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Unit test: synthesis with mock client emits audio DataFrames
-// ---------------------------------------------------------------------------
-TEST(ElevenLabsTtsDeviceTest, SynthesisEmitsAudioDataFrames) {
+TEST(ElevenLabsTtsDeviceTest, SynthesisEmitsTypedAudioFrames) {
   auto mock = std::make_unique<MockTtsClient>();
   mock->canned_audio = {0xAA, 0xBB, 0xCC};
 
   ElevenLabsTtsDevice device(std::move(mock), "tts_unit");
 
   std::mutex mu;
-  std::vector<io::DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string& port,
-                                io::DataFrame f) {
+  std::vector<io::AudioFrame> emitted;
+  device.SetAudioFrameOutputCallback(
+      [&](const std::string&, const std::string& port, io::AudioFrame f) {
     std::lock_guard<std::mutex> lock(mu);
     emitted.push_back(std::move(f));
     (void)port;
@@ -148,12 +146,10 @@ TEST(ElevenLabsTtsDeviceTest, SynthesisEmitsAudioDataFrames) {
   ASSERT_TRUE(got);
   std::lock_guard<std::mutex> lock(mu);
   ASSERT_FALSE(emitted.empty());
-  EXPECT_EQ(emitted[0].type, "audio/pcm");
-  // ElevenLabsTtsDevice ensures even-sized payloads for int16 alignment.
-  // Mock returns 3 bytes {0xAA, 0xBB, 0xCC}; the carry-byte buffer holds
-  // the odd trailing byte, so the first emitted frame contains only the
-  // first 2 bytes.
-  EXPECT_EQ(emitted[0].payload, (std::vector<uint8_t>{0xAA, 0xBB}));
+  EXPECT_EQ(emitted[0].sample_rate, 16000);
+  EXPECT_EQ(emitted[0].channel_count, 1u);
+  EXPECT_EQ(emitted[0].sample_count, 1u);
+  EXPECT_EQ(emitted[0].data[0], static_cast<int16_t>(0xBBAA));
 }
 
 // ---------------------------------------------------------------------------
@@ -164,8 +160,8 @@ TEST(ElevenLabsTtsDeviceTest, CancelSynthesisStopsDevice) {
   MockTtsClient* mock_ptr = mock.get();
 
   ElevenLabsTtsDevice device(std::move(mock), "tts_cancel");
-  device.SetOutputCallback([](const std::string&, const std::string&,
-                               io::DataFrame) {});
+  device.SetAudioFrameOutputCallback(
+      [](const std::string&, const std::string&, io::AudioFrame) {});
   device.Start();
   device.CancelSynthesis();
 
@@ -183,8 +179,10 @@ TEST(ElevenLabsTtsDeviceTest, FrameDiscardedWhenStopped) {
   ElevenLabsTtsDevice device(std::move(mock), "tts_stopped");
 
   std::atomic<int> callback_count{0};
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                                io::DataFrame) { ++callback_count; });
+  device.SetAudioFrameOutputCallback(
+      [&](const std::string&, const std::string&, io::AudioFrame) {
+        ++callback_count;
+      });
 
   // Do NOT call Start() — device is stopped.
   device.OnConversationItem("item_in", AssistantItem("should be discarded"));
@@ -195,16 +193,16 @@ TEST(ElevenLabsTtsDeviceTest, FrameDiscardedWhenStopped) {
   EXPECT_EQ(callback_count.load(), 0);
 }
 
-TEST(ElevenLabsTtsDeviceTest, AssistantConversationItemEmitsAudioDataFrames) {
+TEST(ElevenLabsTtsDeviceTest, AssistantConversationItemEmitsTypedAudioFrames) {
   auto mock = std::make_unique<MockTtsClient>();
   mock->canned_audio = {0x10, 0x11, 0x12, 0x13};
 
   ElevenLabsTtsDevice device(std::move(mock), "tts_item");
 
   std::mutex mu;
-  std::vector<io::DataFrame> emitted;
-  device.SetOutputCallback([&](const std::string&, const std::string&,
-                               io::DataFrame f) {
+  std::vector<io::AudioFrame> emitted;
+  device.SetAudioFrameOutputCallback(
+      [&](const std::string&, const std::string&, io::AudioFrame f) {
     std::lock_guard<std::mutex> lock(mu);
     emitted.push_back(std::move(f));
   });
@@ -228,7 +226,21 @@ TEST(ElevenLabsTtsDeviceTest, AssistantConversationItemEmitsAudioDataFrames) {
   ASSERT_TRUE(got);
   std::lock_guard<std::mutex> lock(mu);
   ASSERT_FALSE(emitted.empty());
-  EXPECT_EQ(emitted[0].type, "audio/pcm");
+  EXPECT_EQ(emitted[0].sample_count, 2u);
+  EXPECT_EQ(emitted[0].data[0], static_cast<int16_t>(0x1110));
+  EXPECT_EQ(emitted[0].data[1], static_cast<int16_t>(0x1312));
+}
+
+TEST(ElevenLabsTtsDeviceTest, CancelSignalCancelsSynthesis) {
+  auto mock = std::make_unique<MockTtsClient>();
+  MockTtsClient* mock_ptr = mock.get();
+
+  ElevenLabsTtsDevice device(std::move(mock), "tts_signal_cancel");
+  device.Start();
+  device.OnControlSignal("signal_in", core::CancelSignal{});
+  device.Stop();
+
+  EXPECT_GE(mock_ptr->cancel_count.load(), 1);
 }
 
 }  // namespace

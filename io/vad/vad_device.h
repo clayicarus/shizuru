@@ -5,17 +5,15 @@
 namespace shizuru::io {
 
 // Vendor-agnostic VAD device interface.
-// Accepts audio/pcm DataFrames on "audio_in".
-// Emits vad/event DataFrames on "vad_out" (payload = event name bytes).
+// Accepts typed AudioFrames on "audio_in".
+// Emits typed AudioFrames on "audio_out" and typed ControlSignals for
+// speech lifecycle events.
 //
 // Port contract:
-//   Input  "audio_in" — DataFrames with type "audio/pcm" (s16le)
-//   Output "vad_out"  — DataFrames with type "vad/event"
-//
-// vad/event payload:
-//   "speech_start"  — voice activity detected, speech begins
-//   "speech_end"    — silence detected after speech, speech ends
-//   "speech_active" — speech is ongoing (periodic heartbeat)
+//   Input  "audio_in" — typed AudioFrames (s16le)
+//   Output "audio_out" — speech-only AudioFrames
+//   Output "interrupt_signal_out" — InterruptSignal on speech_start
+//   Output "control_signal_out" — FlushSignal on speech_end
 class VadDevice : public IoDevice {};
 
 }  // namespace shizuru::io

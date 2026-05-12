@@ -5,20 +5,20 @@
 //   [AudioCaptureDevice] audio_out ──► [dump_capture] pass_in
 //   [dump_capture]       pass_out  ──► [EnergyVadDevice] audio_in
 //   [EnergyVadDevice]    audio_out ──► [dump_vad] pass_in
-//   [EnergyVadDevice]    vad_out   ──► [log_vad] pass_in
-//                                          └──► [asr_flush] vad_in
+//   [EnergyVadDevice]    control_signal_out ──► [log_vad] signal_in
+//   [log_vad]            signal_out ──► [BaiduAsrDevice] signal_in
 //   [dump_vad]           pass_out  ──► [BaiduAsrDevice] audio_in
-//   [BaiduAsrDevice]     text_out  ──► [log_asr_tts] pass_in
-//   [log_asr_tts]        pass_out  ──► [BaiduTtsDevice] text_in
-//   [BaiduTtsDevice]     audio_out ──► [log_tts_play] pass_in
-//   [log_tts_play]       pass_out  ──► [AudioPlayoutDevice] audio_in
+//   [BaiduAsrDevice]     item_out  ──► [log_asr_tts] item_in
+//   [log_asr_tts]        item_out  ──► [BaiduTtsDevice] item_in
+//   [BaiduTtsDevice]     audio_out ──► [log_tts_play] audio_in
+//   [log_tts_play]       audio_out ──► [AudioPlayoutDevice] audio_in
 //
 // VAD behaviour:
 //   - EnergyVadDevice is a self-contained VAD filter: it detects speech
 //     internally and only forwards confirmed speech frames on audio_out.
 //   - Pre-roll buffering ensures onset frames are not lost.
-//   - vad_out emits speech_start/speech_active/speech_end for observability.
-//   - VadEventDevice triggers asr.Flush() on speech_end.
+//   - speech_start emits InterruptSignal; speech_end emits FlushSignal.
+//   - ASR flushes directly from the typed control route.
 //
 // Usage:
 //   export BAIDU_API_KEY=...
@@ -55,17 +55,30 @@
 using namespace shizuru;
 
 // ---------------------------------------------------------------------------
-// SimpleBus: wires OutputCallback → RouteTable → OnInput (all DMA)
+// SimpleBus: wires typed output callbacks → RouteTable → typed inputs.
 // ---------------------------------------------------------------------------
 class SimpleBus {
  public:
   void Register(io::IoDevice* dev) {
     devices_[dev->GetDeviceId()] = dev;
-    dev->SetOutputCallback([this](const std::string& src_id,
-                                   const std::string& src_port,
-                                   io::DataFrame frame) {
-      Dispatch(src_id, src_port, std::move(frame));
-    });
+    dev->SetAudioFrameOutputCallback(
+        [this](const std::string& src_id,
+               const std::string& src_port,
+               io::AudioFrame frame) {
+          DispatchAudio(src_id, src_port, std::move(frame));
+        });
+    dev->SetConversationItemOutputCallback(
+        [this](const std::string& src_id,
+               const std::string& src_port,
+               core::ConversationItem item) {
+          DispatchItem(src_id, src_port, std::move(item));
+        });
+    dev->SetControlSignalOutputCallback(
+        [this](const std::string& src_id,
+               const std::string& src_port,
+               core::ControlSignal signal) {
+          DispatchSignal(src_id, src_port, std::move(signal));
+        });
   }
 
   void AddRoute(const runtime::PortAddress& src, runtime::PortAddress dst) {
@@ -76,11 +89,31 @@ class SimpleBus {
   void Stop()  { for (auto& [id, dev] : devices_) { dev->Stop();  } }
 
  private:
-  void Dispatch(const std::string& src_id, const std::string& src_port,
-                io::DataFrame frame) {  // NOLINT(performance-unnecessary-value-param): fan-out copy
+  void DispatchAudio(const std::string& src_id, const std::string& src_port,
+                     io::AudioFrame frame) {
     for (const auto& [dst, _] : table_.Lookup({src_id, src_port})) {
       auto it = devices_.find(dst.device_id);
-      if (it != devices_.end()) { it->second->OnInput(dst.port_name, frame); }
+      if (it != devices_.end()) { it->second->OnAudioFrame(dst.port_name, frame); }
+    }
+  }
+
+  void DispatchItem(const std::string& src_id, const std::string& src_port,
+                    core::ConversationItem item) {
+    for (const auto& [dst, _] : table_.Lookup({src_id, src_port})) {
+      auto it = devices_.find(dst.device_id);
+      if (it != devices_.end()) {
+        it->second->OnConversationItem(dst.port_name, item);
+      }
+    }
+  }
+
+  void DispatchSignal(const std::string& src_id, const std::string& src_port,
+                      core::ControlSignal signal) {
+    for (const auto& [dst, _] : table_.Lookup({src_id, src_port})) {
+      auto it = devices_.find(dst.device_id);
+      if (it != devices_.end()) {
+        it->second->OnControlSignal(dst.port_name, signal);
+      }
     }
   }
 
@@ -153,9 +186,6 @@ int main(int argc, char* argv[]) {
   io::BaiduAsrDevice asr(cfg, token_mgr);
   io::BaiduTtsDevice tts(cfg, token_mgr);
 
-  // VadEventDevice: translates VAD protocol events into ASR control signals.
-  io::VadEventDevice asr_flush;
-
   // LogDevices for observability.
   io::LogDevice log_vad("log_vad",      spdlog::level::info);
   io::LogDevice log_asr("log_asr_tts",  spdlog::level::info);
@@ -172,7 +202,6 @@ int main(int argc, char* argv[]) {
   bus.Register(&capture);
   bus.Register(&dump_capture);
   bus.Register(&vad);
-  bus.Register(&asr_flush);
   bus.Register(&log_vad);
   bus.Register(&dump_vad);
   bus.Register(&asr);
@@ -193,24 +222,22 @@ int main(int argc, char* argv[]) {
   bus.AddRoute({"vad_dump", io::PcmDumpDevice::kPassOut},
                {"baidu_asr", "audio_in"});
 
-  // vad vad_out (events) → log → asr_flush adapter
-  bus.AddRoute({"vad",     io::EnergyVadDevice::kVadOut},
-               {"log_vad", io::LogDevice::kPassIn});
-  bus.AddRoute({"log_vad", io::LogDevice::kPassOut},
-               {"vad_event", io::VadEventDevice::kVadIn});
-  bus.AddRoute({"vad_event", io::VadEventDevice::kControlOut},
-               {"baidu_asr", "control_in"});
+  // vad typed control → log → asr signal_in
+  bus.AddRoute({"vad",     io::EnergyVadDevice::kControlSignalOut},
+               {"log_vad", io::LogDevice::kSignalIn});
+  bus.AddRoute({"log_vad", io::LogDevice::kSignalOut},
+               {"baidu_asr", "signal_in"});
 
   // asr → [log] → tts
-  bus.AddRoute({"baidu_asr",   "text_out"},
-               {"log_asr_tts", io::LogDevice::kPassIn});
-  bus.AddRoute({"log_asr_tts", io::LogDevice::kPassOut},
-               {"baidu_tts",   "text_in"});
+  bus.AddRoute({"baidu_asr",   "item_out"},
+               {"log_asr_tts", io::LogDevice::kItemIn});
+  bus.AddRoute({"log_asr_tts", io::LogDevice::kItemOut},
+               {"baidu_tts",   "item_in"});
 
   // tts → [log] → playout
   bus.AddRoute({"baidu_tts",    "audio_out"},
-               {"log_tts_play", io::LogDevice::kPassIn});
-  bus.AddRoute({"log_tts_play", io::LogDevice::kPassOut},
+               {"log_tts_play", io::LogDevice::kAudioIn});
+  bus.AddRoute({"log_tts_play", io::LogDevice::kAudioOut},
                {"audio_playout", "audio_in"});
 
   bus.Start();

@@ -165,13 +165,6 @@ void AppRuntime::Start() {
   // ── Create ToolDispatchDevice ────────────────────────────────────────────
   auto tool_dispatch = std::make_unique<runtime::ToolDispatchDevice>(tools_);
 
-  // Wire tool dispatch to deliver ToolResultSignal to CoreDevice.
-  tool_dispatch->SetOnResultCallback([this](core::ToolResultSignal signal) {
-    if (core_device_) {
-      core_device_->OnControl(std::move(signal));
-    }
-  });
-
   // ── Create SchedulerDevice ───────────────────────────────────────────────
   auto scheduler = std::make_unique<SchedulerDevice>();
   scheduler_ = scheduler.get();
@@ -204,18 +197,8 @@ void AppRuntime::Start() {
   scheduler_->Start();
 }
 
-void AppRuntime::SendMessage(const std::string& text) {
+void AppRuntime::SendConversationItem(core::ConversationItem item) {
   if (core_device_ == nullptr) { return; }
-
-  core::ConversationItem item;
-  item.item_id = "ui:" + std::to_string(
-      std::chrono::steady_clock::now().time_since_epoch().count());
-  item.conversation_id = config_.user_id;
-  item.kind = core::ConversationItemKind::kUserMessage;
-  item.actor = core::ActorRef{config_.user_id, "User", core::ActorKind::kHuman};
-  item.parts.emplace_back(core::TextPart{text});
-  item.wall_time = std::chrono::system_clock::now();
-
   core_device_->OnConversationItem(std::move(item));
 }
 
@@ -282,9 +265,10 @@ void AppRuntime::WireRoutes() {
   // Tool call round-trip.
   // Semantic tool dispatch now flows over the typed control plane:
   //   core:signal_out -> tool_dispatch:control_in
-  // Tool results already return via ToolResultSignal into CoreDevice::OnControl().
   bus_.AddRoute({"core", "signal_out"},
                 {"tool_dispatch", "control_in"}, kCtrl);
+  bus_.AddRoute({"tool_dispatch", "signal_out"},
+                {"core", "control_in"}, kCtrl);
 
   // VAD route: speech_end drives ASR flush via typed control signal.
   bus_.AddRoute({"vad", io::EnergyVadDevice::kControlSignalOut},

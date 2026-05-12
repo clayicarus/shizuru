@@ -4,49 +4,62 @@
 #include <string>
 #include <vector>
 
-#include "io/io_device.h"
 #include "async_logger.h"
+#include "core/content_part.h"
+#include "core/control_signal.h"
+#include "core/conversation_item.h"
+#include "io/audio/audio_device/audio_frame.h"
+#include "io/io_device.h"
 
 namespace shizuru::io {
 
-// A pass-through IoDevice that logs every DataFrame it receives, then
-// re-emits it unchanged on "pass_out" so it can be chained in the bus.
+// A pass-through IoDevice that logs typed payloads and re-emits them unchanged
+// on a matching output port so it can be chained in the bus.
 //
 // Port contract:
-//   Input  "pass_in"  — accepts any DataFrame type
-//   Output "pass_out" — re-emits the same DataFrame unchanged
+//   Input  "audio_in" / "item_in" / "signal_in"
+//   Output "audio_out" / "item_out" / "signal_out"
 //
 // Usage: insert between any two devices in the RouteTable.
 //
 //   Before: A.out → B.in
-//   After:  A.out → log.pass_in → log.pass_out → B.in
+//   After:  A.out → log.<kind>_in → log.<kind>_out → B.in
 class LogDevice : public IoDevice {
  public:
-  // Formatter: given a DataFrame, return a string to append to the log line.
-  // Default formatter prints type + byte count (+ text preview for text/plain).
-  using Formatter = std::function<std::string(const DataFrame&)>;
-
   explicit LogDevice(std::string device_id,
-                     spdlog::level::level_enum level = spdlog::level::info,
-                     Formatter formatter = nullptr);
+                     spdlog::level::level_enum level = spdlog::level::info);
 
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, DataFrame frame) override;
-  void SetOutputCallback(OutputCallback cb) override;
+  void OnAudioFrame(const std::string& port_name, AudioFrame frame) override;
+  void OnConversationItem(const std::string& port_name,
+                          core::ConversationItem item) override;
+  void OnControlSignal(const std::string& port_name,
+                       core::ControlSignal signal) override;
+  void SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) override;
+  void SetConversationItemOutputCallback(
+      ConversationItemOutputCallback cb) override;
+  void SetControlSignalOutputCallback(ControlSignalOutputCallback cb) override;
   void Start() override;
   void Stop() override;
 
-  static constexpr char kPassIn[]  = "pass_in";
-  static constexpr char kPassOut[] = "pass_out";
+  static constexpr char kAudioIn[] = "audio_in";
+  static constexpr char kAudioOut[] = "audio_out";
+  static constexpr char kItemIn[] = "item_in";
+  static constexpr char kItemOut[] = "item_out";
+  static constexpr char kSignalIn[] = "signal_in";
+  static constexpr char kSignalOut[] = "signal_out";
 
  private:
-  std::string FormatFrame(const DataFrame& frame) const;
+  std::string FormatAudioFrame(const AudioFrame& frame) const;
+  std::string FormatConversationItem(const core::ConversationItem& item) const;
+  std::string FormatControlSignal(const core::ControlSignal& signal) const;
 
   std::string device_id_;
   spdlog::level::level_enum level_;
-  Formatter formatter_;
-  OutputCallback output_cb_;
+  AudioFrameOutputCallback audio_output_cb_;
+  ConversationItemOutputCallback item_output_cb_;
+  ControlSignalOutputCallback signal_output_cb_;
 };
 
 }  // namespace shizuru::io

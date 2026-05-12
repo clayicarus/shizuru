@@ -25,10 +25,8 @@ class PcmDumpDevice : public IoDevice {
 
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, DataFrame frame) override;
   void OnAudioFrame(const std::string& port_name, AudioFrame frame) override;
   void SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) override;
-  void SetOutputCallback(OutputCallback cb) override;
   void Start() override;
   void Stop() override;
 
@@ -38,7 +36,6 @@ class PcmDumpDevice : public IoDevice {
  private:
   std::string name_;
   std::ofstream file_;
-  OutputCallback output_cb_;
   AudioFrameOutputCallback audio_output_cb_;
 };
 

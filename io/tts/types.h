@@ -7,7 +7,7 @@
 namespace shizuru::io {
 
 // Vendor-agnostic TTS request type.
-// The actual text data flows as DataFrames through the device ports;
+// The actual text data flows as ConversationItems through the device ports;
 // this struct is an informational type for configuration and metadata.
 struct TtsRequest {
   std::string text;         // Text to synthesize
@@ -16,7 +16,7 @@ struct TtsRequest {
 };
 
 // Vendor-agnostic TTS result type.
-// The actual audio data flows as DataFrames on the audio_out port;
+// The actual audio data flows as typed AudioFrames on the audio_out port;
 // this struct is an informational type for result metadata.
 struct TtsResult {
   std::vector<uint8_t> audio_data;  // Synthesized PCM audio bytes

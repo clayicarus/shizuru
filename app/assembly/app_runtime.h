@@ -13,7 +13,7 @@
 //   // Register platform-specific devices on app.Bus() ...
 //   // Add platform-specific routes on app.Bus() ...
 //   app.Start();
-//   app.SendMessage("hello");
+//   app.SendConversationItem(...);
 //   app.Shutdown();
 
 #include <functional>
@@ -65,8 +65,7 @@ class AppRuntime {
   // External devices (audio, probes) must be registered on Bus() before this.
   void Start();
 
-  // Send a text message to the agent.
-  void SendMessage(const std::string& text);
+  void SendConversationItem(core::ConversationItem item);
 
   // Query current agent state.  Returns kIdle if not started.
   core::State GetState() const;

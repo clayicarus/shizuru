@@ -23,10 +23,8 @@ namespace shizuru::io {
 using AsrItemCallback = std::function<void(core::ConversationItem)>;
 
 // Baidu implementation of AsrDevice.
-// Accepts audio/pcm DataFrames on "audio_in".
-// Emits:
-// - text/plain on "text_out" for transcript probe compatibility
-// - ConversationItem on "item_out" for semantic delivery to Core
+// Accepts typed AudioFrames on "audio_in".
+// Emits ConversationItems on "item_out" for semantic delivery to Core.
 // Accumulates audio until Flush() is called (or Stop()), then transcribes.
 // Flush() is non-blocking: it posts a task to an internal worker thread.
 //
@@ -48,11 +46,9 @@ class BaiduAsrDevice : public AsrDevice {
   // IoDevice interface
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, DataFrame frame) override;
   void OnAudioFrame(const std::string& port_name, AudioFrame frame) override;
   void OnControlSignal(const std::string& port_name,
                        core::ControlSignal signal) override;
-  void SetOutputCallback(OutputCallback cb) override;
   void SetConversationItemOutputCallback(
       ConversationItemOutputCallback cb) override;
   void Start() override;
@@ -73,9 +69,7 @@ class BaiduAsrDevice : public AsrDevice {
   void Transcribe(std::vector<uint8_t> audio);
 
   static constexpr char kAudioIn[]   = "audio_in";
-  static constexpr char kTextOut[]   = "text_out";
   static constexpr char kItemOut[]   = "item_out";
-  static constexpr char kControlIn[] = "control_in";
   static constexpr char kSignalIn[]  = "signal_in";
 
   std::string device_id_;
@@ -86,7 +80,6 @@ class BaiduAsrDevice : public AsrDevice {
   std::atomic<bool> active_{false};
 
   mutable std::mutex output_cb_mutex_;
-  OutputCallback output_cb_;
   ConversationItemOutputCallback item_output_cb_;
 
   std::mutex on_item_mutex_;

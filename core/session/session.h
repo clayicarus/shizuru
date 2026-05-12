@@ -29,7 +29,6 @@ class AgentSession {
                ContextConfig ctx_config,
                PolicyConfig pol_config,
                std::unique_ptr<LlmClient> llm,
-               Controller::EmitFrameCallback emit_frame,
                Controller::CancelCallback cancel,
                std::unique_ptr<HistoryStore> history,
                std::unique_ptr<AuditSink> audit,

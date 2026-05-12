@@ -12,8 +12,8 @@ typedef _CreateNative = Pointer Function(Pointer<Utf8> configJson,
     Pointer<Utf8> errorBuf, Int32 errorBufLen);
 typedef _StartNative = Int32 Function(Pointer handle);
 typedef _DestroyNative = Void Function(Pointer handle);
-typedef _SendMessageNative = Int32 Function(
-    Pointer handle, Pointer<Utf8> text);
+typedef _SendConversationItemJsonNative = Int32 Function(
+    Pointer handle, Pointer<Utf8> itemJson);
 typedef _GetStateNative = Int32 Function(Pointer handle);
 typedef _SetOutputCallbackNative = Void Function(
     Pointer handle, Pointer<NativeFunction<_OutputCallbackNative>> cb,
@@ -62,7 +62,8 @@ typedef _CreateDart = Pointer Function(Pointer<Utf8> configJson,
     Pointer<Utf8> errorBuf, int errorBufLen);
 typedef _StartDart = int Function(Pointer handle);
 typedef _DestroyDart = void Function(Pointer handle);
-typedef _SendMessageDart = int Function(Pointer handle, Pointer<Utf8> text);
+typedef _SendConversationItemJsonDart = int Function(
+    Pointer handle, Pointer<Utf8> itemJson);
 typedef _GetStateDart = int Function(Pointer handle);
 typedef _SetOutputCallbackDart = void Function(
     Pointer handle, Pointer<NativeFunction<_OutputCallbackNative>> cb,
@@ -102,7 +103,7 @@ class ShizuruBridge {
   // Bound functions
   late final _StartDart _start;
   late final _DestroyDart _destroy;
-  late final _SendMessageDart _sendMessage;
+  late final _SendConversationItemJsonDart _sendConversationItemJson;
   late final _GetStateDart _getState;
   late final _SetOutputCallbackDart _setOutputCallback;
   late final _SetStateCallbackDart _setStateCallback;
@@ -169,8 +170,9 @@ class ShizuruBridge {
   void _bindFunctions() {
     _start = _lib.lookupFunction<_StartNative, _StartDart>('shizuru_start');
     _destroy = _lib.lookupFunction<_DestroyNative, _DestroyDart>('shizuru_destroy');
-    _sendMessage = _lib.lookupFunction<_SendMessageNative, _SendMessageDart>(
-        'shizuru_send_message');
+    _sendConversationItemJson = _lib.lookupFunction<
+        _SendConversationItemJsonNative,
+        _SendConversationItemJsonDart>('shizuru_send_conversation_item_json');
     _getState = _lib.lookupFunction<_GetStateNative, _GetStateDart>(
         'shizuru_get_state');
     _setOutputCallback = _lib.lookupFunction<_SetOutputCallbackNative,
@@ -225,10 +227,10 @@ class ShizuruBridge {
     _activityCallable = null;
   }
 
-  int sendMessage(String text) {
-    final ptr = text.toNativeUtf8();
+  int sendConversationItemJson(String itemJson) {
+    final ptr = itemJson.toNativeUtf8();
     try {
-      return _sendMessage(_handle, ptr);
+      return _sendConversationItemJson(_handle, ptr);
     } finally {
       calloc.free(ptr);
     }

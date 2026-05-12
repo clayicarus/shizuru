@@ -24,18 +24,29 @@ std::string BaiduTtsDevice::GetDeviceId() const { return device_id_; }
 
 std::vector<PortDescriptor> BaiduTtsDevice::GetPortDescriptors() const {
   return {
-      {kTextIn,   PortDirection::kInput,  "text/plain"},
-      {kAudioOut, PortDirection::kOutput, "audio/pcm"},
+      {kItemIn,   PortDirection::kInput,  "",
+                  runtime::PortPayloadKind::kConversationItem},
+      {kSignalIn, PortDirection::kInput,  "",
+                  runtime::PortPayloadKind::kControlSignal},
+      {kAudioOut, PortDirection::kOutput, "audio/pcm",
+                  runtime::PortPayloadKind::kAudioFrame},
   };
 }
 
-void BaiduTtsDevice::OnInput(const std::string& port_name, DataFrame frame) {
+void BaiduTtsDevice::OnConversationItem(const std::string& port_name,
+                                        core::ConversationItem item) {
   if (!active_.load()) { return; }
-  if (port_name != kTextIn) {
+  if (port_name != kItemIn) {
     LOG_WARN("BaiduTtsDevice: unsupported input port: {}", port_name);
     return;
   }
-  const std::string text(frame.payload.begin(), frame.payload.end());
+
+  std::string text;
+  for (const auto& part : item.parts) {
+    if (const auto* tp = std::get_if<core::TextPart>(&part)) {
+      text += tp->text;
+    }
+  }
   if (text.empty()) { return; }
 
   std::lock_guard<std::mutex> lock(synth_mutex_);
@@ -43,9 +54,18 @@ void BaiduTtsDevice::OnInput(const std::string& port_name, DataFrame frame) {
   synth_thread_ = std::thread([this, text] { Synthesize(text); });
 }
 
-void BaiduTtsDevice::SetOutputCallback(OutputCallback cb) {
+void BaiduTtsDevice::OnControlSignal(const std::string& port_name,
+                                     core::ControlSignal signal) {
+  if (port_name != kSignalIn) { return; }
+  if (std::holds_alternative<core::CancelSignal>(signal) ||
+      std::holds_alternative<core::InterruptSignal>(signal)) {
+    CancelSynthesis();
+  }
+}
+
+void BaiduTtsDevice::SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) {
   std::lock_guard<std::mutex> lock(output_cb_mutex_);
-  output_cb_ = std::move(cb);
+  audio_output_cb_ = std::move(cb);
 }
 
 void BaiduTtsDevice::Start() { active_.store(true); }
@@ -79,21 +99,17 @@ void BaiduTtsDevice::Synthesize(const std::string& text) {
   }
 
   if (!audio.empty()) {
-    DataFrame frame;
-    frame.type = "audio/pcm";
-    frame.payload.assign(
-        reinterpret_cast<const uint8_t*>(audio.data()),
-        reinterpret_cast<const uint8_t*>(audio.data()) + audio.size());
-    frame.source_device = device_id_;
-    frame.source_port   = kAudioOut;
-    frame.timestamp     = std::chrono::steady_clock::now();
-    frame.metadata["sample_rate"]   = "16000";
-    frame.metadata["channel_count"] = "1";
+    AudioFrame frame;
+    frame.sample_rate = 16000;
+    frame.channel_count = 1;
+    const auto byte_count = audio.size() - (audio.size() % sizeof(int16_t));
+    frame.sample_count = byte_count / sizeof(int16_t);
+    std::memcpy(frame.data, audio.data(), byte_count);
 
-    OutputCallback cb;
+    AudioFrameOutputCallback cb;
     {
       std::lock_guard<std::mutex> lock(output_cb_mutex_);
-      cb = output_cb_;
+      cb = audio_output_cb_;
     }
     if (cb) { cb(device_id_, kAudioOut, std::move(frame)); }
   }

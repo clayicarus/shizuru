@@ -21,9 +21,7 @@ class AudioCaptureDevice : public IoDevice {
 
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, DataFrame frame) override;
   void SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) override;
-  void SetOutputCallback(OutputCallback cb) override;
   void Start() override;
   void Stop() override;
 
@@ -35,7 +33,6 @@ class AudioCaptureDevice : public IoDevice {
   std::atomic<bool> active_{false};
 
   mutable std::mutex output_cb_mutex_;
-  OutputCallback output_cb_;
   AudioFrameOutputCallback audio_output_cb_;
 };
 

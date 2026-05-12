@@ -53,32 +53,26 @@ TEST(AppRuntimeReplay, ReplaysRecentHistoryOnStart) {
   app.Bus().RegisterDevice(std::make_unique<runtime::testing::MockIoDevice>(
       "elevenlabs_tts",
       std::vector<io::PortDescriptor>{
-          {"text_in", io::PortDirection::kInput, "text/plain"},
           {"item_in", io::PortDirection::kInput, "",
            runtime::PortPayloadKind::kConversationItem},
-          {"control_in", io::PortDirection::kInput, "control/command"},
           {"signal_in", io::PortDirection::kInput, "",
            runtime::PortPayloadKind::kControlSignal},
       }));
   app.Bus().RegisterDevice(std::make_unique<runtime::testing::MockIoDevice>(
       "baidu_asr",
       std::vector<io::PortDescriptor>{
-          {"control_in", io::PortDirection::kInput, "control/command"},
           {"signal_in", io::PortDirection::kInput, "",
            runtime::PortPayloadKind::kControlSignal},
       }));
   app.Bus().RegisterDevice(std::make_unique<runtime::testing::MockIoDevice>(
       "audio_playout",
       std::vector<io::PortDescriptor>{
-          {"control_in", io::PortDirection::kInput, "control/command"},
           {"signal_in", io::PortDirection::kInput, "",
            runtime::PortPayloadKind::kControlSignal},
       }));
   app.Bus().RegisterDevice(std::make_unique<runtime::testing::MockIoDevice>(
       "vad",
       std::vector<io::PortDescriptor>{
-          {"control_out", io::PortDirection::kOutput, "control/command"},
-          {"vad_out", io::PortDirection::kOutput, "vad/event"},
           {"audio_out", io::PortDirection::kOutput, "audio/pcm",
            runtime::PortPayloadKind::kAudioFrame},
           {"control_signal_out", io::PortDirection::kOutput, "",

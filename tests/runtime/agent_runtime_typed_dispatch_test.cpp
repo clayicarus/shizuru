@@ -239,9 +239,6 @@ TEST(AgentRuntimeTypedDispatch, AppOutputRequiresMatchingVirtualPortForItem) {
 
   EXPECT_NO_THROW(
       runtime.AddRoute(PA("src", "item_out"), PA("app_output", "item_in")));
-  EXPECT_THROW(
-      runtime.AddRoute(PA("src", "item_out"), PA("app_output", "frame_in")),
-      std::invalid_argument);
 }
 
 TEST(AgentRuntimeTypedDispatch, AppOutputRequiresMatchingVirtualPortForControl) {
@@ -334,6 +331,86 @@ TEST(AgentRuntimeTypedDispatch, AppOutputControlSinkReceivesSignalFromTypedRoute
   const auto& sig = std::get<core::ToolCallStartSignal>(signals[0]);
   EXPECT_EQ(sig.tool_call_id, "call_1");
   EXPECT_EQ(sig.name, "search");
+}
+
+TEST(AgentRuntimeTypedDispatch, AppOutputAudioSinkReceivesAudioFromTypedRoute) {
+  AgentRuntime runtime;
+
+  auto src = std::make_unique<MockIoDevice>(
+      "src",
+      std::vector<io::PortDescriptor>{
+          PD("audio_out", io::PortDirection::kOutput,
+             PortPayloadKind::kAudioFrame),
+      });
+  auto* src_ptr = src.get();
+
+  runtime.RegisterDevice(std::move(src));
+  runtime.AddRoute(PA("src", "audio_out"), PA("app_output", "audio_in"));
+
+  std::mutex mu;
+  std::vector<io::AudioFrame> frames;
+  runtime.OnAudioFrameSink([&](io::AudioFrame frame) {
+    std::lock_guard<std::mutex> lock(mu);
+    frames.push_back(std::move(frame));
+  });
+
+  runtime.StartAll();
+
+  io::AudioFrame frame;
+  frame.sample_rate = 16000;
+  frame.channel_count = 1;
+  frame.sample_count = 3;
+  frame.data[0] = 101;
+  frame.data[1] = 202;
+  frame.data[2] = 303;
+  src_ptr->EmitAudioOutput("audio_out", frame);
+  runtime.Shutdown();
+
+  std::lock_guard<std::mutex> lock(mu);
+  ASSERT_EQ(frames.size(), 1u);
+  EXPECT_EQ(frames[0].sample_rate, 16000);
+  EXPECT_EQ(frames[0].channel_count, 1u);
+  EXPECT_EQ(frames[0].sample_count, 3u);
+  EXPECT_EQ(frames[0].data[2], 303);
+}
+
+TEST(AgentRuntimeTypedDispatch,
+     AppOutputConversationItemSinkReceivesItemFromTypedRoute) {
+  AgentRuntime runtime;
+
+  auto src = std::make_unique<MockIoDevice>(
+      "src",
+      std::vector<io::PortDescriptor>{
+          PD("item_out", io::PortDirection::kOutput,
+             PortPayloadKind::kConversationItem),
+      });
+  auto* src_ptr = src.get();
+
+  runtime.RegisterDevice(std::move(src));
+  runtime.AddRoute(PA("src", "item_out"), PA("app_output", "item_in"));
+
+  std::mutex mu;
+  std::vector<core::ConversationItem> items;
+  runtime.OnConversationItemSink([&](core::ConversationItem item) {
+    std::lock_guard<std::mutex> lock(mu);
+    items.push_back(std::move(item));
+  });
+
+  core::ConversationItem item;
+  item.item_id = "sink_item";
+  item.conversation_id = "conv_sink";
+  item.kind = core::ConversationItemKind::kAssistantMessage;
+  item.actor = {"assistant", "Assistant", core::ActorKind::kAssistant};
+  item.parts.emplace_back(core::TextPart{"typed sink"});
+
+  runtime.StartAll();
+  src_ptr->EmitConversationItemOutput("item_out", item);
+  runtime.Shutdown();
+
+  std::lock_guard<std::mutex> lock(mu);
+  ASSERT_EQ(items.size(), 1u);
+  EXPECT_EQ(items[0].item_id, "sink_item");
+  EXPECT_EQ(items[0].conversation_id, "conv_sink");
 }
 
 }  // namespace

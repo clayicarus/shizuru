@@ -1,44 +1,5 @@
 include(FetchContent)
 
-# httplib is used only for the mock HTTP server in tool_call example.
-FetchContent_Declare(
-  httplib
-  URL      https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.1.tar.gz
-)
-set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(httplib)
-
-# Audio loopback example (requires PortAudio hardware)
-add_executable(audio_loopback audio_loopback.cpp)
-target_link_libraries(audio_loopback PRIVATE shizuru_audio)
-
-# Tool call example (self-contained with mock LLM server)
-add_executable(tool_call_example tool_call.cpp)
-target_link_libraries(tool_call_example
-  PRIVATE shizuru_runtime
-  PRIVATE shizuru_llm_openai
-  PRIVATE httplib::httplib
-  PRIVATE nlohmann_json::nlohmann_json
-)
-
-# WAV file playout example
-add_executable(wav_playout wav_playout.cpp)
-target_link_libraries(wav_playout PRIVATE shizuru_audio)
-
-# TTS playout example: ElevenLabs streaming TTS → PortAudio player
-add_executable(elevenlabs_tts_playout elevenlabs_tts_playout.cpp)
-target_link_libraries(elevenlabs_tts_playout
-  PRIVATE shizuru_tts_elevenlabs
-  PRIVATE shizuru_audio
-)
-
-# Baidu voice integration test
-add_executable(baidu_voice_test baidu_voice_test.cpp)
-target_link_libraries(baidu_voice_test
-  PRIVATE shizuru_asr_baidu
-  PRIVATE shizuru_tts_baidu
-)
-
 # Voice pipeline: Microphone → VAD → Baidu ASR → Baidu TTS → Speaker
 add_executable(asr_tts_echo_pipeline asr_tts_echo_pipeline.cpp)
 target_link_libraries(asr_tts_echo_pipeline
@@ -71,13 +32,6 @@ target_include_directories(voice_agent
   PRIVATE ${CMAKE_SOURCE_DIR}
   PRIVATE ${CMAKE_SOURCE_DIR}/services
   PRIVATE ${CMAKE_SOURCE_DIR}/io
-)
-
-# Multimodal chat: test interleaved text + image_url content parts
-add_executable(multimodal_chat multimodal_chat.cpp)
-target_link_libraries(multimodal_chat
-  PRIVATE nlohmann_json::nlohmann_json
-  PRIVATE CURL::libcurl
 )
 
 # OneBot 11 agent: Reverse WebSocket → CoreDevice → console + private reply

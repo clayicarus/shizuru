@@ -21,7 +21,7 @@ namespace shizuru::io {
 
 // ElevenLabs implementation of TtsDevice.
 // Wraps ElevenLabsClient: accepts assistant ConversationItems on "item_in",
-// emits audio/pcm DataFrames on "audio_out".
+// emits typed AudioFrames on "audio_out".
 // OnConversationItem() is non-blocking: synthesis is posted to an internal
 // worker thread.
 class ElevenLabsTtsDevice : public TtsDevice {
@@ -39,12 +39,11 @@ class ElevenLabsTtsDevice : public TtsDevice {
   // IoDevice interface
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
-  void OnInput(const std::string& port_name, DataFrame frame) override;
   void OnConversationItem(const std::string& port_name,
                           core::ConversationItem item) override;
   void OnControlSignal(const std::string& port_name,
                        core::ControlSignal signal) override;
-  void SetOutputCallback(OutputCallback cb) override;
+  void SetAudioFrameOutputCallback(AudioFrameOutputCallback cb) override;
   void Start() override;
   void Stop() override;
 
@@ -55,7 +54,6 @@ class ElevenLabsTtsDevice : public TtsDevice {
   void WorkerLoop();
   void Synthesize(const std::string& text);
 
-  static constexpr char kTextIn[]    = "text_in";
   static constexpr char kItemIn[]    = "item_in";
   static constexpr char kAudioOut[]  = "audio_out";
   static constexpr char kSignalIn[]  = "signal_in";
@@ -65,7 +63,7 @@ class ElevenLabsTtsDevice : public TtsDevice {
   std::atomic<bool> active_{false};
 
   mutable std::mutex output_cb_mutex_;
-  OutputCallback output_cb_;
+  AudioFrameOutputCallback audio_output_cb_;
 
   // Internal worker thread + task queue (replaces per-OnInput thread).
   std::mutex worker_mutex_;

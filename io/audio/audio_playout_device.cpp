@@ -1,33 +1,11 @@
 #include "audio_playout_device.h"
 
-#include <algorithm>
-#include <cassert>
-#include <cstring>
 #include <string>
 #include <utility>
 
 #include "async_logger.h"
 
 namespace shizuru::io {
-
-namespace {
-
-AudioFrame AudioFrameFromDataFrame(const DataFrame& frame) {
-  AudioFrame af;
-  auto it = frame.metadata.find("sample_rate");
-  if (it != frame.metadata.end()) { af.sample_rate = std::stoi(it->second); }
-  it = frame.metadata.find("channel_count");
-  if (it != frame.metadata.end()) {
-    af.channel_count = static_cast<size_t>(std::stoi(it->second));
-  }
-  const size_t total = frame.payload.size() / sizeof(int16_t);
-  const size_t capped = std::min(total, kMaxSamplesPerFrame);
-  af.sample_count = af.channel_count == 0 ? 0 : capped / af.channel_count;
-  std::memcpy(af.data, frame.payload.data(), capped * sizeof(int16_t));
-  return af;
-}
-
-}  // namespace
 
 AudioPlayoutDevice::AudioPlayoutDevice(std::unique_ptr<AudioPlayer> player,
                                        std::string device_id)
@@ -42,13 +20,6 @@ std::vector<PortDescriptor> AudioPlayoutDevice::GetPortDescriptors() const {
       {kSignalIn,  PortDirection::kInput, "",
                    runtime::PortPayloadKind::kControlSignal},
   };
-}
-
-void AudioPlayoutDevice::OnInput(const std::string& port_name,
-                                  DataFrame frame) {
-  if (port_name != kAudioIn) { return; }
-  if (frame.payload.empty()) { return; }
-  OnAudioFrame(port_name, AudioFrameFromDataFrame(frame));
 }
 
 void AudioPlayoutDevice::OnAudioFrame(const std::string& port_name,
@@ -70,10 +41,6 @@ void AudioPlayoutDevice::OnControlSignal(const std::string& port_name,
     LOG_INFO("AudioPlayoutDevice: typed signal_in received cancel-like signal");
     player_->Flush();
   }
-}
-
-void AudioPlayoutDevice::SetOutputCallback(OutputCallback /*cb*/) {
-  // Playout device has no outputs.
 }
 
 void AudioPlayoutDevice::Start() { player_->Start(); }

@@ -11,7 +11,6 @@
 namespace shizuru::runtime {
 
 constexpr char AgentRuntime::kAppOutputDeviceId[];
-constexpr char AgentRuntime::kAppOutputFrameInPort[];
 constexpr char AgentRuntime::kAppOutputAudioInPort[];
 constexpr char AgentRuntime::kAppOutputItemInPort[];
 constexpr char AgentRuntime::kAppOutputControlInPort[];
@@ -22,6 +21,18 @@ AgentRuntime::~AgentRuntime() {
   Shutdown();
 }
 
+std::optional<io::PortDescriptor> AgentRuntime::FindPortDescriptor(
+    const std::string& device_id,
+    const std::string& port_name) const {
+  auto dev_it = devices_.find(device_id);
+  if (dev_it == devices_.end()) { return std::nullopt; }
+  const auto ports = dev_it->second.device->GetPortDescriptors();
+  for (const auto& port : ports) {
+    if (port.name == port_name) { return port; }
+  }
+  return std::nullopt;
+}
+
 // ---------------------------------------------------------------------------
 // Device management
 // ---------------------------------------------------------------------------
@@ -30,12 +41,6 @@ void AgentRuntime::RegisterDevice(std::unique_ptr<io::IoDevice> device,
                                   DeviceOptions options) {
   const std::string id = device->GetDeviceId();
 
-  // Wire the device's output callbacks to the runtime bus before taking the lock.
-  device->SetOutputCallback(
-      [this](const std::string& device_id, const std::string& port_name,
-             io::DataFrame frame) {
-        DispatchFrame(device_id, port_name, std::move(frame));
-      });
   device->SetAudioFrameOutputCallback(
       [this](const std::string& device_id, const std::string& port_name,
              io::AudioFrame frame) {
@@ -94,19 +99,7 @@ void AgentRuntime::AddRoute(PortAddress source, PortAddress destination,
                             RouteOptions options) {
   std::unique_lock<std::shared_mutex> lock(devices_mutex_);
 
-  auto find_port = [&](const std::string& device_id,
-                       const std::string& port_name)
-      -> std::optional<io::PortDescriptor> {
-    auto dev_it = devices_.find(device_id);
-    if (dev_it == devices_.end()) { return std::nullopt; }
-    const auto ports = dev_it->second.device->GetPortDescriptors();
-    for (const auto& port : ports) {
-      if (port.name == port_name) { return port; }
-    }
-    return std::nullopt;
-  };
-
-  const auto src_port = find_port(source.device_id, source.port_name);
+  const auto src_port = FindPortDescriptor(source.device_id, source.port_name);
   if (!src_port.has_value()) {
     throw std::invalid_argument(
         "Route source port not found: " + source.device_id + ":" + source.port_name);
@@ -116,13 +109,10 @@ void AgentRuntime::AddRoute(PortAddress source, PortAddress destination,
         "Route source port is not an output: " + source.device_id + ":" + source.port_name);
   }
 
-  // app_output remains a special virtual sink during migration, but it must
-  // still obey the new typed-plane contract: the virtual port name must match
-  // the payload kind.
+  // app_output remains a special virtual sink and must obey the typed-plane
+  // contract: the virtual port name must match the payload kind.
   if (destination.device_id == kAppOutputDeviceId) {
     const bool port_matches =
-        (src_port->payload_kind == PortPayloadKind::kLegacyFrame &&
-         destination.port_name == kAppOutputFrameInPort) ||
         (src_port->payload_kind == PortPayloadKind::kAudioFrame &&
          destination.port_name == kAppOutputAudioInPort) ||
         (src_port->payload_kind == PortPayloadKind::kConversationItem &&
@@ -135,7 +125,7 @@ void AgentRuntime::AddRoute(PortAddress source, PortAddress destination,
     }
   } else {
     const auto dst_port =
-        find_port(destination.device_id, destination.port_name);
+        FindPortDescriptor(destination.device_id, destination.port_name);
     if (!dst_port.has_value()) {
       throw std::invalid_argument(
           "Route destination port not found: " + destination.device_id + ":" +
@@ -192,7 +182,7 @@ void AgentRuntime::StartAll() {
 
 void AgentRuntime::Shutdown() {
   // Move all ownership out under the lock, then stop outside the lock.
-  // This avoids deadlock: device callbacks may call DispatchFrame which
+  // This avoids deadlock: device callbacks may call dispatch helpers which
   // acquires a shared (read) lock.  If we held a unique (write) lock
   // while calling Stop(), the callback thread would block — deadlock.
   std::vector<std::pair<std::string, std::unique_ptr<io::IoDevice>>> to_stop;
@@ -238,13 +228,8 @@ void AgentRuntime::StopDevice(const std::string& device_id) {
 }
 
 // ---------------------------------------------------------------------------
-// Frame sink
+// App output sink
 // ---------------------------------------------------------------------------
-
-void AgentRuntime::OnFrameSink(FrameSinkCallback cb) {
-  std::lock_guard<std::mutex> lock(sink_cb_mutex_);
-  sink_cb_ = std::move(cb);
-}
 
 void AgentRuntime::OnAudioFrameSink(AudioFrameSinkCallback cb) {
   std::lock_guard<std::mutex> lock(sink_cb_mutex_);
@@ -265,50 +250,19 @@ void AgentRuntime::OnControlSignalSink(ControlSignalSinkCallback cb) {
 // Internal routing
 // ---------------------------------------------------------------------------
 
-void AgentRuntime::DispatchFrame(const std::string& device_id,
-                                 const std::string& port_name,
-                                 io::DataFrame frame) {
-  const PortAddress source{device_id, port_name};
-
-  std::shared_lock<std::shared_mutex> lock(devices_mutex_);
-  auto destinations = route_table_.Lookup(source);
-
-  if (destinations.empty()) { return; }
-
-  for (const auto& [dest, opts] : destinations) {
-    // Virtual app_output sink — deliver to the registered callback.
-    if (dest.device_id == kAppOutputDeviceId) {
-      FrameSinkCallback cb;
-      {
-        std::lock_guard<std::mutex> lock2(sink_cb_mutex_);
-        cb = sink_cb_;
-      }
-      if (cb) { cb(frame); }
-      continue;
-    }
-
-    auto it = devices_.find(dest.device_id);
-    if (it == devices_.end()) {
-      LOG_WARN("[{}] Route destination not found: {}", MODULE_NAME,
-               dest.device_id);
-      continue;
-    }
-
-    try {
-      it->second.device->OnInput(dest.port_name, frame);
-    } catch (const std::exception& e) {
-      LOG_ERROR("[{}] Error delivering frame to {}:{} — {}", MODULE_NAME,
-                dest.device_id, dest.port_name, e.what());
-    }
-  }
-}
-
 void AgentRuntime::DispatchAudioFrame(const std::string& device_id,
                                       const std::string& port_name,
                                       io::AudioFrame frame) {
   const PortAddress source{device_id, port_name};
 
   std::shared_lock<std::shared_mutex> lock(devices_mutex_);
+  const auto src_port = FindPortDescriptor(device_id, port_name);
+  if (!src_port.has_value()) { return; }
+  if (src_port->payload_kind != PortPayloadKind::kAudioFrame) {
+    LOG_WARN("[{}] Dropping audio frame emitted on non-audio port {}:{}",
+             MODULE_NAME, device_id, port_name);
+    return;
+  }
   auto destinations = route_table_.Lookup(source);
   if (destinations.empty()) { return; }
 
@@ -341,6 +295,13 @@ void AgentRuntime::DispatchConversationItem(const std::string& device_id,
   const PortAddress source{device_id, port_name};
 
   std::shared_lock<std::shared_mutex> lock(devices_mutex_);
+  const auto src_port = FindPortDescriptor(device_id, port_name);
+  if (!src_port.has_value()) { return; }
+  if (src_port->payload_kind != PortPayloadKind::kConversationItem) {
+    LOG_WARN("[{}] Dropping conversation item emitted on non-item port {}:{}",
+             MODULE_NAME, device_id, port_name);
+    return;
+  }
   auto destinations = route_table_.Lookup(source);
   if (destinations.empty()) { return; }
 
@@ -373,6 +334,13 @@ void AgentRuntime::DispatchControlSignal(const std::string& device_id,
   const PortAddress source{device_id, port_name};
 
   std::shared_lock<std::shared_mutex> lock(devices_mutex_);
+  const auto src_port = FindPortDescriptor(device_id, port_name);
+  if (!src_port.has_value()) { return; }
+  if (src_port->payload_kind != PortPayloadKind::kControlSignal) {
+    LOG_WARN("[{}] Dropping control signal emitted on non-control port {}:{}",
+             MODULE_NAME, device_id, port_name);
+    return;
+  }
   auto destinations = route_table_.Lookup(source);
   if (destinations.empty()) { return; }
 

@@ -5,7 +5,7 @@
 namespace shizuru::io {
 
 // Vendor-agnostic ASR request type.
-// The actual audio data flows as DataFrames through the device ports;
+// The actual audio data flows as typed AudioFrames through the device ports;
 // this struct is an informational type for configuration and metadata.
 struct AsrRequest {
   std::string audio_format;   // e.g. "audio/pcm", "audio/wav"
@@ -13,7 +13,7 @@ struct AsrRequest {
 };
 
 // Vendor-agnostic ASR result type.
-// The actual transcript flows as DataFrames on the text_out port;
+// The actual transcript flows as ConversationItems on the item_out port;
 // this struct is an informational type for result metadata.
 struct AsrResult {
   std::string transcript;     // Recognized text

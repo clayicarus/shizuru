@@ -37,16 +37,16 @@ source _env.sh   # set API keys
 
 ## Architecture Overview
 
-The runtime is a device bus. Every component — audio capture, VAD, ASR, TTS, the agent core — is an `IoDevice`. Data flows between devices as `DataFrame` packets routed by a `RouteTable`. `AgentRuntime` owns the bus and does zero data transformation.
+The runtime is a device bus. Every component — audio capture, VAD, ASR, TTS, the agent core — is an `IoDevice`. Data flows between devices as typed payloads routed by a `RouteTable`. `AgentRuntime` owns the bus and does zero semantic transformation.
 
 ```
-IoDevice  →  OutputCallback  →  AgentRuntime::DispatchFrame  →  RouteTable  →  IoDevice::OnInput
+IoDevice typed output callback  →  AgentRuntime dispatch  →  RouteTable  →  IoDevice typed input
 ```
 
 Key invariants to preserve:
 
-- `AgentRuntime::DispatchFrame` must never transform frame data.
-- `CoreDevice` is the only place that translates between `DataFrame` and core types (`Observation`, `ActionCandidate`).
+- `AgentRuntime` must only route typed payloads; it must not translate between audio, semantic, or control planes.
+- `CoreDevice` is the only place that bridges runtime bus types and core dialogue semantics.
 - All control decisions originate from `CoreDevice` (i.e., from the LLM or user input). IO devices are passive — they sense and execute, they do not decide.
 - `RouteTable` is the single source of truth for all data flow topology. Do not hardcode device-to-device calls.
 - DMA routes (`requires_control_plane = false`) must not involve the LLM or controller in their data path.
@@ -81,37 +81,29 @@ The following tracks are prioritized in order. Please coordinate before starting
 
 T1-1 through T1-6 are complete. T1-7 is planned.
 
-- **T1-1** ✅ `AgentRuntime::DispatchFrame`: `std::shared_mutex` added to protect `devices_` and `route_table_`. `DispatchFrame` holds a shared lock; `RegisterDevice`, `UnregisterDevice`, `AddRoute`, `RemoveRoute`, and `Shutdown` hold a unique lock.
+- **T1-1** ✅ `AgentRuntime` dispatch paths use `std::shared_mutex` to protect `devices_` and `route_table_` while audio/item/control payloads are routed.
 - **T1-2** ✅ `BaiduAsrDevice::Flush()`: blocking `join` removed from PortAudio callback thread. Internal worker thread + task queue introduced; `Flush()` snapshots audio and posts a task, returning immediately.
-- **T1-3** ✅ `ElevenLabsTtsDevice::OnInput`: blocking `join` removed from `Controller::loop_thread_`. Same pattern: internal worker thread + task queue; `OnInput` posts text and returns immediately.
+- **T1-3** ✅ `ElevenLabsTtsDevice::OnConversationItem`: blocking `join` removed from `Controller::loop_thread_`. Internal worker thread + task queue posts synthesis work and returns immediately.
 - **T1-4** ✅ `CoreDevice::active_`: changed from `bool` to `std::atomic<bool>`.
 - **T1-5** ✅ `Controller` callbacks: `OnResponse`, `OnTransition`, `OnDiagnostic` now assert that `loop_thread_` is not yet running, enforcing pre-`Start()` registration.
 - **T1-6** ✅ `AudioPlayoutDevice`: debug `static fopen` / `fwrite` removed from production code path.
 - **T1-7** `IoExecutor`: introduce a shared thread pool in `AgentRuntime` for network I/O tasks. `BaiduAsrDevice` and `ElevenLabsTtsDevice` replace their per-device worker threads with an injected `Executor&`. Audio-path devices (capture, VAD, playout) are unaffected — they run on PortAudio's real-time thread and must not share the pool. Enables future migration to a lock-free MPSC queue without changing device code.
 
-### Phase B — Core / Tool Call Decoupling (Priority: Medium)
+### Phase B — Core / Tool Call Decoupling (Completed)
 
-Decouple `Controller` from `IoBridge` so that tool execution is a proper IO round-trip through the device bus, not a synchronous in-process call.
+`Controller` is decoupled from direct tool execution. Tool calls now make a proper typed runtime round-trip through `ToolDispatchDevice`.
 
-- **T2-1** Remove `std::unique_ptr<IoBridge> io_` from `Controller`. `HandleActing` emits an `action/tool_call` DataFrame on `action_out`, leaves state in `kActing`, and waits for a `kToolResult` observation to arrive via the queue. Inject a `CancelCallback` (`std::function<void()>`) for interrupt handling.
-- **T2-2** Remove `InterceptingIoBridge` from `CoreDevice`. The `action_out` emit logic moves into `Controller` directly.
-- **T2-3** Add `ToolDispatchDevice` (`services/io/tool_dispatch_device.h/.cpp`): an `IoDevice` that holds a `ToolRegistry&`, receives `action/tool_call` frames on `action_in`, executes the tool, and emits `action/tool_result` frames on `result_out`.
-- **T2-4** In `AgentRuntime::StartSession`, register `ToolDispatchDevice` and add routes:
-  ```
-  core:action_out          → tool_dispatch:action_in
-  tool_dispatch:result_out → core:tool_result_in
-  ```
-- **T2-5** Update `core_device_test` and `controller_test` to remove `IoBridge` mocks and test the new async round-trip.
+- **T2-1** ✅ `Controller` emits tool call intent through `CoreDevice.signal_out` as `ToolCallStartSignal`.
+- **T2-2** ✅ `ToolDispatchDevice` receives typed control input on `control_in`, executes the tool, and emits `ToolResultSignal` on `signal_out`.
+- **T2-3** ✅ `CoreDevice` receives typed tool results on `control_in` and reconstructs the `ConversationItem(kToolResult)` for history.
 
-### Phase C — Control Plane via DataFrame (Priority: Medium)
+### Phase C — Typed Control Plane (Completed)
 
-All control signals originate from `CoreDevice`. IO devices are passive and receive commands through a dedicated `control_in` port, keeping `RouteTable` as the single topology source of truth.
+All control signals travel as typed `ControlSignal` variants through runtime routes. IO devices are passive and react to the signals they support.
 
-- **T3-1** Add `control_out` output port to `CoreDevice`. `Controller` emits control frames (e.g., on `HandleInterrupt`, `HandleResponding`) using a simple JSON payload: `{"command": "cancel"}`, `{"command": "flush"}`.
-- **T3-2** Define the control frame protocol in a shared header (`io/control_frame.h` or similar): enumerate supported commands and their payloads.
-- **T3-3** Add `control_in` input port to `ElevenLabsTtsDevice`, `AudioPlayoutDevice`, and `BaiduAsrDevice`. Each device responds to the commands it supports (`cancel`, `flush`, etc.).
-- **T3-4** Remove the direct `asr_ptr->Flush()` call from `VadEventDevice`. Replace with: VAD emits `vad/event` → CoreDevice receives it as an observation → CoreDevice emits `control/flush` on `control_out` → routed to `BaiduAsrDevice:control_in`. All control flow now passes through core.
-- **T3-5** Update `voice_agent.cpp` and other examples to add the new control routes.
+- **T3-1** ✅ `CoreDevice`, `ToolDispatchDevice`, `BaiduAsrDevice`, `ElevenLabsTtsDevice`, `AudioPlayoutDevice`, and `EnergyVadDevice` use typed control ports.
+- **T3-2** ✅ `InterruptSignal`, `FlushSignal`, `CancelSignal`, `ToolCallStartSignal`, and `ToolResultSignal` define the control plane protocol.
+- **T3-3** ✅ VAD-triggered interruption and ASR flush are routed through typed runtime edges instead of side-channel calls or frame protocols.
 
 ### Phase D — Software 3A for Desktop (Priority: Low, desktop-only)
 
